@@ -1945,6 +1945,13 @@ async function loadCurrentProfile(){
 function enterBackOffice(){
   if(!currentProfile){ showPage('login'); return; }
 
+  // If an admin set a temp password, force the user to change it before anything else
+  if(currentProfile.must_change_password){
+    showPage('backoffice');
+    setTimeout(() => openForcePasswordChangeModal(), 100);
+    return;
+  }
+
   // Update header with avatar + name
   const p = currentProfile;
   const avatarWrap = document.getElementById('bo-user-avatar-wrap');
@@ -2716,7 +2723,7 @@ async function renderAgents(el){
             // Owner is ONLY editable/deletable by owner. Managers can't touch other managers/admins/owners.
             const canEdit = isOwner || (isAdmin && a.role !== 'owner') || (isManager && ['agent','team_lead'].includes(a.role)) || isSelf;
             const canDelete = isOwner && !isSelf; // owner only, can't delete self
-            const canResetPw = isOwner && !isSelf;
+            const canResetPw = (isOwner || isAdmin) && !isSelf && !(currentProfile.role === 'admin' && a.role === 'owner');
             const canToggleActive = (isOwner || isAdmin || (isManager && ['agent','team_lead'].includes(a.role))) && !isSelf;
             return `
             <tr data-agent-id="${a.id}" data-search="${(a.full_name + ' ' + a.email).toLowerCase()}">
@@ -3049,33 +3056,156 @@ async function deleteAgent(id, name){
   renderMainContent();
 }
 
-// ─── Reset password (owner only — note: true reset requires server-side) ───
-function openResetPasswordModal(userId){
-  if(currentProfile.role !== 'owner'){ alert('Only the owner can reset passwords.'); return; }
+// ─── Password management (owner + admin, with restrictions) ───
+async function openResetPasswordModal(userId){
+  const isOwner = currentProfile.role === 'owner';
+  const isAdmin = isOwner || currentProfile.role === 'admin';
+  if(!isAdmin){ alert('Only owners and admins can manage passwords.'); return; }
+
+  // Prevent admin from touching owner's password
+  const { data: target } = await sb.from('profiles').select('full_name,email,role').eq('id', userId).single();
+  if(!target){ alert('User not found.'); return; }
+  if(target.role === 'owner' && !isOwner){ alert('Admins cannot change the owner\'s password.'); return; }
+
   document.getElementById('modal-box').innerHTML = `
-    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:28px;color:#fff;margin-bottom:14px;letter-spacing:1px;">🔑 Reset Password</h2>
-    <div style="background:rgba(255,193,7,0.08);border:1px solid rgba(255,193,7,0.25);border-radius:10px;padding:14px;margin-bottom:16px;font-size:13px;color:rgba(255,255,255,0.75);line-height:1.6;">
-      <strong style="color:#FFD700;">Note:</strong> True password reset from the admin side requires Supabase's Admin API (server-side). For now, you can send this user a password-reset email — they'll get a link to set a new password themselves. This is more secure anyway.
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:28px;color:#fff;margin-bottom:6px;letter-spacing:1px;">🔑 Manage Password</h2>
+    <div style="font-size:13px;color:rgba(255,255,255,0.55);margin-bottom:18px;">For <strong style="color:#fff;">${escapeHtml(target.full_name || target.email)}</strong></div>
+
+    <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:14px;margin-bottom:14px;">
+      <div style="font-size:12px;font-weight:700;letter-spacing:1.5px;color:#00FF88;text-transform:uppercase;margin-bottom:8px;">🎲 Option 1 — Generate Temp Password</div>
+      <div style="font-size:12px;color:rgba(255,255,255,0.55);line-height:1.55;margin-bottom:10px;">Create a random 12-character password. It will be shown to you once — copy it and send it to the user through your own channel.</div>
+      <button class="bo-btn bo-btn-primary" style="padding:8px 18px;font-size:13px;" onclick="generateAndSetPassword('${userId}')">Generate & Set Random Password</button>
+      <div id="pwm-generated" style="margin-top:12px;"></div>
     </div>
-    <div style="display:flex;gap:10px;">
-      <button class="bo-btn bo-btn-primary" onclick="sendPasswordResetEmail('${userId}')">Send Reset Email</button>
-      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+
+    <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:14px;margin-bottom:14px;">
+      <div style="font-size:12px;font-weight:700;letter-spacing:1.5px;color:#00C6FF;text-transform:uppercase;margin-bottom:8px;">✏️ Option 2 — Set Custom Password</div>
+      <input id="pwm-custom" type="text" class="form-input" style="margin-bottom:8px;" placeholder="Type the new password (min 6 chars)" autocomplete="off"/>
+      <button class="bo-btn bo-btn-primary" style="padding:8px 18px;font-size:13px;" onclick="setCustomPassword('${userId}')">Save Custom Password</button>
     </div>
-    <div id="pwr-msg" style="margin-top:12px;font-size:13px;"></div>`;
+
+    <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:14px;margin-bottom:14px;">
+      <div style="font-size:12px;font-weight:700;letter-spacing:1.5px;color:#FFD700;text-transform:uppercase;margin-bottom:8px;">📧 Option 3 — Email Reset Link</div>
+      <div style="font-size:12px;color:rgba(255,255,255,0.55);line-height:1.55;margin-bottom:10px;">Send the user a link via email so they can pick their own password. Most private — you never see the password.</div>
+      <button class="bo-btn bo-btn-ghost" style="padding:8px 18px;font-size:13px;" onclick="sendPasswordResetEmail('${userId}')">Send Reset Email</button>
+    </div>
+
+    <div style="margin-top:14px;text-align:right;">
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Close</button>
+    </div>
+    <div id="pwm-msg" style="margin-top:12px;font-size:13px;"></div>`;
   document.getElementById('modal-backdrop').style.display = 'flex';
 }
 
+function genRandomPassword(){
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+  let p = '';
+  for(let i=0; i<12; i++) p += chars[Math.floor(Math.random()*chars.length)];
+  return p;
+}
+
+async function generateAndSetPassword(userId){
+  const pw = genRandomPassword();
+  const genDisplay = document.getElementById('pwm-generated');
+  const msg = document.getElementById('pwm-msg');
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Setting password…</span>';
+
+  try {
+    const { data, error } = await sb.functions.invoke('admin-set-password', {
+      body: { user_id: userId, new_password: pw }
+    });
+    if(error || data?.error){
+      msg.innerHTML = '<span style="color:#F87171;">'+(data?.error || error.message || 'Failed')+'</span>';
+      return;
+    }
+    genDisplay.innerHTML = `
+      <div style="background:rgba(0,255,136,0.08);border:1px solid rgba(0,255,136,0.3);border-radius:8px;padding:12px;">
+        <div style="font-size:11px;color:#00FF88;font-weight:700;letter-spacing:1.5px;margin-bottom:6px;">✓ NEW PASSWORD SET</div>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <input type="text" value="${pw}" readonly style="flex:1;padding:8px;background:#0a0a0a;color:#fff;border:1px solid rgba(255,255,255,0.15);border-radius:6px;font-family:Menlo,monospace;font-size:14px;" onfocus="this.select()"/>
+          <button class="bo-btn bo-btn-ghost" style="padding:6px 12px;font-size:11px;" onclick="navigator.clipboard.writeText('${pw}');this.textContent='✓ Copied'">Copy</button>
+        </div>
+        <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-top:8px;line-height:1.5;">Copy this now and send it to the user securely (text, private message, etc.). They'll be prompted to change it on next login.</div>
+      </div>`;
+    msg.innerHTML = '';
+  } catch(e){
+    msg.innerHTML = '<span style="color:#F87171;">Error: '+e.message+'. Make sure the admin-set-password Edge Function is deployed.</span>';
+  }
+}
+
+async function setCustomPassword(userId){
+  const pw = document.getElementById('pwm-custom').value;
+  const msg = document.getElementById('pwm-msg');
+  if(!pw || pw.length < 6){ msg.innerHTML = '<span style="color:#F87171;">Password must be at least 6 characters.</span>'; return; }
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Setting password…</span>';
+
+  try {
+    const { data, error } = await sb.functions.invoke('admin-set-password', {
+      body: { user_id: userId, new_password: pw }
+    });
+    if(error || data?.error){
+      msg.innerHTML = '<span style="color:#F87171;">'+(data?.error || error.message || 'Failed')+'</span>';
+      return;
+    }
+    msg.innerHTML = '<span style="color:#00FF88;">✓ Password set. Remember to share it with the user — we won\'t display it again. They will be prompted to change it on next login.</span>';
+    document.getElementById('pwm-custom').value = '';
+  } catch(e){
+    msg.innerHTML = '<span style="color:#F87171;">Error: '+e.message+'. Make sure the admin-set-password Edge Function is deployed.</span>';
+  }
+}
+
 async function sendPasswordResetEmail(userId){
-  const msg = document.getElementById('pwr-msg');
+  const msg = document.getElementById('pwm-msg');
   msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Sending…</span>';
-  // Look up the email
   const { data: profile } = await sb.from('profiles').select('email').eq('id', userId).single();
   if(!profile){ msg.innerHTML = '<span style="color:#F87171;">User not found.</span>'; return; }
   const { error } = await sb.auth.resetPasswordForEmail(profile.email, {
     redirectTo: window.location.origin + '/#reset-password'
   });
   if(error){ msg.innerHTML = '<span style="color:#F87171;">'+error.message+'</span>'; return; }
-  msg.innerHTML = '<span style="color:#00FF88;">✓ Reset email sent to ' + profile.email + '. They\'ll receive a link to set a new password.</span>';
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Reset email sent to ' + profile.email + '.</span>';
+}
+
+// Forced password change on first login after admin reset
+function openForcePasswordChangeModal(){
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:28px;color:#fff;margin-bottom:6px;letter-spacing:1px;">🔑 Set Your Own Password</h2>
+    <div style="background:rgba(255,193,7,0.08);border:1px solid rgba(255,193,7,0.25);border-radius:10px;padding:14px;margin-bottom:18px;font-size:13px;color:rgba(255,255,255,0.8);line-height:1.6;">
+      Your password was set by an administrator. For security, please choose a new password only you know before continuing.
+    </div>
+    <div class="form-group"><label class="form-label">New Password *</label><input type="password" id="fpc-new" class="form-input" autocomplete="new-password"/></div>
+    <div class="form-group"><label class="form-label">Confirm Password *</label><input type="password" id="fpc-confirm" class="form-input" autocomplete="new-password"/></div>
+    <div style="display:flex;gap:10px;margin-top:16px;">
+      <button class="bo-btn bo-btn-primary" onclick="saveForcedPasswordChange()">Save & Continue</button>
+      <button class="bo-btn bo-btn-ghost" onclick="doLogout()">Log Out</button>
+    </div>
+    <div id="fpc-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-backdrop').style.display = 'flex';
+  // Prevent closing via backdrop click
+  document.getElementById('modal-backdrop').onclick = (e) => { if(e.target.id === 'modal-backdrop') e.stopPropagation(); };
+}
+
+async function saveForcedPasswordChange(){
+  const pw1 = document.getElementById('fpc-new').value;
+  const pw2 = document.getElementById('fpc-confirm').value;
+  const msg = document.getElementById('fpc-msg');
+  if(!pw1 || pw1.length < 6){ msg.innerHTML = '<span style="color:#F87171;">Password must be at least 6 characters.</span>'; return; }
+  if(pw1 !== pw2){ msg.innerHTML = '<span style="color:#F87171;">Passwords do not match.</span>'; return; }
+
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Saving…</span>';
+  const { error } = await sb.auth.updateUser({ password: pw1 });
+  if(error){ msg.innerHTML = '<span style="color:#F87171;">'+error.message+'</span>'; return; }
+
+  // Clear the flag
+  await sb.from('profiles').update({ must_change_password: false }).eq('id', currentProfile.id);
+  currentProfile.must_change_password = false;
+
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Password updated. Loading your back office…</span>';
+  setTimeout(() => {
+    closeAllModals();
+    document.getElementById('modal-backdrop').onclick = null;
+    enterBackOffice();
+  }, 900);
 }
 
 // ─── Avatar upload ───
@@ -4273,6 +4403,17 @@ function initDaily(meeting, token, displayName, isHost){
   const url = meeting.meeting_url + '?t=' + token;
   const container = document.getElementById('daily-container');
 
+  // Custom tray buttons: agents get a "Request to Record" button; host gets "Admit All"
+  const customTrayButtons = isHost
+    ? {}
+    : {
+        requestRecord: {
+          iconPath: 'https://www.svgrepo.com/show/489101/record.svg',
+          label: 'Request Record',
+          tooltip: 'Ask host for permission to record'
+        }
+      };
+
   const callFrame = window.DailyIframe.createFrame(container, {
     iframeStyle: {
       width: '100%',
@@ -4282,6 +4423,7 @@ function initDaily(meeting, token, displayName, isHost){
     },
     showLeaveButton: true,
     showFullscreenButton: true,
+    customTrayButtons,
     theme: {
       colors: {
         accent: '#FF6B00',
@@ -4299,15 +4441,18 @@ function initDaily(meeting, token, displayName, isHost){
   });
 
   window._dailyCallFrame = callFrame;
+  window._dailyMeeting = meeting;
+  window._dailyIsHost = isHost;
+  window._recordingApprovedUsers = new Set();  // user_ids who've been granted permission
 
-  // Auto-admit all knockers if host (per user spec: host joins → everyone in)
+  // Host behaviors
   if(isHost){
+    // Auto-admit all knockers
     callFrame.on('waiting-participant-added', async (ev) => {
       try {
         await callFrame.updateWaitingParticipant(ev.participant.id, { grantRequestedAccess: true });
       } catch(e){ console.warn('Auto-admit failed:', e); }
     });
-    // Also sweep any already-waiting participants when host joins
     callFrame.on('joined-meeting', async () => {
       try {
         const waiting = callFrame.waitingParticipants();
@@ -4315,6 +4460,42 @@ function initDaily(meeting, token, displayName, isHost){
           try { await callFrame.updateWaitingParticipant(id, { grantRequestedAccess: true }); } catch(e){}
         }
       } catch(e){ /* ignore */ }
+    });
+
+    // Listen for "request to record" app messages from agents
+    callFrame.on('app-message', (ev) => {
+      const msg = ev.data;
+      if(msg && msg.type === 'request_record'){
+        handleRecordRequest(ev.fromId, msg.userName || 'A participant');
+      }
+    });
+
+    // Auto-start recording if host enabled it when scheduling (host can always record)
+    if(meeting.recording_enabled){
+      callFrame.on('joined-meeting', () => {
+        setTimeout(() => {
+          try { callFrame.startRecording(); } catch(e){ console.warn('Auto-record start failed:', e); }
+        }, 2000);
+      });
+    }
+  } else {
+    // Agent behaviors: wire up the "Request Record" custom button
+    callFrame.on('custom-button-click', (ev) => {
+      if(ev.button_id === 'requestRecord'){
+        requestRecordPermission();
+      }
+    });
+
+    // Listen for permission response from host
+    callFrame.on('app-message', (ev) => {
+      const msg = ev.data;
+      if(msg && msg.type === 'record_response'){
+        if(msg.approved){
+          alert('✓ Host approved your record request. You may now record. Use your system screen-recorder (Cmd+Shift+5 on Mac).');
+        } else {
+          alert('✗ Host denied your record request.');
+        }
+      }
     });
   }
 
@@ -4327,6 +4508,49 @@ function initDaily(meeting, token, displayName, isHost){
     console.error('Daily join error:', err);
     alert('Could not join call: ' + (err.errorMsg || err.message || 'unknown error'));
   });
+}
+
+// Agent side: send "request to record" message to host
+function requestRecordPermission(){
+  if(!window._dailyCallFrame) return;
+  const displayName = currentProfile.full_name || currentProfile.email;
+  try {
+    window._dailyCallFrame.sendAppMessage({ type: 'request_record', userName: displayName }, '*');
+    alert('📨 Record request sent to host. You\'ll be notified of their decision.');
+  } catch(e){
+    alert('Could not send request: ' + e.message);
+  }
+}
+
+// Host side: show approve/deny popup
+function handleRecordRequest(fromParticipantId, userName){
+  // Build a non-blocking modal overlay on top of the video
+  const existing = document.getElementById('record-request-popup');
+  if(existing) existing.remove();
+
+  const popup = document.createElement('div');
+  popup.id = 'record-request-popup';
+  popup.style.cssText = 'position:fixed;top:80px;right:40px;z-index:10000;background:#1a1a1a;border:2px solid #FF6B00;border-radius:14px;padding:20px;box-shadow:0 8px 32px rgba(0,0,0,0.5);max-width:340px;animation:slideIn 0.3s ease;';
+  popup.innerHTML = `
+    <div style="font-size:11px;color:#FF6B00;font-weight:700;letter-spacing:2px;text-transform:uppercase;margin-bottom:8px;">🎬 Recording Request</div>
+    <div style="font-size:14px;color:#fff;line-height:1.5;margin-bottom:14px;"><strong>${escapeHtml(userName)}</strong> is requesting permission to record this call.</div>
+    <div style="display:flex;gap:8px;">
+      <button class="bo-btn bo-btn-primary" style="flex:1;padding:8px 14px;font-size:13px;" onclick="respondRecordRequest('${fromParticipantId}', true)">✓ Approve</button>
+      <button class="bo-btn bo-btn-danger" style="flex:1;padding:8px 14px;font-size:13px;" onclick="respondRecordRequest('${fromParticipantId}', false)">✗ Deny</button>
+    </div>
+    <div style="font-size:11px;color:rgba(255,255,255,0.45);margin-top:10px;line-height:1.55;">If approved, they can use their own system screen-recorder. Daily's cloud recording stays host-only.</div>
+    <style>@keyframes slideIn{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:translateX(0)}}</style>
+  `;
+  document.body.appendChild(popup);
+}
+
+function respondRecordRequest(participantId, approved){
+  if(!window._dailyCallFrame) return;
+  try {
+    window._dailyCallFrame.sendAppMessage({ type: 'record_response', approved }, participantId);
+  } catch(e){ console.warn('Response send failed:', e); }
+  const popup = document.getElementById('record-request-popup');
+  if(popup) popup.remove();
 }
 
 async function endMeetingAsHost(meetingId){
@@ -4870,6 +5094,12 @@ window.openFormFillModal = openFormFillModal;
 window.submitFormAnswers = submitFormAnswers;
 window.viewFormSubmissions = viewFormSubmissions;
 window.exportSubmissionsCSV = exportSubmissionsCSV;
+window.generateAndSetPassword = generateAndSetPassword;
+window.setCustomPassword = setCustomPassword;
+window.openForcePasswordChangeModal = openForcePasswordChangeModal;
+window.saveForcedPasswordChange = saveForcedPasswordChange;
+window.requestRecordPermission = requestRecordPermission;
+window.respondRecordRequest = respondRecordRequest;
 </script>
 
 </body>
