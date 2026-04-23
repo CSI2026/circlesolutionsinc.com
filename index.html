@@ -7,6 +7,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Outfit:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet"/>
 <!-- Supabase JS SDK (loaded before page scripts) -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script>
   // ─── Supabase Config ─────────────────────────────────────────
   // These values are safe to expose in client code — the anon key
@@ -1153,6 +1154,7 @@ footer{
       <div style="padding:24px 24px 14px 24px;margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);font-size:10.5px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:rgba(255,255,255,0.35);">Company</div>
       <button class="bo-nav-item" id="nav-global-docs" onclick="boShowAdmin('global-docs')">📁 Company Library</button>
       <button class="bo-nav-item" id="nav-my-forms" onclick="boShowAdmin('my-forms')">📋 My Forms</button>
+      <button class="bo-nav-item" id="nav-my-contracts" onclick="boShowAdmin('my-contracts')">📄 My Contracts</button>
 
       <div id="bo-admin-nav-wrap" style="display:none;">
         <div style="padding:24px 24px 14px 24px;margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);font-size:10.5px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:rgba(255,255,255,0.35);">Administration</div>
@@ -2064,7 +2066,7 @@ function renderSidebar(){
   if(isOwner){
     navItems.push({ id:'owner-panel', label:'👑 Owner Panel' });
     navItems.push({ id:'markets', label:'📍 Markets' });
-    navItems.push({ id:'contract-templates', label:'📄 Contract Templates' });
+    navItems.push({ id:'contract-builder', label:'📄 Contract Builder' });
     navItems.push({ id:'forms-admin', label:'📋 All Forms' });
     navItems.push({ id:'applications', label:'📝 Applications' });
     navItems.push({ id:'programs-admin', label:'🎯 Programs' });
@@ -2128,9 +2130,11 @@ function renderMainContent(){
   if(activeAdminView === 'owner-panel'){ renderOwnerPanel(el); return; }
   if(activeAdminView === 'markets'){ renderMarketsAdmin(el); return; }
   if(activeAdminView === 'global-docs'){ renderGlobalDocuments(el); return; }
-  if(activeAdminView === 'contract-templates'){ renderContractTemplates(el); return; }
+  if(activeAdminView === 'contract-builder'){ renderContractBuilder(el); return; }
+  if(activeAdminView === 'contract-templates'){ renderContractBuilder(el); return; }  // backward compat
   if(activeAdminView === 'forms-admin'){ renderFormsAdmin(el); return; }
   if(activeAdminView === 'my-forms'){ renderMyForms(el); return; }
+  if(activeAdminView === 'my-contracts'){ renderMyContracts(el); return; }
   if(activeAdminView === 'onboarding-master'){ renderOnboardingMaster(el); return; }
   if(activeAdminView === 'onboarding-pending'){ renderOnboardingPending(el); return; }
 
@@ -6304,6 +6308,751 @@ async function unlockCodesForAgent(userId){
 }
 
 
+// ═══════════════════════════════════════════════════════════════════════
+// PHASE 2.4 — IN-HOUSE CONTRACT BUILDER + E-SIGNATURE
+// ═══════════════════════════════════════════════════════════════════════
+// Owner-only contract template builder with two creation modes:
+//   • Rich text editor — write contract in browser, drop {{tokens}}
+//   • Upload — upload PDF/Word, system stores it
+// Plus:
+//   • Send contract to agent → status: pending
+//   • Agent signs internally (typed name + checkbox + IP + timestamp)
+//   • Generates real signed PDF via jsPDF
+//   • Saves to agent profile permanently
+// ═══════════════════════════════════════════════════════════════════════
+
+// ─────────────────────────────────────────────────────────────────────
+// MAIN VIEW: Contract Builder (owner only)
+// ─────────────────────────────────────────────────────────────────────
+async function renderContractBuilder(el){
+  if(currentProfile.role !== 'owner'){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied — Contract Builder is owner-only.</div>';
+    return;
+  }
+
+  // Load templates
+  const { data: templates } = await sb.from('contract_templates_v2').select('*').order('updated_at', { ascending:false });
+
+  // Per-template stats
+  const stats = {};
+  for(const t of (templates || [])){
+    const { count } = await sb.from('contract_assignments').select('id', { count:'exact', head:true }).eq('template_id', t.id);
+    stats[t.id] = count || 0;
+  }
+
+  el.innerHTML = `
+    <div style="margin-bottom:24px;">
+      <div style="font-size:11px;color:#FF6B00;font-weight:700;letter-spacing:3px;text-transform:uppercase;margin-bottom:6px;">🔒 Owner Only</div>
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">📄 CONTRACT BUILDER</h1>
+      <p style="font-size:14px;color:rgba(255,255,255,0.5);">Build contracts in-house. Send them to agents for in-house e-signing. Signed PDFs saved to each agent's profile.</p>
+    </div>
+
+    <div style="display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap;">
+      <button class="bo-btn bo-btn-primary" onclick="openContractBuilderEditor('rich_text')">+ New Contract (Editor)</button>
+      <button class="bo-btn bo-btn-primary" onclick="openContractBuilderEditor('upload')">+ Upload Contract (PDF)</button>
+      <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('contract-assignments')">📊 View All Assignments</button>
+    </div>
+
+    ${(!templates || templates.length === 0) ? `
+      <div class="bo-card" style="text-align:center;padding:40px;color:rgba(255,255,255,0.4);">
+        No contracts yet. Click <strong style="color:#FF6B00;">+ New Contract (Editor)</strong> to write one in the browser, or <strong style="color:#FF6B00;">+ Upload Contract (PDF)</strong> to bring in an existing file.
+      </div>` : `
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px;">
+        ${templates.map(t => {
+          const prog = allPrograms.find(p => p.id === t.program_id);
+          const sourceBadge = t.source_type === 'rich_text'
+            ? '<span style="background:rgba(0,198,255,0.15);color:#00C6FF;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">EDITOR</span>'
+            : '<span style="background:rgba(255,0,128,0.15);color:#FF0080;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">PDF</span>';
+          return `
+          <div class="bo-card" style="${prog ? 'border-left:3px solid '+prog.color+';' : ''}">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:6px;">
+              <div style="font-size:15px;font-weight:700;color:#fff;flex:1;">${escapeHtml(t.title)}</div>
+              ${sourceBadge}
+            </div>
+            ${t.description ? `<div style="font-size:12px;color:rgba(255,255,255,0.5);margin-bottom:8px;line-height:1.5;">${escapeHtml(t.description)}</div>` : ''}
+            <div style="font-size:11.5px;color:rgba(255,255,255,0.4);margin-bottom:10px;">
+              ${prog ? prog.icon + ' ' + prog.name : '🌐 Any program'} · ${stats[t.id]} sent · ${t.active ? '<span style="color:#00FF88;">Active</span>' : '<span style="color:rgba(255,255,255,0.4);">Inactive</span>'}
+              ${t.auto_assign ? ' · <span style="color:#FFD700;">⚡ Auto-assigns</span>' : ''}
+            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;">
+              <button class="bo-btn bo-btn-primary" style="padding:5px 12px;font-size:11px;" onclick="openSendContractModal('${t.id}')">📨 Send</button>
+              <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="openContractBuilderEditor(null,'${t.id}')">Edit</button>
+              <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="previewContractTemplate('${t.id}')">Preview</button>
+              <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="toggleTemplateActive('${t.id}',${t.active})">${t.active?'Deactivate':'Activate'}</button>
+              <button class="bo-btn bo-btn-danger" style="padding:5px 10px;font-size:11px;" onclick="deleteTemplate('${t.id}')">✕</button>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>`}
+  `;
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// CONTRACT EDITOR (rich text OR upload)
+// ─────────────────────────────────────────────────────────────────────
+async function openContractBuilderEditor(sourceType, templateId){
+  let existing = null;
+  if(templateId){
+    const { data } = await sb.from('contract_templates_v2').select('*').eq('id', templateId).single();
+    existing = data;
+    sourceType = data?.source_type;
+  }
+  window._cbEditor = {
+    templateId,
+    sourceType: sourceType || 'rich_text',
+    title: existing?.title || '',
+    description: existing?.description || '',
+    program_id: existing?.program_id || '',
+    body_html: existing?.body_html || defaultContractTemplate(),
+    upload_url: existing?.upload_url || '',
+    upload_path: existing?.upload_path || '',
+    fields: existing?.fields || [],
+    auto_assign: existing?.auto_assign || false,
+    active: existing?.active !== false
+  };
+  renderContractEditor();
+}
+
+function defaultContractTemplate(){
+  return `<h1 style="text-align:center;">CONTRACT TITLE</h1>
+<p><strong>This Agreement</strong> is entered into on {{today_date}} between <strong>Circle Solutions Inc.</strong> ("Company") and <strong>{{agent_name}}</strong> ("Contractor").</p>
+<h2>1. Scope of Work</h2>
+<p>Contractor agrees to perform services as a sales representative for the Company's customer acquisition programs.</p>
+<h2>2. Compensation</h2>
+<p>Contractor will be paid commissions based on the schedule provided separately.</p>
+<h2>3. Independent Contractor Status</h2>
+<p>Contractor acknowledges they are an independent contractor and not an employee of the Company.</p>
+<h2>4. Acknowledgment</h2>
+<p>By signing below, Contractor acknowledges they have read, understood, and agree to be bound by this Agreement.</p>
+<p style="margin-top:40px;"><strong>Contractor Signature:</strong> {{signature}}</p>
+<p><strong>Date:</strong> {{signature_date}}</p>`;
+}
+
+function renderContractEditor(){
+  const e = window._cbEditor;
+  const isUpload = e.sourceType === 'upload';
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:#fff;margin-bottom:6px;letter-spacing:1px;">${e.templateId ? 'Edit' : 'New'} Contract — ${isUpload ? '📎 Uploaded PDF' : '✍️ Rich Text Editor'}</h2>
+    <div style="font-size:12.5px;color:rgba(255,255,255,0.5);margin-bottom:16px;">${isUpload ? 'Upload your prepared PDF/Word document.' : 'Write the contract below. Use {{tokens}} where the agent\'s details should appear when they sign.'}</div>
+
+    <div style="display:grid;grid-template-columns:2fr 1fr;gap:10px;">
+      <div class="form-group"><label class="form-label">Contract Title *</label><input id="cb-title" class="form-input" value="${escapeHtml(e.title)}" placeholder="e.g. Independent Contractor Agreement"/></div>
+      <div class="form-group"><label class="form-label">Program (optional)</label>
+        <select id="cb-program" class="form-input" style="background:#1a1a1a;">
+          <option value="">— Any program —</option>
+          ${allPrograms.map(p => `<option value="${p.id}" ${e.program_id===p.id?'selected':''}>${p.icon} ${p.name}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+    <div class="form-group"><label class="form-label">Description (optional)</label><input id="cb-desc" class="form-input" value="${escapeHtml(e.description)}" placeholder="Internal note about this contract"/></div>
+
+    ${isUpload ? `
+      <div class="form-group">
+        <label class="form-label">Upload PDF or Word document *</label>
+        <input id="cb-file" type="file" class="form-input" accept=".pdf,.doc,.docx" onchange="cbHandleUpload(this)"/>
+        ${e.upload_url ? `<div style="margin-top:8px;font-size:12.5px;color:#00FF88;">✓ File uploaded: <a href="${escapeHtml(e.upload_url)}" target="_blank" rel="noopener" style="color:#FF6B00;">view</a></div>` : ''}
+      </div>
+      <div style="background:rgba(255,193,7,0.05);border:1px solid rgba(255,193,7,0.2);border-radius:8px;padding:10px;font-size:12px;color:rgba(255,255,255,0.7);line-height:1.55;margin-bottom:14px;">
+        <strong style="color:#FFD700;">How signing works:</strong> The agent reviews your uploaded document, then types their full legal name and checks the agreement box. We generate a separate signature certificate page (with their name, IP, timestamp) and bundle it with your original PDF when they sign.
+      </div>
+    ` : `
+      <div class="form-group">
+        <label class="form-label">Contract Body *</label>
+        <div style="background:#1a1a1a;border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:6px;display:flex;gap:4px;flex-wrap:wrap;margin-bottom:0;border-bottom:none;border-bottom-left-radius:0;border-bottom-right-radius:0;">
+          <button type="button" class="bo-btn bo-btn-ghost" style="padding:3px 8px;font-size:11px;" onclick="cbCmd('bold')"><b>B</b></button>
+          <button type="button" class="bo-btn bo-btn-ghost" style="padding:3px 8px;font-size:11px;" onclick="cbCmd('italic')"><i>I</i></button>
+          <button type="button" class="bo-btn bo-btn-ghost" style="padding:3px 8px;font-size:11px;" onclick="cbCmd('underline')"><u>U</u></button>
+          <span style="color:rgba(255,255,255,0.2);padding:0 4px;">|</span>
+          <button type="button" class="bo-btn bo-btn-ghost" style="padding:3px 8px;font-size:11px;" onclick="cbFormatBlock('h1')">H1</button>
+          <button type="button" class="bo-btn bo-btn-ghost" style="padding:3px 8px;font-size:11px;" onclick="cbFormatBlock('h2')">H2</button>
+          <button type="button" class="bo-btn bo-btn-ghost" style="padding:3px 8px;font-size:11px;" onclick="cbFormatBlock('p')">P</button>
+          <span style="color:rgba(255,255,255,0.2);padding:0 4px;">|</span>
+          <button type="button" class="bo-btn bo-btn-ghost" style="padding:3px 8px;font-size:11px;" onclick="cbCmd('insertUnorderedList')">• List</button>
+          <button type="button" class="bo-btn bo-btn-ghost" style="padding:3px 8px;font-size:11px;" onclick="cbCmd('insertOrderedList')">1. List</button>
+          <span style="color:rgba(255,255,255,0.2);padding:0 4px;">|</span>
+          <button type="button" class="bo-btn bo-btn-ghost" style="padding:3px 8px;font-size:11px;" onclick="cbInsertToken('{{agent_name}}')">+ Agent Name</button>
+          <button type="button" class="bo-btn bo-btn-ghost" style="padding:3px 8px;font-size:11px;" onclick="cbInsertToken('{{today_date}}')">+ Today's Date</button>
+          <button type="button" class="bo-btn bo-btn-ghost" style="padding:3px 8px;font-size:11px;background:rgba(255,107,0,0.15);color:#FF6B00;" onclick="cbInsertToken('{{signature}}')">+ ✍️ Signature</button>
+          <button type="button" class="bo-btn bo-btn-ghost" style="padding:3px 8px;font-size:11px;" onclick="cbInsertToken('{{signature_date}}')">+ Sig Date</button>
+        </div>
+        <div id="cb-editor" contenteditable="true" style="min-height:280px;max-height:50vh;overflow-y:auto;background:#0d0d0d;border:1px solid rgba(255,255,255,0.1);border-top:none;border-bottom-left-radius:6px;border-bottom-right-radius:6px;padding:14px;color:#fff;font-family:Georgia,serif;font-size:14px;line-height:1.7;">${e.body_html}</div>
+        <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:6px;line-height:1.5;">Available tokens: <code>{{agent_name}}</code>, <code>{{today_date}}</code>, <code>{{signature}}</code>, <code>{{signature_date}}</code>. They get filled with the agent's info when they sign.</div>
+      </div>
+    `}
+
+    <div style="display:flex;gap:14px;margin-top:14px;">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;flex:1;">
+        <input type="checkbox" id="cb-active" ${e.active?'checked':''} style="width:16px;height:16px;accent-color:#00FF88;"/>
+        <span style="font-size:13px;color:#fff;">Active (can be sent)</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;flex:1;">
+        <input type="checkbox" id="cb-auto" ${e.auto_assign?'checked':''} style="width:16px;height:16px;accent-color:#FFD700;"/>
+        <span style="font-size:13px;color:#fff;">Auto-assign to new agents in this program</span>
+      </label>
+    </div>
+
+    <div style="display:flex;gap:10px;margin-top:18px;">
+      <button class="bo-btn bo-btn-primary" onclick="saveContractTemplateV2()">${e.templateId?'Save Changes':'Create Contract'}</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeCbEditor()">Cancel</button>
+    </div>
+    <div id="cb-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-box').style.maxWidth = '800px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+function closeCbEditor(){
+  closeAllModals();
+  document.getElementById('modal-box').style.maxWidth = '560px';
+  window._cbEditor = null;
+}
+
+function cbCmd(cmd){ document.execCommand(cmd, false, null); document.getElementById('cb-editor').focus(); }
+function cbFormatBlock(tag){ document.execCommand('formatBlock', false, '<'+tag+'>'); document.getElementById('cb-editor').focus(); }
+function cbInsertToken(token){
+  const editor = document.getElementById('cb-editor');
+  editor.focus();
+  document.execCommand('insertText', false, token);
+}
+
+async function cbHandleUpload(input){
+  const file = input.files[0];
+  if(!file) return;
+  if(file.size > 15*1024*1024){ alert('File must be under 15MB'); return; }
+  const ts = Date.now();
+  const path = `${currentProfile.id}/${ts}-${file.name.replace(/[^a-zA-Z0-9.]/g,'_')}`;
+  const { error } = await sb.storage.from('contract-templates').upload(path, file);
+  if(error){ alert('Upload failed: ' + error.message); return; }
+  const { data: signed } = await sb.storage.from('contract-templates').createSignedUrl(path, 60*60*24*365*5);
+  window._cbEditor.upload_url = signed?.signedUrl || '';
+  window._cbEditor.upload_path = path;
+  renderContractEditor();
+}
+
+async function saveContractTemplateV2(){
+  const e = window._cbEditor;
+  const title = document.getElementById('cb-title').value.trim();
+  const description = document.getElementById('cb-desc').value.trim();
+  const program_id = document.getElementById('cb-program').value || null;
+  const active = document.getElementById('cb-active').checked;
+  const auto_assign = document.getElementById('cb-auto').checked;
+  const msg = document.getElementById('cb-msg');
+
+  if(!title){ msg.innerHTML='<span style="color:#F87171;">Title required.</span>'; return; }
+
+  let body_html = e.body_html;
+  if(e.sourceType === 'rich_text'){
+    body_html = document.getElementById('cb-editor').innerHTML.trim();
+    if(!body_html || body_html === '<br>'){ msg.innerHTML='<span style="color:#F87171;">Contract body cannot be empty.</span>'; return; }
+  }
+  if(e.sourceType === 'upload' && !e.upload_url){
+    msg.innerHTML='<span style="color:#F87171;">Upload a file first.</span>'; return;
+  }
+
+  const payload = {
+    title, description: description || null, program_id,
+    source_type: e.sourceType,
+    body_html: e.sourceType === 'rich_text' ? body_html : null,
+    upload_url: e.upload_url || null,
+    upload_path: e.upload_path || null,
+    active, auto_assign,
+    updated_at: new Date().toISOString()
+  };
+
+  let error;
+  if(e.templateId){
+    ({ error } = await sb.from('contract_templates_v2').update(payload).eq('id', e.templateId));
+  } else {
+    payload.created_by = currentProfile.id;
+    ({ error } = await sb.from('contract_templates_v2').insert(payload));
+  }
+  if(error){ msg.innerHTML='<span style="color:#F87171;">'+error.message+'</span>'; return; }
+
+  closeCbEditor();
+  renderMainContent();
+}
+
+async function toggleTemplateActive(id, currently){
+  await sb.from('contract_templates_v2').update({ active: !currently }).eq('id', id);
+  renderMainContent();
+}
+
+async function deleteTemplate(id){
+  if(!confirm('Delete this contract template? Already-sent assignments are preserved.')) return;
+  await sb.from('contract_templates_v2').delete().eq('id', id);
+  renderMainContent();
+}
+
+async function previewContractTemplate(id){
+  const { data: t } = await sb.from('contract_templates_v2').select('*').eq('id', id).single();
+  if(!t){ alert('Template not found'); return; }
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:#fff;margin-bottom:14px;letter-spacing:1px;">📄 Preview: ${escapeHtml(t.title)}</h2>
+    ${t.source_type === 'upload' ? `
+      <div style="background:rgba(255,255,255,0.04);padding:14px;border-radius:8px;text-align:center;">
+        <div style="font-size:13px;color:rgba(255,255,255,0.65);margin-bottom:10px;">This is an uploaded PDF/Word document.</div>
+        <a href="${escapeHtml(t.upload_url)}" target="_blank" rel="noopener" class="bo-btn bo-btn-primary" style="display:inline-block;text-decoration:none;">Open in new tab →</a>
+      </div>` : `
+      <div style="background:#fff;color:#000;padding:30px;border-radius:8px;max-height:60vh;overflow-y:auto;font-family:Georgia,serif;font-size:14px;line-height:1.7;">
+        ${(t.body_html || '').replace(/{{agent_name}}/g, '<strong style="background:#fff3cd;padding:2px 4px;">[Agent Name]</strong>')
+                              .replace(/{{today_date}}/g, '<strong style="background:#fff3cd;padding:2px 4px;">' + new Date().toLocaleDateString() + '</strong>')
+                              .replace(/{{signature}}/g, '<span style="border-bottom:2px solid #000;padding:0 60px;">&nbsp;</span>')
+                              .replace(/{{signature_date}}/g, '<span style="border-bottom:2px solid #000;padding:0 30px;">&nbsp;</span>')}
+      </div>`}
+    <div style="margin-top:14px;text-align:right;"><button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Close</button></div>`;
+  document.getElementById('modal-box').style.maxWidth = '800px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// SEND CONTRACT TO AGENT
+// ─────────────────────────────────────────────────────────────────────
+async function openSendContractModal(templateId){
+  const { data: t } = await sb.from('contract_templates_v2').select('*').eq('id', templateId).single();
+  if(!t){ alert('Template not found'); return; }
+  if(!t.active){ alert('This template is inactive. Activate it first.'); return; }
+
+  // Load agents (active, not exempt from being assignees... or just active)
+  let q = sb.from('profiles').select('id,full_name,email,role,programs').eq('active', true);
+  if(t.program_id){ q = q.contains('programs', [t.program_id]); }
+  const { data: agents } = await q.order('full_name');
+
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:#fff;margin-bottom:6px;letter-spacing:1px;">📨 Send Contract</h2>
+    <div style="font-size:13px;color:rgba(255,255,255,0.55);margin-bottom:14px;">Sending: <strong style="color:#fff;">${escapeHtml(t.title)}</strong></div>
+    <div class="form-group">
+      <label class="form-label">Send to (select one or more) *</label>
+      <div style="max-height:300px;overflow-y:auto;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:8px;padding:8px;">
+        ${(agents || []).length === 0 ? '<div style="color:rgba(255,255,255,0.4);padding:10px;font-size:13px;">No matching agents found.</div>' :
+          agents.map(a => `
+            <label style="display:flex;align-items:center;gap:10px;padding:8px;cursor:pointer;border-radius:6px;" onmouseover="this.style.background='rgba(255,255,255,0.04)'" onmouseout="this.style.background='transparent'">
+              <input type="checkbox" class="sc-agent" value="${a.id}" style="width:16px;height:16px;accent-color:#FF6B00;"/>
+              <div style="flex:1;">
+                <div style="font-size:13px;color:#fff;font-weight:600;">${escapeHtml(a.full_name || a.email)}</div>
+                <div style="font-size:11px;color:rgba(255,255,255,0.5);">${escapeHtml(a.email)} · ${roleLabel(a.role)}</div>
+              </div>
+            </label>`).join('')
+        }
+      </div>
+    </div>
+    <div style="display:flex;gap:10px;">
+      <button class="bo-btn bo-btn-primary" onclick="sendContractToAgents('${templateId}')">Send</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="sc-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function sendContractToAgents(templateId){
+  const checked = Array.from(document.querySelectorAll('.sc-agent:checked')).map(c => c.value);
+  const msg = document.getElementById('sc-msg');
+  if(checked.length === 0){ msg.innerHTML='<span style="color:#F87171;">Select at least one agent.</span>'; return; }
+  msg.innerHTML='<span style="color:rgba(255,255,255,0.6);">Sending…</span>';
+
+  const { data: t } = await sb.from('contract_templates_v2').select('*').eq('id', templateId).single();
+  let successes = 0;
+  for(const userId of checked){
+    const { error } = await sb.from('contract_assignments').insert({
+      template_id: templateId,
+      template_snapshot: t,
+      user_id: userId,
+      assigned_by: currentProfile.id,
+      status: 'pending'
+    });
+    if(!error) successes++;
+  }
+  msg.innerHTML='<span style="color:#00FF88;">✓ Sent to '+successes+' agent'+(successes===1?'':'s')+'. They will see it in their back office under "📄 My Contracts".</span>';
+  setTimeout(() => { closeAllModals(); renderMainContent(); }, 1400);
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// AGENT SIDE: My Contracts list + Sign workflow
+// ─────────────────────────────────────────────────────────────────────
+async function renderMyContracts(el){
+  const { data: assignments } = await sb.from('contract_assignments')
+    .select('*')
+    .eq('user_id', currentProfile.id)
+    .order('assigned_at', { ascending: false });
+
+  const pending = (assignments || []).filter(a => a.status === 'pending');
+  const signed = (assignments || []).filter(a => a.status === 'signed');
+
+  el.innerHTML = `
+    <div style="margin-bottom:24px;">
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">📄 MY CONTRACTS</h1>
+      <p style="font-size:14px;color:rgba(255,255,255,0.5);">Contracts the company has sent for your signature.</p>
+    </div>
+
+    ${pending.length > 0 ? `
+      <div class="bo-card" style="border-left:3px solid #FF6B00;margin-bottom:14px;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#FF6B00;letter-spacing:1px;margin-bottom:10px;">⏳ Awaiting Your Signature (${pending.length})</div>
+        ${pending.map(a => contractAssignmentRow(a, false)).join('')}
+      </div>` : ''}
+
+    ${signed.length > 0 ? `
+      <div class="bo-card" style="border-left:3px solid #00FF88;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#00FF88;letter-spacing:1px;margin-bottom:10px;">✓ Signed (${signed.length})</div>
+        ${signed.map(a => contractAssignmentRow(a, true)).join('')}
+      </div>` : ''}
+
+    ${(!assignments || assignments.length === 0) ? '<div class="bo-card" style="text-align:center;padding:40px;color:rgba(255,255,255,0.4);">No contracts sent to you yet.</div>' : ''}
+  `;
+}
+
+function contractAssignmentRow(a, isSigned){
+  const t = a.template_snapshot || {};
+  return `
+    <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:14px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:14px;font-weight:700;color:#fff;">${escapeHtml(t.title || 'Contract')}</div>
+        ${t.description ? `<div style="font-size:12px;color:rgba(255,255,255,0.5);margin-top:2px;">${escapeHtml(t.description)}</div>` : ''}
+        <div style="font-size:11.5px;color:rgba(255,255,255,0.4);margin-top:4px;">
+          Sent ${new Date(a.assigned_at).toLocaleDateString()}
+          ${isSigned ? ' · Signed ' + new Date(a.signed_at).toLocaleDateString() : ''}
+        </div>
+      </div>
+      <div style="display:flex;gap:6px;">
+        ${isSigned
+          ? `<button class="bo-btn bo-btn-ghost" style="padding:6px 14px;font-size:12px;" onclick="downloadSignedContract('${a.id}')">📥 Download PDF</button>`
+          : `<button class="bo-btn bo-btn-primary" style="padding:6px 14px;font-size:12px;" onclick="openSignContractModal('${a.id}')">Review & Sign →</button>`
+        }
+      </div>
+    </div>`;
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// SIGN CONTRACT MODAL (the e-signature flow)
+// ─────────────────────────────────────────────────────────────────────
+async function openSignContractModal(assignmentId){
+  const { data: a } = await sb.from('contract_assignments').select('*').eq('id', assignmentId).single();
+  if(!a){ alert('Contract not found'); return; }
+  if(a.status !== 'pending'){ alert('This contract is no longer pending.'); return; }
+
+  const t = a.template_snapshot || {};
+  const isUpload = t.source_type === 'upload';
+  const today = new Date().toLocaleDateString();
+  const agentName = currentProfile.full_name || '';
+
+  // Render contract body with tokens replaced by visual placeholders
+  let bodyHtml = '';
+  if(isUpload){
+    bodyHtml = `
+      <div style="background:#fff;color:#000;padding:20px;border-radius:8px;text-align:center;">
+        <div style="font-size:13px;color:#444;margin-bottom:10px;">📄 ${escapeHtml(t.title)}</div>
+        <div style="font-size:12px;color:#666;margin-bottom:14px;">Click below to open the contract in a new tab. Read it fully before signing.</div>
+        <a href="${escapeHtml(t.upload_url)}" target="_blank" rel="noopener" class="bo-btn bo-btn-primary" style="display:inline-block;text-decoration:none;">Open Contract →</a>
+        <div style="margin-top:14px;font-size:11.5px;color:#888;">Your signature will be added on a separate certificate page bundled with this PDF.</div>
+      </div>`;
+  } else {
+    bodyHtml = `
+      <div style="background:#fff;color:#000;padding:30px;border-radius:8px;max-height:50vh;overflow-y:auto;font-family:Georgia,serif;font-size:14px;line-height:1.7;">
+        ${(t.body_html || '').replace(/{{agent_name}}/g, escapeHtml(agentName) || '<em style="color:#cc0000;">[Your Name]</em>')
+                              .replace(/{{today_date}}/g, today)
+                              .replace(/{{signature}}/g, '<span style="border-bottom:2px solid #000;padding:0 60px;color:#cc0000;font-style:italic;">[Your Signature]</span>')
+                              .replace(/{{signature_date}}/g, '<span style="border-bottom:2px solid #000;padding:0 30px;color:#cc0000;font-style:italic;">[Date]</span>')}
+      </div>`;
+  }
+
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:#fff;margin-bottom:6px;letter-spacing:1px;">✍️ Review & Sign</h2>
+    <div style="font-size:13px;color:rgba(255,255,255,0.55);margin-bottom:14px;">${escapeHtml(t.title || 'Contract')}</div>
+
+    ${bodyHtml}
+
+    <div style="margin-top:18px;padding:14px;background:rgba(255,107,0,0.05);border:1px solid rgba(255,107,0,0.25);border-radius:10px;">
+      <div style="font-size:12px;font-weight:700;color:#FF6B00;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:10px;">YOUR SIGNATURE</div>
+      <div class="form-group" style="margin-bottom:10px;">
+        <label class="form-label" style="font-size:12px;">Type your full legal name (first, middle, last) *</label>
+        <input id="sign-name" class="form-input" placeholder="e.g. John David Smith" style="font-family:'Brush Script MT',cursive;font-size:22px;background:#fff;color:#000;"/>
+      </div>
+      <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;">
+        <input type="checkbox" id="sign-agree" style="width:18px;height:18px;accent-color:#FF6B00;flex-shrink:0;margin-top:3px;"/>
+        <div style="font-size:12.5px;color:#fff;line-height:1.55;">I have read this contract in its entirety. I understand and agree to be bound by all of its terms. I intend my typed name above to constitute a legal electronic signature with the same force and effect as a handwritten signature.</div>
+      </label>
+    </div>
+
+    <div style="display:flex;gap:10px;margin-top:18px;">
+      <button class="bo-btn bo-btn-primary" style="background:linear-gradient(135deg,#00FF88,#00C6FF);color:#000;font-weight:700;" onclick="finalizeContractSignature('${assignmentId}')">✓ Sign & Finalize</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Close (do not sign)</button>
+    </div>
+    <div id="sign-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-box').style.maxWidth = '780px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function finalizeContractSignature(assignmentId){
+  const name = document.getElementById('sign-name').value.trim();
+  const agree = document.getElementById('sign-agree').checked;
+  const msg = document.getElementById('sign-msg');
+  if(!name || name.split(/\s+/).length < 2){ msg.innerHTML='<span style="color:#F87171;">Type your full legal name (first AND last at minimum).</span>'; return; }
+  if(!agree){ msg.innerHTML='<span style="color:#F87171;">Check the agreement box to sign.</span>'; return; }
+
+  msg.innerHTML='<span style="color:rgba(255,255,255,0.6);">Generating signed PDF…</span>';
+
+  // Get IP best-effort
+  let ip = null;
+  try { const r = await fetch('https://api.ipify.org?format=json'); const j = await r.json(); ip = j.ip; } catch(e){}
+  const userAgent = navigator.userAgent;
+  const signedAt = new Date();
+
+  // Load assignment + template
+  const { data: a } = await sb.from('contract_assignments').select('*').eq('id', assignmentId).single();
+  const t = a.template_snapshot || {};
+
+  // Generate PDF
+  let pdfBlob;
+  try {
+    pdfBlob = await generateSignedContractPdf({
+      template: t,
+      agentName: name,
+      agentEmail: currentProfile.email,
+      signedAt, ip, userAgent
+    });
+  } catch(e){
+    msg.innerHTML = '<span style="color:#F87171;">PDF generation failed: '+e.message+'</span>';
+    return;
+  }
+
+  // Upload PDF to storage
+  const safeTitle = (t.title || 'contract').replace(/[^a-zA-Z0-9]/g,'_').substring(0,40);
+  const path = `${currentProfile.id}/${signedAt.getTime()}-${safeTitle}.pdf`;
+  const { error: upErr } = await sb.storage.from('signed-contracts').upload(path, pdfBlob, { contentType: 'application/pdf' });
+  if(upErr){ msg.innerHTML = '<span style="color:#F87171;">Upload failed: '+upErr.message+'</span>'; return; }
+  const { data: signedUrlData } = await sb.storage.from('signed-contracts').createSignedUrl(path, 60*60*24*365*10);
+
+  // Update assignment
+  const { error } = await sb.from('contract_assignments').update({
+    status: 'signed',
+    field_values: {
+      agent_name: name,
+      agent_email: currentProfile.email,
+      signed_date: signedAt.toISOString()
+    },
+    signed_pdf_url: signedUrlData?.signedUrl || null,
+    signed_pdf_path: path,
+    signed_at: signedAt.toISOString(),
+    ip_address: ip,
+    user_agent: userAgent
+  }).eq('id', assignmentId);
+
+  if(error){ msg.innerHTML = '<span style="color:#F87171;">'+error.message+'</span>'; return; }
+
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Signed successfully. PDF saved to your profile.</span>';
+  setTimeout(() => {
+    closeAllModals();
+    document.getElementById('modal-box').style.maxWidth = '560px';
+    renderMainContent();
+  }, 1400);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// PDF GENERATION via jsPDF
+// ─────────────────────────────────────────────────────────────────────
+async function generateSignedContractPdf({ template, agentName, agentEmail, signedAt, ip, userAgent }){
+  if(!window.jspdf){ throw new Error('PDF library not loaded — refresh the page and try again.'); }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit:'pt', format:'letter' });
+  const pageW = doc.internal.pageSize.getWidth();
+  const margin = 50;
+  const usableW = pageW - margin*2;
+
+  // PAGE 1+: Contract content
+  if(template.source_type === 'upload'){
+    // For uploaded files, the original lives at upload_url. We can't re-embed it (no PDF parse lib),
+    // so we make a cover sheet that references the original + a sig certificate.
+    doc.setFont('helvetica','bold'); doc.setFontSize(18);
+    doc.text(template.title || 'Contract', pageW/2, 80, { align:'center' });
+    doc.setFont('helvetica','normal'); doc.setFontSize(11);
+    doc.text('This signature certificate accompanies the original contract document', pageW/2, 110, { align:'center' });
+    doc.text('available at the URL listed below. The signer reviewed the original prior to signing.', pageW/2, 126, { align:'center' });
+    if(template.upload_url){
+      doc.setFontSize(9); doc.setTextColor(100,100,200);
+      const urlLines = doc.splitTextToSize('Original document: ' + template.upload_url, usableW);
+      doc.text(urlLines, margin, 160);
+      doc.setTextColor(0,0,0);
+    }
+  } else {
+    // Convert HTML to plain text + headings
+    const html = template.body_html || '';
+    const replacedHtml = html
+      .replace(/{{agent_name}}/g, agentName)
+      .replace(/{{today_date}}/g, signedAt.toLocaleDateString())
+      .replace(/{{signature}}/g, agentName)
+      .replace(/{{signature_date}}/g, signedAt.toLocaleDateString());
+    renderHtmlToPdf(doc, replacedHtml, margin, 60, usableW);
+  }
+
+  // ALWAYS add a signature certificate page at the end
+  doc.addPage();
+  doc.setFont('helvetica','bold'); doc.setFontSize(20);
+  doc.text('Electronic Signature Certificate', pageW/2, 80, { align:'center' });
+  doc.setLineWidth(0.5);
+  doc.line(margin, 95, pageW-margin, 95);
+
+  doc.setFont('helvetica','normal'); doc.setFontSize(10);
+  doc.text('This certificate provides a legally-binding record of the electronic signature applied', margin, 120);
+  doc.text('to the preceding contract document.', margin, 134);
+
+  let y = 170;
+  const addRow = (label, value) => {
+    doc.setFont('helvetica','bold'); doc.setFontSize(10);
+    doc.text(label, margin, y);
+    doc.setFont('helvetica','normal'); doc.setFontSize(10);
+    const lines = doc.splitTextToSize(String(value || '—'), usableW - 150);
+    doc.text(lines, margin + 150, y);
+    y += 14 * Math.max(lines.length, 1) + 6;
+  };
+
+  addRow('Document Title:', template.title || 'Contract');
+  addRow('Signer Name:', agentName);
+  addRow('Signer Email:', agentEmail);
+  addRow('Signed (UTC):', signedAt.toISOString());
+  addRow('Signed (Local):', signedAt.toLocaleString());
+  addRow('IP Address:', ip || 'unavailable');
+  addRow('User Agent:', userAgent);
+  addRow('Signature Method:', 'Typed Name + Affirmative Acknowledgment');
+
+  y += 10;
+  doc.setFont('helvetica','bold'); doc.setFontSize(11);
+  doc.text('SIGNED:', margin, y); y += 18;
+  doc.setFont('times','italic'); doc.setFontSize(28);
+  doc.text(agentName, margin, y);
+  y += 30;
+  doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(100,100,100);
+  doc.text('Affirmation:', margin, y); y += 12;
+  const affirm = 'I have read this contract in its entirety. I understand and agree to be bound by all of its terms. I intend my typed name above to constitute a legal electronic signature with the same force and effect as a handwritten signature.';
+  const affirmLines = doc.splitTextToSize(affirm, usableW);
+  doc.text(affirmLines, margin, y);
+  y += affirmLines.length * 11 + 20;
+  doc.setTextColor(0,0,0);
+
+  // Footer
+  doc.setFontSize(8); doc.setTextColor(150,150,150);
+  doc.text('Circle Solutions Inc. · Generated ' + signedAt.toISOString(), pageW/2, 760, { align:'center' });
+
+  return doc.output('blob');
+}
+
+// Naive HTML-to-PDF renderer (handles h1, h2, p, strong, em, ul, ol)
+function renderHtmlToPdf(doc, html, x, startY, width){
+  // Strip and parse
+  const tmp = document.createElement('div');
+  tmp.innerHTML = html;
+  let y = startY;
+  const pageH = doc.internal.pageSize.getHeight();
+
+  function newPageIfNeeded(needed=20){
+    if(y + needed > pageH - 60){ doc.addPage(); y = 60; }
+  }
+
+  function processNode(node, opts={ size:11, bold:false, italic:false }){
+    if(node.nodeType === 3){
+      // Text node
+      const text = node.textContent.replace(/\s+/g,' ');
+      if(!text.trim()) return;
+      const fontStyle = opts.bold && opts.italic ? 'bolditalic' : opts.bold ? 'bold' : opts.italic ? 'italic' : 'normal';
+      doc.setFont('helvetica', fontStyle); doc.setFontSize(opts.size);
+      const lines = doc.splitTextToSize(text, width);
+      for(const line of lines){
+        newPageIfNeeded(opts.size + 4);
+        doc.text(line, x, y);
+        y += opts.size * 1.3;
+      }
+      return;
+    }
+    if(node.nodeType !== 1) return;
+    const tag = node.tagName.toLowerCase();
+    switch(tag){
+      case 'h1':
+        y += 10; newPageIfNeeded(28);
+        doc.setFont('helvetica','bold'); doc.setFontSize(18);
+        const h1text = node.textContent.replace(/\s+/g,' ').trim();
+        const h1lines = doc.splitTextToSize(h1text, width);
+        for(const line of h1lines){ newPageIfNeeded(22); doc.text(line, x, y); y += 22; }
+        y += 6;
+        return;
+      case 'h2':
+        y += 8; newPageIfNeeded(20);
+        doc.setFont('helvetica','bold'); doc.setFontSize(14);
+        const h2text = node.textContent.replace(/\s+/g,' ').trim();
+        const h2lines = doc.splitTextToSize(h2text, width);
+        for(const line of h2lines){ newPageIfNeeded(18); doc.text(line, x, y); y += 18; }
+        y += 4;
+        return;
+      case 'p':
+      case 'div':
+        for(const child of node.childNodes){ processNode(child, opts); }
+        y += 8;
+        return;
+      case 'strong': case 'b':
+        for(const child of node.childNodes){ processNode(child, { ...opts, bold:true }); }
+        return;
+      case 'em': case 'i':
+        for(const child of node.childNodes){ processNode(child, { ...opts, italic:true }); }
+        return;
+      case 'br':
+        y += 14;
+        return;
+      case 'ul':
+        for(const li of node.querySelectorAll(':scope > li')){
+          newPageIfNeeded(16);
+          doc.setFont('helvetica','normal'); doc.setFontSize(11);
+          doc.text('•', x, y);
+          const liText = li.textContent.replace(/\s+/g,' ').trim();
+          const liLines = doc.splitTextToSize(liText, width - 14);
+          for(let i=0; i<liLines.length; i++){
+            if(i>0) newPageIfNeeded(14);
+            doc.text(liLines[i], x+14, y);
+            y += 14;
+          }
+          y += 2;
+        }
+        y += 4;
+        return;
+      case 'ol':
+        let n = 1;
+        for(const li of node.querySelectorAll(':scope > li')){
+          newPageIfNeeded(16);
+          doc.setFont('helvetica','normal'); doc.setFontSize(11);
+          doc.text(n+'.', x, y); n++;
+          const liText = li.textContent.replace(/\s+/g,' ').trim();
+          const liLines = doc.splitTextToSize(liText, width - 18);
+          for(let i=0; i<liLines.length; i++){
+            if(i>0) newPageIfNeeded(14);
+            doc.text(liLines[i], x+18, y);
+            y += 14;
+          }
+          y += 2;
+        }
+        y += 4;
+        return;
+      default:
+        for(const child of node.childNodes){ processNode(child, opts); }
+    }
+  }
+
+  for(const child of tmp.childNodes){ processNode(child); }
+}
+
+
+async function downloadSignedContract(assignmentId){
+  const { data: a } = await sb.from('contract_assignments').select('signed_pdf_path,signed_pdf_url,template_snapshot').eq('id', assignmentId).single();
+  if(!a){ alert('Contract not found'); return; }
+  const path = a.signed_pdf_path;
+  if(!path){ alert('Signed PDF not found'); return; }
+  const { data, error } = await sb.storage.from('signed-contracts').createSignedUrl(path, 60);
+  if(error || !data?.signedUrl){ alert('Could not generate download link'); return; }
+  const link = document.createElement('a');
+  link.href = data.signedUrl;
+  link.download = ((a.template_snapshot?.title || 'contract').replace(/[^a-zA-Z0-9]/g,'_')) + '_signed.pdf';
+  link.target = '_blank';
+  document.body.appendChild(link); link.click(); link.remove();
+}
+
+
 // Expose functions that inline HTML onclicks reference
 window.showPage = showPage;
 window.toggleSubNav = toggleSubNav;
@@ -6420,6 +7169,23 @@ window.openSendPacketModal = openSendPacketModal;
 window.sendPacketsToAgent = sendPacketsToAgent;
 window.viewAgentOnboardingDetail = viewAgentOnboardingDetail;
 window.unlockCodesForAgent = unlockCodesForAgent;
+window.renderContractBuilder = renderContractBuilder;
+window.openContractBuilderEditor = openContractBuilderEditor;
+window.closeCbEditor = closeCbEditor;
+window.cbCmd = cbCmd;
+window.cbFormatBlock = cbFormatBlock;
+window.cbInsertToken = cbInsertToken;
+window.cbHandleUpload = cbHandleUpload;
+window.saveContractTemplateV2 = saveContractTemplateV2;
+window.toggleTemplateActive = toggleTemplateActive;
+window.deleteTemplate = deleteTemplate;
+window.previewContractTemplate = previewContractTemplate;
+window.openSendContractModal = openSendContractModal;
+window.sendContractToAgents = sendContractToAgents;
+window.renderMyContracts = renderMyContracts;
+window.openSignContractModal = openSignContractModal;
+window.finalizeContractSignature = finalizeContractSignature;
+window.downloadSignedContract = downloadSignedContract;
 </script>
 
 </body>
