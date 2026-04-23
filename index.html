@@ -4097,9 +4097,11 @@ async function saveMeeting(programId){
 }
 
 function generateJitsiRoomName(programId){
+  // meet.jit.si works best with simple alphanumeric names
+  // Long unique names also prevent anyone from guessing/crashing the room
   const ts = Date.now().toString(36);
-  const rand = Math.random().toString(36).substring(2, 8);
-  return `CircleSolutions-${programId}-${ts}-${rand}`;
+  const rand = Math.random().toString(36).substring(2, 10) + Math.random().toString(36).substring(2, 10);
+  return `CSI${programId}${ts}${rand}`.replace(/[^a-zA-Z0-9]/g,'');
 }
 
 async function deleteMeeting(id){
@@ -4244,6 +4246,15 @@ function initJitsi(meeting, roomName, displayName, email, isHost){
       startWithAudioMuted: !isHost,
       startWithVideoMuted: !isHost,
       disableDeepLinking: true,
+      // Disable Jitsi's built-in lobby/moderator auth — we control access via our back office
+      enableLobbyChat: false,
+      lobby: { enableChat: false, autoKnock: false },
+      enableWelcomePage: false,
+      enableClosePage: false,
+      requireDisplayName: false,
+      disableProfile: false,
+      // Critical: treat everyone as having moderator rights so no "waiting for moderator" screen
+      disableModeratorIndicator: false,
       toolbarButtons: isHost
         ? ['microphone','camera','desktop','chat','raisehand','tileview','settings','hangup','fullscreen','recording','participants-pane','mute-everyone','videoquality']
         : ['microphone','camera','desktop','chat','raisehand','tileview','settings','hangup','fullscreen']
@@ -4252,11 +4263,21 @@ function initJitsi(meeting, roomName, displayName, email, isHost){
       SHOW_JITSI_WATERMARK: false,
       SHOW_WATERMARK_FOR_GUESTS: false,
       DEFAULT_BACKGROUND: '#0A0A0A',
-      DEFAULT_REMOTE_DISPLAY_NAME: 'Team Member'
+      DEFAULT_REMOTE_DISPLAY_NAME: 'Team Member',
+      MOBILE_APP_PROMO: false,
+      SHOW_CHROME_EXTENSION_BANNER: false,
+      DISABLE_JOIN_LEAVE_NOTIFICATIONS: false
     }
   };
   const api = new window.JitsiMeetExternalAPI(domain, options);
   window._jitsiAPI = api;
+
+  // When video conference is joined, if we're the host and someone created a lobby, disable it
+  api.addEventListener('videoConferenceJoined', () => {
+    if(isHost){
+      try { api.executeCommand('toggleLobby', false); } catch(e){ /* ignore */ }
+    }
+  });
 
   // Auto-start recording if enabled and host
   if(isHost && meeting.recording_enabled){
