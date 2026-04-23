@@ -1,58 +1,116 @@
-# Circle Solutions Inc. — Phase 1 Update
+# Circle Solutions Inc. — Phase 2 Update
 
 ## What's new in this version
 
-- 5-role hierarchy: **Owner / Admin / Manager / Team Lead / Agent**
-- **Markets** system (add Dallas, San Antonio, etc. per program)
-- **Reports To** field — link agents to their team lead or manager
-- **Profile pictures** (upload avatars, max 2MB)
-- **👑 Owner Panel** — locked from everyone except you
-- **Delete team members** (owner only, type DELETE to confirm)
-- **Password reset** button per user (owner only — sends Supabase reset email)
-- **Visibility fixed** — managers no longer see owner-only tools
-- **Search bar** in team list to find people by name/email
+### Training Calls (Jitsi video with waiting room)
+- Managers/admins with `can_host_meetings` permission can schedule training calls
+- **Built-in Jitsi video** (free, no account needed) — runs inside your back office
+- Waiting room: non-hosts wait until the host starts the meeting
+- **Auto-admit when host joins** — everyone waiting drops straight into the call
+- Optional recording toggle per meeting
+- Also supports external links (Zoom, Meet, Teams) as fallback
+- Email invites sent to all program members automatically
 
-## Upgrade steps
+### Documents Library
+- **Company Library** (global) — visible to everyone, owner/admin upload
+- **Per-program Documents** — each program has its own document area
+- Folders + files, uploads up to 25MB per file
+- Files stored privately in Supabase Storage, signed download URLs
 
-If you already ran `SUPABASE_SETUP.sql` previously, you only need to:
+### Contract Templates (Owner only)
+- Define default contracts per program (e.g. "NDA", "ICA", "W9")
+- When a new agent is created in that program, the templates auto-assign to their contracts list
+- Link to Google Drive, DocuSign, Dropbox — whatever you use
 
-### 1. Run the migration SQL
+### Form Builder
+- Owner/admins build custom forms (timesheets, incident reports, surveys, etc.)
+- Field types: text, long text, number, date, dropdown, checkbox
+- Per-program or global scope
+- Agents fill out from the "📋 My Forms" sidebar or program Forms tab
+- View submissions inline or export to CSV
 
-- Supabase dashboard → SQL Editor → New query
-- Open `PHASE1_MIGRATION.sql` → copy-paste all → Run
-- Should see "Success. No rows returned."
+### Scoped Announcements
+- Post to: Company-wide / Program / Market / Your Direct Team
+- Optional "Also send as email" broadcast to all recipients
 
-### 2. Verify the avatars storage bucket
+### Email Automation (via Resend)
+- Hidden API key, server-side Edge Function
+- Auto-sends welcome email with login details when you create a new team member
+- "📧 Email Login" button in team list for re-sending
+- Meeting invites, announcements, contract-assigned notifications
+- All emails from `noreply@circlesolutionsinc.com` (your verified domain)
 
-- Supabase → **Storage** (left sidebar)
-- You should see a bucket called **`avatars`**
-- If not, click **New bucket** → name: `avatars` → **Public bucket: ON** → Create
+### Host Permission Toggle
+- Owner sets `🎥 Can host training calls` on each team member
+- Default OFF — only owner/admin can host unless you grant it
+- Found in the Edit Team Member modal (owner-only)
 
-### 3. Push new `index.html` to GitHub
+---
 
-- Go to github.com/CSI2026/circlesolutionsinc.com
-- Click `index.html` → pencil icon → delete all content → paste the new one
-- Commit directly to `main`
-- Wait 1-2 min for GitHub Pages to redeploy
+## Upgrade steps (do these in order)
 
-### 4. Upload the new SQL files to GitHub (for your records)
+### 1. Run the Phase 2 SQL migration
 
-- Repo root → Add file → Upload files
-- Drag in `PHASE1_MIGRATION.sql` and the updated `README.md`
-- Commit
+Supabase dashboard → SQL Editor → New query → paste `PHASE2_MIGRATION.sql` → Run.
+You should see "Success. No rows returned."
 
-## Test checklist after upgrading
+### 2. Deploy the `send-email` Edge Function
 
-1. ✅ Log in at circlesolutionsinc.com with your owner account
-2. ✅ You should land on the **👑 Owner Panel** (new!)
-3. ✅ Click **📍 Markets** → add a test market (e.g. "Dallas TX" under Fiber)
-4. ✅ Click **👥 Team** → click Edit on any agent → you should see new fields for Market + Reports To
-5. ✅ Log in as Baron in an incognito window — he should NOT see Owner Panel, Markets, Applications, or Programs nav items
-6. ✅ Upload a profile picture on your Account → My Profile page
+See `EDGE_FUNCTION_SETUP.md` for the full guide. Short version:
 
-## Coming next
+1. Supabase dashboard → Edge Functions → Create new function → name it `send-email`
+2. Paste the contents of `supabase-edge-functions/send-email/index.ts`
+3. Deploy
+4. Supabase dashboard → Project Settings → Edge Functions → Secrets → add `RESEND_API_KEY` = your new Resend API key
 
-- **Phase 2:** documents & folders, form builder, training call links, announcements per program, contract automation, "email login" button
-- **Phase 3:** Jitsi video training rooms, group chat, SMS notifications, workflow automations
+### 3. Verify the `documents` storage bucket
 
-© 2025 Circle Solutions Inc.
+Supabase → Storage → should see a `documents` bucket (private, NOT public — that's correct).
+
+### 4. Push updated `index.html` to GitHub
+
+github.com/CSI2026/circlesolutionsinc.com → edit `index.html` → paste new content → commit to `main`.
+
+Also upload `PHASE2_MIGRATION.sql`, `EDGE_FUNCTION_SETUP.md`, and the `supabase-edge-functions/send-email/index.ts` file to the repo for your records.
+
+### 5. Test it
+
+1. Log in at https://circlesolutionsinc.com as owner
+2. Go to 👥 Team → click a team member → Edit → check the **🎥 Can host training calls** toggle for anyone you want able to schedule meetings
+3. Click into a program → 📞 Training Calls tab → "+ Schedule Call" → create a test meeting for 5 minutes from now
+4. Have a teammate log in — they'll see it listed. Click Join → waiting room.
+5. As host, click "Start Meeting" → teammate gets auto-admitted.
+6. Test documents: Click 📁 Company Library → create a folder → upload a file → make sure non-admin users can see it.
+7. Test forms: 📋 All Forms → "+ Create Form" → add a few fields → save. Then log in as a non-admin and see it under "📋 My Forms".
+8. Create a new test team member — they should receive the welcome email automatically.
+
+---
+
+## File manifest
+
+```
+index.html                                    ← new version, replaces your existing file
+PHASE2_MIGRATION.sql                          ← run in Supabase SQL editor
+EDGE_FUNCTION_SETUP.md                        ← step-by-step edge function deploy
+supabase-edge-functions/send-email/index.ts   ← edge function source code
+SUPABASE_SETUP.sql                            ← original schema (unchanged, for reference)
+PHASE1_MIGRATION.sql                          ← previous migration (unchanged)
+README.md                                     ← this file
+404.html                                      ← unchanged
+```
+
+---
+
+## Known limitations (things for later)
+
+- **Signup quirk preserved**: when you create a new agent client-side, Supabase briefly signs you in as them. We detect this and sign you out with a warning. The proper fix is to create users through a server-side Edge Function using the service-role key — documented as future work.
+- **Group chat / DMs**: not yet. Planned for Phase 3.
+- **SMS notifications** (Twilio): not yet. Planned for Phase 3.
+- **Self-hosted Jitsi** with custom branding: using meet.jit.si (free public instance) for now — works great, but you could self-host later to remove the "jit.si" branding.
+- **Jitsi recording**: requires you to link a Dropbox account to meet.jit.si (it's free — users will see a prompt). Alternative is self-hosted Jitsi with local file storage.
+
+---
+
+## Support
+
+Questions or issues? Contact info@circlesolutionsinc.com.
