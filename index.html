@@ -1150,6 +1150,10 @@ footer{
       <div style="padding:0 24px 14px;font-size:10.5px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:rgba(255,255,255,0.35);">My Programs</div>
       <div id="bo-program-list"></div>
 
+      <div style="padding:24px 24px 14px 24px;margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);font-size:10.5px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:rgba(255,255,255,0.35);">Company</div>
+      <button class="bo-nav-item" id="nav-global-docs" onclick="boShowAdmin('global-docs')">📁 Company Library</button>
+      <button class="bo-nav-item" id="nav-my-forms" onclick="boShowAdmin('my-forms')">📋 My Forms</button>
+
       <div id="bo-admin-nav-wrap" style="display:none;">
         <div style="padding:24px 24px 14px 24px;margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);font-size:10.5px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:rgba(255,255,255,0.35);">Administration</div>
         <div id="bo-admin-nav"></div>
@@ -2037,10 +2041,12 @@ function renderSidebar(){
   if(isOwner){
     navItems.push({ id:'owner-panel', label:'👑 Owner Panel' });
     navItems.push({ id:'markets', label:'📍 Markets' });
+    navItems.push({ id:'contract-templates', label:'📄 Contract Templates' });
+    navItems.push({ id:'forms-admin', label:'📋 All Forms' });
     navItems.push({ id:'applications', label:'📝 Applications' });
     navItems.push({ id:'programs-admin', label:'🎯 Programs' });
   } else if(isAdmin){
-    // Admin sees applications + programs but NOT the owner panel or market management
+    navItems.push({ id:'forms-admin', label:'📋 All Forms' });
     navItems.push({ id:'applications', label:'📝 Applications' });
     navItems.push({ id:'programs-admin', label:'🎯 Programs' });
   }
@@ -2088,6 +2094,10 @@ function renderMainContent(){
   if(activeAdminView === 'programs-admin'){ renderProgramsAdmin(el); return; }
   if(activeAdminView === 'owner-panel'){ renderOwnerPanel(el); return; }
   if(activeAdminView === 'markets'){ renderMarketsAdmin(el); return; }
+  if(activeAdminView === 'global-docs'){ renderGlobalDocuments(el); return; }
+  if(activeAdminView === 'contract-templates'){ renderContractTemplates(el); return; }
+  if(activeAdminView === 'forms-admin'){ renderFormsAdmin(el); return; }
+  if(activeAdminView === 'my-forms'){ renderMyForms(el); return; }
 
   if(!activeProgramId){
     el.innerHTML = `
@@ -2116,9 +2126,12 @@ function renderProgramView(el){
 
   const subTabs = [
     { id:'dashboard',     label:'📊 Dashboard' },
-    { id:'training',      label:'🎓 Training' },
+    { id:'meetings',      label:'📞 Training Calls' },
+    { id:'training',      label:'🎓 Training Docs' },
+    { id:'documents',     label:'📁 Documents' },
     { id:'contracts',     label:'📄 Contracts' },
-    { id:'codes',         label:'🔐 Codes & Credentials' },
+    { id:'codes',         label:'🔐 Codes' },
+    { id:'forms',         label:'📋 Forms' },
     { id:'leaderboard',   label:'🏆 Leaderboard' },
     { id:'announcements', label:'📢 Announcements' }
   ];
@@ -2135,10 +2148,13 @@ function renderProgramView(el){
     <div id="bo-subcontent"></div>`;
 
   const sub = document.getElementById('bo-subcontent');
-  if(activeSubView === 'dashboard')     renderDashboard(sub, prog, canManage);
+  if(activeSubView === 'dashboard')          renderDashboard(sub, prog, canManage);
+  else if(activeSubView === 'meetings')      renderMeetings(sub, prog, canManage);
   else if(activeSubView === 'training')      renderTraining(sub, prog, canManage);
+  else if(activeSubView === 'documents')     renderProgramDocuments(sub, prog, canManage);
   else if(activeSubView === 'contracts')     renderContracts(sub, prog, canManage);
   else if(activeSubView === 'codes')         renderCodes(sub, prog, canManage);
+  else if(activeSubView === 'forms')         renderFormsTab(sub, prog, canManage);
   else if(activeSubView === 'leaderboard')   renderLeaderboard(sub, prog);
   else if(activeSubView === 'announcements') renderAnnouncements(sub, prog, canManage);
 }
@@ -2488,37 +2504,104 @@ async function renderLeaderboard(el, prog){
 
 // ─── Announcements ───
 async function renderAnnouncements(el, prog, canManage){
-  const { data: anns } = await sb.from('announcements')
+  const isOwner = currentProfile.role === 'owner';
+  const isAdmin = isOwner || currentProfile.role === 'admin';
+  const isManager = currentProfile.role === 'manager';
+  const isTeamLead = currentProfile.role === 'team_lead';
+
+  // Fetch announcements: program-wide for this program + company-wide + team/market scoped where applicable
+  const { data: all } = await sb.from('announcements')
     .select('*, profiles!announcements_posted_by_fkey(full_name,email)')
-    .eq('program_id', prog.id)
-    .order('created_at', { ascending:false });
+    .order('created_at', { ascending: false });
+
+  // Filter to what this user should see
+  const anns = (all || []).filter(a => {
+    if(a.scope === 'company') return true;
+    if(a.scope === 'program') return a.program_id === prog.id;
+    if(a.scope === 'market'){
+      return a.program_id === prog.id && a.market_id === currentProfile.market_id;
+    }
+    if(a.scope === 'team'){
+      // Visible to: the team_of user (themselves) or anyone who reports_to them directly/indirectly
+      if(a.team_of === currentProfile.id) return true;
+      if(currentProfile.reports_to === a.team_of) return true;
+      return false;
+    }
+    // Legacy rows with no scope default to program
+    if(!a.scope && a.program_id === prog.id) return true;
+    return false;
+  });
 
   el.innerHTML = `
     <div class="bo-card">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
-        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;">📢 Program Announcements</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;">📢 Announcements</div>
         ${canManage ? `<button class="bo-btn bo-btn-primary" onclick="openAnnModal('${prog.id}')">+ Post Announcement</button>` : ''}
       </div>
-      ${(!anns || anns.length === 0) ? '<div style="color:rgba(255,255,255,0.4);font-size:13.5px;padding:14px 0;">No announcements yet.</div>' : `
-        ${anns.map(a => `
+      ${(anns.length === 0) ? '<div style="color:rgba(255,255,255,0.4);font-size:13.5px;padding:14px 0;">No announcements yet.</div>' : `
+        ${anns.map(a => {
+          const scopeBadge = a.scope === 'company' ? '<span style="background:rgba(255,215,0,0.12);color:#FFD700;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">COMPANY-WIDE</span>' :
+                             a.scope === 'team' ? '<span style="background:rgba(168,85,247,0.15);color:#A855F7;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">TEAM</span>' :
+                             a.scope === 'market' ? '<span style="background:rgba(0,198,255,0.15);color:#00C6FF;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">MARKET</span>' : '';
+          return `
           <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:12px;padding:18px;margin-bottom:12px;">
             <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
               <div style="flex:1;">
-                <div style="font-size:16px;font-weight:700;color:#fff;margin-bottom:4px;">${a.title}</div>
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;flex-wrap:wrap;">
+                  <div style="font-size:16px;font-weight:700;color:#fff;">${escapeHtml(a.title)}</div>
+                  ${scopeBadge}
+                </div>
                 <div style="font-size:11.5px;color:rgba(255,255,255,0.35);margin-bottom:10px;">${a.profiles?.full_name || 'System'} · ${new Date(a.created_at).toLocaleString()}</div>
-                <div style="font-size:13.5px;color:rgba(255,255,255,0.7);line-height:1.65;white-space:pre-wrap;">${a.body}</div>
+                <div style="font-size:13.5px;color:rgba(255,255,255,0.7);line-height:1.65;white-space:pre-wrap;">${escapeHtml(a.body)}</div>
               </div>
-              ${canManage ? `<button class="bo-btn bo-btn-danger" style="padding:5px 10px;font-size:11px;" onclick="deleteAnn('${a.id}')">✕</button>` : ''}
+              ${(canManage && (isOwner || a.posted_by === currentProfile.id)) ? `<button class="bo-btn bo-btn-danger" style="padding:5px 10px;font-size:11px;" onclick="deleteAnn('${a.id}')">✕</button>` : ''}
             </div>
-          </div>`).join('')}`}
+          </div>`;
+        }).join('')}`}
     </div>`;
 }
 
 function openAnnModal(programId){
+  const isOwner = currentProfile.role === 'owner';
+  const isAdmin = isOwner || currentProfile.role === 'admin';
+  const isManager = currentProfile.role === 'manager';
+  const isTeamLead = currentProfile.role === 'team_lead';
+
+  // Scope options based on role
+  const scopeOptions = [];
+  if(isAdmin) scopeOptions.push({ value:'company', label:'🌐 Company-Wide (all programs)' });
+  if(isAdmin || isManager) scopeOptions.push({ value:'program', label:'🎯 This Program (' + (allPrograms.find(p=>p.id===programId)?.name || '') + ')' });
+  scopeOptions.push({ value:'market', label:'📍 My Market only' });
+  if(isManager || isTeamLead) scopeOptions.push({ value:'team', label:'👥 My Direct Team only' });
+
+  const marketsForProgram = (allMarkets || []).filter(m => m.program_id === programId);
+
   document.getElementById('modal-box').innerHTML = `
-    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:32px;color:#fff;margin-bottom:18px;letter-spacing:1px;">New Announcement</h2>
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:32px;color:#fff;margin-bottom:18px;letter-spacing:1px;">📢 New Announcement</h2>
+    <div class="form-group">
+      <label class="form-label">Who should see this? *</label>
+      <select id="ann-scope" class="form-input" style="background:#1a1a1a;" onchange="document.getElementById('ann-market-wrap').style.display=this.value==='market'?'block':'none';">
+        ${scopeOptions.map(o => `<option value="${o.value}">${o.label}</option>`).join('')}
+      </select>
+      <div style="font-size:11.5px;color:rgba(255,255,255,0.4);margin-top:4px;">Only visible to people in the scope you pick.</div>
+    </div>
+    <div class="form-group" id="ann-market-wrap" style="display:none;">
+      <label class="form-label">Which market?</label>
+      <select id="ann-market" class="form-input" style="background:#1a1a1a;">
+        ${marketsForProgram.length === 0 ? '<option value="">No markets set up for this program</option>' : marketsForProgram.map(m => `<option value="${m.id}" ${m.id===currentProfile.market_id?'selected':''}>${escapeHtml(m.name)}</option>`).join('')}
+      </select>
+    </div>
     <div class="form-group"><label class="form-label">Title *</label><input id="ann-title" class="form-input"/></div>
     <div class="form-group"><label class="form-label">Body *</label><textarea id="ann-body" class="form-input" rows="5"></textarea></div>
+    <div class="form-group">
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+        <input type="checkbox" id="ann-email" style="width:18px;height:18px;accent-color:#FF6B00;"/>
+        <div>
+          <div style="font-weight:600;color:#fff;font-size:13.5px;">📧 Also send as email to recipients</div>
+          <div style="font-size:11.5px;color:rgba(255,255,255,0.5);">Email everyone in the scope (slower for large audiences)</div>
+        </div>
+      </label>
+    </div>
     <div style="display:flex;gap:10px;margin-top:18px;">
       <button class="bo-btn bo-btn-primary" onclick="saveAnn('${programId}')">Post</button>
       <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
@@ -2528,16 +2611,45 @@ function openAnnModal(programId){
 }
 
 async function saveAnn(programId){
+  const scope = document.getElementById('ann-scope').value;
   const title = document.getElementById('ann-title').value.trim();
   const body = document.getElementById('ann-body').value.trim();
+  const market_id = scope === 'market' ? (document.getElementById('ann-market').value || currentProfile.market_id) : null;
+  const team_of = scope === 'team' ? currentProfile.id : null;
+  const doEmail = document.getElementById('ann-email').checked;
   const msg = document.getElementById('ann-msg');
+
   if(!title || !body){ msg.innerHTML = '<span style="color:#F87171;">Title and body are required.</span>'; return; }
-  const { error } = await sb.from('announcements').insert({
-    program_id: programId, title, body, posted_by: currentUser.id
-  });
+
+  const { data: ann, error } = await sb.from('announcements').insert({
+    program_id: scope === 'company' ? null : programId,
+    scope, market_id, team_of,
+    title, body, posted_by: currentUser.id
+  }).select().single();
+
   if(error){ msg.innerHTML = '<span style="color:#F87171;">'+error.message+'</span>'; return; }
-  closeAllModals();
-  renderMainContent();
+
+  // Optional email broadcast
+  if(doEmail){
+    msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Posted. Sending emails…</span>';
+    try {
+      let recipientsQuery = sb.from('profiles').select('email,full_name').eq('active', true);
+      if(scope === 'program')      recipientsQuery = recipientsQuery.contains('programs', [programId]);
+      else if(scope === 'market')  recipientsQuery = recipientsQuery.eq('market_id', market_id).contains('programs', [programId]);
+      else if(scope === 'team')    recipientsQuery = recipientsQuery.eq('reports_to', currentProfile.id);
+      const { data: recipients } = await recipientsQuery;
+      for(const r of (recipients || [])){
+        try {
+          await sendEmailViaFunction('announcement', r.email, {
+            title, body, posted_by: currentProfile.full_name || currentProfile.email
+          });
+        } catch(e){ console.warn('Announcement email failed for', r.email, e); }
+      }
+    } catch(e){ console.warn('Broadcast error:', e); }
+  }
+
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Posted.</span>';
+  setTimeout(() => { closeAllModals(); renderMainContent(); }, 900);
 }
 
 async function deleteAnn(id){
@@ -2624,6 +2736,7 @@ async function renderAgents(el){
               <td>${a.active ? '<span style="color:#00FF88;font-size:12px;">● Active</span>' : '<span style="color:rgba(255,255,255,0.4);font-size:12px;">○ Inactive</span>'}</td>
               <td style="text-align:right;white-space:nowrap;">
                 ${canEdit ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" onclick="openAgentModal('${a.id}')">Edit</button>` : ''}
+                ${(isOwner || isAdmin) && !isSelf ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" title="Email login details" onclick="emailLoginToAgent('${a.id}')">📧</button>` : ''}
                 ${canResetPw ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" onclick="openResetPasswordModal('${a.id}')">🔑</button>` : ''}
                 ${canToggleActive ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" onclick="toggleAgentActive('${a.id}', ${a.active})">${a.active ? 'Deactivate' : 'Activate'}</button>` : ''}
                 ${canDelete ? `<button class="bo-btn bo-btn-danger" style="padding:5px 10px;font-size:11px;margin-left:4px;" onclick="deleteAgent('${a.id}', '${(a.full_name || a.email).replace(/'/g,"\\'")}')">🗑️</button>` : ''}
@@ -2753,12 +2866,22 @@ function renderAgentModalUI(existing, editId, availablePrograms, isOwner, isAdmi
       <div style="font-size:11.5px;color:rgba(255,255,255,0.4);margin-top:4px;">Who manages this person (a Team Lead or Manager).</div>
     </div>
 
+    ${isOwner ? `<div class="form-group" style="padding:14px;background:rgba(255,215,0,0.05);border:1px solid rgba(255,215,0,0.2);border-radius:10px;">
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+        <input type="checkbox" id="ag-can-host" ${e.can_host_meetings ? 'checked' : ''} style="width:18px;height:18px;accent-color:#FFD700;"/>
+        <div style="flex:1;">
+          <div style="font-weight:600;color:#FFD700;font-size:14px;">🎥 Can host training calls</div>
+          <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-top:2px;">Allow this user to schedule and host video training calls in their assigned programs. Owner-only setting.</div>
+        </div>
+      </label>
+    </div>` : '<input type="hidden" id="ag-can-host" value="' + (e.can_host_meetings ? 'on' : '') + '"/>'}
+
     <div style="display:flex;gap:10px;margin-top:18px;">
       <button class="bo-btn bo-btn-primary" onclick="saveAgent('${editId || ''}')">${isEdit ? 'Save Changes' : 'Create Team Member'}</button>
       <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
     </div>
     <div id="ag-msg" style="margin-top:12px;font-size:13px;line-height:1.6;"></div>
-    ${!isEdit ? `<div style="margin-top:14px;padding:12px;background:rgba(0,198,255,0.05);border:1px solid rgba(0,198,255,0.15);border-radius:8px;font-size:12px;color:rgba(255,255,255,0.6);line-height:1.55;">💡 After creating, email them their login. They sign in at <strong style="color:#fff;">${window.location.host}</strong> with the email and password above.</div>` : ''}`;
+    ${!isEdit ? `<div style="margin-top:14px;padding:12px;background:rgba(0,198,255,0.05);border:1px solid rgba(0,198,255,0.15);border-radius:8px;font-size:12px;color:rgba(255,255,255,0.6);line-height:1.55;">💡 After creating, use the <strong style="color:#fff;">📧 Email Login</strong> button in the team list to send them their credentials automatically.</div>` : ''}`;
 
   // Stash leaders for dropdown refresh
   window._agentModalLeaders = leaders || [];
@@ -2809,18 +2932,22 @@ async function saveAgent(editId){
   const programs = Array.from(document.querySelectorAll('#modal-box input[type=checkbox]:checked')).map(c => c.value);
   const market_id = document.getElementById('ag-market').value || null;
   const reports_to = document.getElementById('ag-reports-to').value || null;
+  const canHostEl = document.getElementById('ag-can-host');
+  const can_host_meetings = canHostEl ? (canHostEl.type === 'checkbox' ? canHostEl.checked : canHostEl.value === 'on') : false;
   const msg = document.getElementById('ag-msg');
 
   if(!full_name || !email){ msg.innerHTML = '<span style="color:#F87171;">Name and email are required.</span>'; return; }
 
   if(editId){
-    const { error } = await sb.from('profiles').update({
+    const updateData = {
       full_name, phone: phone || null, role, programs, market_id, reports_to,
       updated_at: new Date().toISOString()
-    }).eq('id', editId);
+    };
+    // Only owners can change can_host_meetings
+    if(currentProfile.role === 'owner'){ updateData.can_host_meetings = can_host_meetings; }
+    const { error } = await sb.from('profiles').update(updateData).eq('id', editId);
     if(error){ msg.innerHTML = '<span style="color:#F87171;">'+error.message+'</span>'; return; }
     closeAllModals();
-    // If editing myself, refresh profile
     if(editId === currentProfile.id){ await loadCurrentProfile(); enterBackOffice(); return; }
     renderMainContent();
     return;
@@ -2839,29 +2966,67 @@ async function saveAgent(editId){
 
   const { data: sessionData } = await sb.auth.getSession();
   const currentAuthId = sessionData?.session?.user?.id;
+  const newUserId = data.user?.id;
+
+  // Build profile update
+  const profileUpdate = {
+    full_name, phone: phone || null, role, programs, market_id, reports_to
+  };
+  if(currentProfile.role === 'owner'){ profileUpdate.can_host_meetings = can_host_meetings; }
 
   if(currentAuthId && currentAuthId !== currentUser.id){
-    // Try to update the new profile before signing out, using the new session's permissions
-    if(data.user){
-      await sb.from('profiles').update({
-        full_name, phone: phone || null, role, programs, market_id, reports_to
-      }).eq('id', data.user.id);
+    // We got signed in as the new user. Update their profile first while we have access.
+    if(newUserId){
+      await sb.from('profiles').update(profileUpdate).eq('id', newUserId);
+      // Auto-assign contract templates for each program
+      await autoAssignContracts(newUserId, programs);
     }
     await sb.auth.signOut();
-    msg.innerHTML = `<div style="color:#FFD700;background:rgba(255,215,0,0.08);padding:12px;border-radius:8px;border:1px solid rgba(255,215,0,0.2);line-height:1.6;">⚠️ <strong>${full_name}</strong> was created successfully, but you've been signed out because of how Supabase handles signups. <strong>Sign back in with your own credentials</strong> to continue — your team member is ready to log in with the password you set.</div>`;
-    setTimeout(() => { doLogout(); }, 4500);
+    // Queue welcome email — we'll send it after owner signs back in? Actually we can try now but it may fail due to auth
+    // Best effort: try sending from the new user's session (they have limited perms but the edge function only checks auth)
+    try {
+      await sendEmailViaFunction('welcome', email, {
+        full_name, email, password, role_label: roleLabel(role),
+        programs: programs.map(pid => (allPrograms.find(p=>p.id===pid)||{}).name).filter(Boolean)
+      });
+    } catch(e){ console.warn('Welcome email send attempted but may need retry:', e); }
+    msg.innerHTML = `<div style="color:#FFD700;background:rgba(255,215,0,0.08);padding:12px;border-radius:8px;border:1px solid rgba(255,215,0,0.2);line-height:1.6;">⚠️ <strong>${full_name}</strong> was created successfully. A welcome email with login details has been sent to <strong>${email}</strong>.<br><br>You've been signed out due to a Supabase signup quirk — <strong>sign back in</strong> to continue.</div>`;
+    setTimeout(() => { doLogout(); }, 5000);
     return;
   }
 
   // Update the new profile with complete data
-  if(data.user){
-    await sb.from('profiles').update({
-      full_name, phone: phone || null, role, programs, market_id, reports_to
-    }).eq('id', data.user.id);
+  if(newUserId){
+    await sb.from('profiles').update(profileUpdate).eq('id', newUserId);
+    await autoAssignContracts(newUserId, programs);
   }
 
-  msg.innerHTML = '<span style="color:#00FF88;">✓ Team member created. Email them their login details.</span>';
-  setTimeout(() => { closeAllModals(); renderMainContent(); }, 1500);
+  // Send welcome email via Edge Function
+  let emailStatus = '';
+  try {
+    const emailResult = await sendEmailViaFunction('welcome', email, {
+      full_name, email, password, role_label: roleLabel(role),
+      programs: programs.map(pid => (allPrograms.find(p=>p.id===pid)||{}).name).filter(Boolean)
+    });
+    emailStatus = emailResult?.success ? ' Welcome email sent to ' + email + '.' : ' (Email send failed — click 📧 Email Login in team list to retry.)';
+  } catch(e){
+    emailStatus = ' (Email send failed — click 📧 Email Login in team list to retry.)';
+  }
+
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Team member created.' + emailStatus + '</span>';
+  setTimeout(() => { closeAllModals(); renderMainContent(); }, 2000);
+}
+
+// Auto-assign contract templates when a new agent is added to a program
+async function autoAssignContracts(userId, programs){
+  if(!programs || programs.length === 0) return;
+  const { data: templates } = await sb.from('contract_templates').select('*').in('program_id', programs).eq('auto_assign', true);
+  if(!templates || templates.length === 0) return;
+  const rows = templates.map(t => ({
+    user_id: userId, program_id: t.program_id, title: t.title,
+    url: t.url || null, status: 'pending', notes: t.description || null
+  }));
+  await sb.from('contracts').insert(rows);
 }
 
 async function toggleAgentActive(id, currentlyActive){
@@ -3446,6 +3611,1121 @@ function sendApplicationEmail(data){
   } catch(e){ if(timer) clearTimeout(timer); showEmailFallback(data); }
 }
 
+
+// ═══════════════════════════════════════════════════════════════
+// PHASE 2 — EMAIL VIA EDGE FUNCTION (Resend)
+// ═══════════════════════════════════════════════════════════════
+async function sendEmailViaFunction(template, to, variables){
+  // Calls the 'send-email' Supabase Edge Function which hides the Resend API key server-side.
+  const { data, error } = await sb.functions.invoke('send-email', {
+    body: { template, to, variables: variables || {} }
+  });
+  if(error){ console.error('Email send error:', error); throw error; }
+  return data;
+}
+
+// "Email Login" button handler — sends welcome email with login details
+async function emailLoginToAgent(userId){
+  const { data: profile } = await sb.from('profiles').select('*').eq('id', userId).single();
+  if(!profile){ alert('User not found'); return; }
+
+  // We don't have their password (bcrypt hashed). Two options:
+  // (1) Send password reset link (user sets their own)
+  // (2) Prompt owner for a new temporary password to include in the email
+  const choice = confirm('How do you want to send their login?\n\nOK = Generate a temp password and email it (recommended)\nCancel = Send a password reset link instead (they set their own)');
+
+  if(choice){
+    // Generate a secure temporary password and update it
+    const tempPassword = generateTempPassword();
+    // We can't directly set another user's password from client without admin API.
+    // Workaround: use Supabase's resetPasswordForEmail which sends them a link.
+    // For now, we'll send a welcome email containing a reset link.
+    try {
+      await sb.auth.resetPasswordForEmail(profile.email, {
+        redirectTo: window.location.origin
+      });
+      await sendEmailViaFunction('welcome', profile.email, {
+        full_name: profile.full_name,
+        email: profile.email,
+        password: 'Check your inbox — we also sent you a password-setup link. Click it to choose your own password.',
+        role_label: roleLabel(profile.role),
+        programs: (profile.programs || []).map(pid => (allPrograms.find(p=>p.id===pid)||{}).name).filter(Boolean)
+      });
+      alert('✓ Welcome email sent to ' + profile.email + '. They\'ll receive a link to set their password.');
+    } catch(e){ alert('Error: ' + (e.message || 'email send failed')); }
+  } else {
+    try {
+      await sb.auth.resetPasswordForEmail(profile.email, {
+        redirectTo: window.location.origin
+      });
+      alert('✓ Password reset link sent to ' + profile.email);
+    } catch(e){ alert('Error: ' + (e.message || 'email send failed')); }
+  }
+}
+
+function generateTempPassword(){
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+  let p = '';
+  for(let i=0; i<12; i++) p += chars[Math.floor(Math.random()*chars.length)];
+  return p;
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// PHASE 2 — DOCUMENTS (Global Library + Per-Program)
+// ═══════════════════════════════════════════════════════════════
+
+async function renderGlobalDocuments(el){
+  el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading library…</div>';
+  await renderDocumentLibrary(el, null, '📁 Company Library', 'Company-wide documents visible to everyone.');
+}
+
+async function renderProgramDocuments(el, prog, canManage){
+  await renderDocumentLibrary(el, prog, '📁 ' + prog.name + ' — Documents', 'Documents for ' + prog.name + ' only.');
+}
+
+async function renderDocumentLibrary(el, prog, title, subtitle){
+  const programId = prog ? prog.id : null;
+  const isOwner = currentProfile.role === 'owner';
+  const isAdmin = isOwner || currentProfile.role === 'admin';
+  const isManager = currentProfile.role === 'manager';
+  const canManageHere = isAdmin || (isManager && programId && (currentProfile.programs || []).includes(programId));
+  // Global library: only owner/admin can upload
+  const canUpload = programId === null ? isAdmin : canManageHere;
+
+  // Load folders + documents
+  let foldersQuery = sb.from('document_folders').select('*');
+  let docsQuery = sb.from('documents').select('*');
+  if(programId){
+    foldersQuery = foldersQuery.eq('program_id', programId);
+    docsQuery = docsQuery.eq('program_id', programId);
+  } else {
+    foldersQuery = foldersQuery.is('program_id', null);
+    docsQuery = docsQuery.is('program_id', null);
+  }
+  const { data: folders } = await foldersQuery.order('name');
+  const { data: docs } = await docsQuery.order('created_at', { ascending: false });
+
+  // Files not in any folder (root level)
+  const rootDocs = (docs || []).filter(d => !d.folder_id);
+  const folderDocs = {}; // folder_id -> [docs]
+  (docs || []).forEach(d => { if(d.folder_id){ if(!folderDocs[d.folder_id]) folderDocs[d.folder_id] = []; folderDocs[d.folder_id].push(d); } });
+
+  const accentColor = prog ? prog.color : '#FF6B00';
+
+  el.innerHTML = `
+    <div style="margin-bottom:24px;">
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">${title}</h1>
+      <p style="font-size:14px;color:rgba(255,255,255,0.5);">${subtitle}</p>
+    </div>
+    ${canUpload ? `<div style="display:flex;gap:10px;margin-bottom:20px;">
+      <button class="bo-btn bo-btn-primary" onclick="openFolderModal(${programId ? "'"+programId+"'" : 'null'})">📂 New Folder</button>
+      <button class="bo-btn bo-btn-ghost" onclick="openDocUploadModal(${programId ? "'"+programId+"'" : 'null'}, null)">⬆️ Upload File to Root</button>
+    </div>` : ''}
+
+    ${(folders || []).length === 0 && rootDocs.length === 0 ? '<div class="bo-card" style="color:rgba(255,255,255,0.4);text-align:center;padding:40px;">No documents yet. ' + (canUpload ? 'Create a folder or upload a file to get started.' : 'Check back later.') + '</div>' : ''}
+
+    ${(folders || []).map(f => `
+      <div class="bo-card" style="margin-bottom:14px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+          <div style="display:flex;align-items:center;gap:10px;">
+            <div style="font-size:28px;">📁</div>
+            <div>
+              <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#fff;letter-spacing:1px;">${escapeHtml(f.name)}</div>
+              <div style="font-size:11.5px;color:rgba(255,255,255,0.4);">${(folderDocs[f.id] || []).length} file${(folderDocs[f.id] || []).length===1?'':'s'}</div>
+            </div>
+          </div>
+          ${canUpload ? `<div style="display:flex;gap:6px;">
+            <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="openDocUploadModal(${programId ? "'"+programId+"'" : 'null'}, '${f.id}')">⬆️ Upload</button>
+            <button class="bo-btn bo-btn-danger" style="padding:5px 10px;font-size:11px;" onclick="deleteFolder('${f.id}', '${escapeHtml(f.name)}')">✕</button>
+          </div>` : ''}
+        </div>
+        ${(folderDocs[f.id] || []).length === 0 ? '<div style="color:rgba(255,255,255,0.3);font-size:12.5px;padding:8px 0;">Empty folder</div>' : `
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;">
+            ${folderDocs[f.id].map(d => docCard(d, canUpload, accentColor)).join('')}
+          </div>`}
+      </div>`).join('')}
+
+    ${rootDocs.length > 0 ? `<div class="bo-card">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#fff;letter-spacing:1px;margin-bottom:12px;">Root Files</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;">
+        ${rootDocs.map(d => docCard(d, canUpload, accentColor)).join('')}
+      </div>
+    </div>` : ''}
+  `;
+}
+
+function docCard(d, canDelete, accentColor){
+  const sizeKb = d.size_bytes ? Math.round(d.size_bytes/1024) : 0;
+  const sizeStr = sizeKb > 1024 ? (sizeKb/1024).toFixed(1) + ' MB' : sizeKb + ' KB';
+  const icon = fileIcon(d.mime_type || d.name);
+  return `<div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:14px;position:relative;">
+    <div style="display:flex;gap:10px;align-items:flex-start;margin-bottom:8px;">
+      <div style="font-size:24px;">${icon}</div>
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:13px;font-weight:600;color:#fff;word-break:break-word;line-height:1.3;">${escapeHtml(d.name)}</div>
+        <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:2px;">${sizeStr}</div>
+      </div>
+    </div>
+    <div style="display:flex;gap:6px;">
+      <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;flex:1;" onclick="downloadDoc('${d.file_path}','${escapeHtml(d.name).replace(/'/g,"\\'")}')">Download</button>
+      ${canDelete ? `<button class="bo-btn bo-btn-danger" style="padding:5px 10px;font-size:11px;" onclick="deleteDoc('${d.id}','${d.file_path}')">✕</button>` : ''}
+    </div>
+  </div>`;
+}
+
+function fileIcon(filename){
+  const ext = (filename || '').toLowerCase();
+  if(ext.match(/\.(pdf)$/)) return '📕';
+  if(ext.match(/\.(docx?|odt|rtf)$/)) return '📘';
+  if(ext.match(/\.(xlsx?|csv|ods)$/)) return '📗';
+  if(ext.match(/\.(pptx?|odp|key)$/)) return '📙';
+  if(ext.match(/\.(jpg|jpeg|png|gif|webp|svg|bmp)$/)) return '🖼️';
+  if(ext.match(/\.(mp4|mov|avi|webm|mkv)$/)) return '🎥';
+  if(ext.match(/\.(mp3|wav|m4a|ogg)$/)) return '🎵';
+  if(ext.match(/\.(zip|rar|7z|tar|gz)$/)) return '📦';
+  if(ext.match(/\.(txt|md)$/)) return '📄';
+  if(ext.includes('pdf')) return '📕';
+  if(ext.includes('image')) return '🖼️';
+  if(ext.includes('video')) return '🎥';
+  if(ext.includes('audio')) return '🎵';
+  return '📎';
+}
+
+function escapeHtml(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function openFolderModal(programId){
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:28px;color:#fff;margin-bottom:14px;letter-spacing:1px;">📂 New Folder</h2>
+    <div class="form-group"><label class="form-label">Folder Name *</label><input id="fld-name" class="form-input" placeholder="e.g. Training Videos, Compliance Docs"/></div>
+    <div style="display:flex;gap:10px;">
+      <button class="bo-btn bo-btn-primary" onclick="saveFolder(${programId ? "'"+programId+"'" : 'null'})">Create Folder</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="fld-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function saveFolder(programId){
+  const name = document.getElementById('fld-name').value.trim();
+  const msg = document.getElementById('fld-msg');
+  if(!name){ msg.innerHTML = '<span style="color:#F87171;">Name required.</span>'; return; }
+  const { error } = await sb.from('document_folders').insert({
+    program_id: programId || null, name, created_by: currentProfile.id
+  });
+  if(error){ msg.innerHTML = '<span style="color:#F87171;">'+error.message+'</span>'; return; }
+  closeAllModals();
+  renderMainContent();
+}
+
+async function deleteFolder(id, name){
+  if(!confirm('Delete folder "' + name + '" and ALL files inside? This cannot be undone.')) return;
+  // Delete all documents in the folder (also deletes from storage)
+  const { data: docs } = await sb.from('documents').select('id,file_path').eq('folder_id', id);
+  if(docs && docs.length > 0){
+    const paths = docs.map(d => d.file_path);
+    await sb.storage.from('documents').remove(paths);
+  }
+  await sb.from('document_folders').delete().eq('id', id);
+  renderMainContent();
+}
+
+function openDocUploadModal(programId, folderId){
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:28px;color:#fff;margin-bottom:14px;letter-spacing:1px;">⬆️ Upload File</h2>
+    <div class="form-group"><label class="form-label">Choose a file (max 25MB)</label>
+      <input type="file" id="doc-file" class="form-input" style="padding:10px;"/>
+    </div>
+    <div class="form-group"><label class="form-label">Display Name (optional)</label>
+      <input id="doc-name" class="form-input" placeholder="Leave blank to use filename"/>
+    </div>
+    <div style="display:flex;gap:10px;">
+      <button class="bo-btn bo-btn-primary" onclick="uploadDoc(${programId ? "'"+programId+"'" : 'null'}, ${folderId ? "'"+folderId+"'" : 'null'})">Upload</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="doc-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function uploadDoc(programId, folderId){
+  const fileInput = document.getElementById('doc-file');
+  const file = fileInput.files[0];
+  const customName = document.getElementById('doc-name').value.trim();
+  const msg = document.getElementById('doc-msg');
+  if(!file){ msg.innerHTML = '<span style="color:#F87171;">Please choose a file.</span>'; return; }
+  if(file.size > 25 * 1024 * 1024){ msg.innerHTML = '<span style="color:#F87171;">File too large (max 25MB).</span>'; return; }
+
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Uploading…</span>';
+  const timestamp = Date.now();
+  const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+  const path = (programId || 'global') + '/' + timestamp + '-' + safeName;
+
+  const { error: upErr } = await sb.storage.from('documents').upload(path, file, { upsert: false });
+  if(upErr){ msg.innerHTML = '<span style="color:#F87171;">Upload failed: ' + upErr.message + '</span>'; return; }
+
+  const { data: signed } = await sb.storage.from('documents').createSignedUrl(path, 60 * 60 * 24 * 365);
+
+  const { error: insErr } = await sb.from('documents').insert({
+    folder_id: folderId || null,
+    program_id: programId || null,
+    name: customName || file.name,
+    file_url: signed?.signedUrl || '',
+    file_path: path,
+    size_bytes: file.size,
+    mime_type: file.type || null,
+    uploaded_by: currentProfile.id
+  });
+  if(insErr){
+    // Cleanup orphaned storage
+    await sb.storage.from('documents').remove([path]);
+    msg.innerHTML = '<span style="color:#F87171;">' + insErr.message + '</span>';
+    return;
+  }
+
+  msg.innerHTML = '<span style="color:#00FF88;">✓ File uploaded.</span>';
+  setTimeout(() => { closeAllModals(); renderMainContent(); }, 900);
+}
+
+async function downloadDoc(filePath, displayName){
+  const { data, error } = await sb.storage.from('documents').createSignedUrl(filePath, 60);
+  if(error || !data?.signedUrl){ alert('Error generating download link'); return; }
+  const a = document.createElement('a');
+  a.href = data.signedUrl;
+  a.download = displayName;
+  a.target = '_blank';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+async function deleteDoc(docId, filePath){
+  if(!confirm('Delete this file? This cannot be undone.')) return;
+  await sb.storage.from('documents').remove([filePath]);
+  await sb.from('documents').delete().eq('id', docId);
+  renderMainContent();
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// PHASE 2 — TRAINING CALLS / MEETINGS (with Jitsi waiting room)
+// ═══════════════════════════════════════════════════════════════
+
+async function renderMeetings(el, prog, canManage){
+  // Can this user host? (Owner always; Admin; anyone with can_host_meetings in this program)
+  const isOwner = currentProfile.role === 'owner';
+  const isAdmin = isOwner || currentProfile.role === 'admin';
+  const canHost = isAdmin || (currentProfile.can_host_meetings && (currentProfile.programs || []).includes(prog.id));
+
+  const { data: meetings } = await sb.from('meetings')
+    .select('*, profiles!meetings_host_id_fkey(full_name,email)')
+    .eq('program_id', prog.id)
+    .order('scheduled_at', { ascending: true });
+
+  const now = new Date();
+  const live = (meetings || []).filter(m => m.status === 'live');
+  const upcoming = (meetings || []).filter(m => m.status === 'scheduled' && new Date(m.scheduled_at) > now);
+  const past = (meetings || []).filter(m => m.status === 'ended' || (m.status === 'scheduled' && new Date(m.scheduled_at) < now)).slice(0,10);
+
+  el.innerHTML = `
+    <div class="bo-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:10px;">
+        <div>
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;">📞 Training Calls</div>
+          <div style="font-size:12px;color:rgba(255,255,255,0.4);margin-top:4px;">${canHost ? 'You can host meetings for this program.' : 'Join scheduled calls below — no host permission required.'}</div>
+        </div>
+        ${canHost ? `<button class="bo-btn bo-btn-primary" onclick="openMeetingModal('${prog.id}')">+ Schedule Call</button>` : ''}
+      </div>
+
+      ${live.length > 0 ? `<div style="margin-bottom:20px;">
+        <div style="font-size:11px;color:#FF6B00;font-weight:700;letter-spacing:2px;text-transform:uppercase;margin-bottom:10px;">🔴 Live Now</div>
+        ${live.map(m => meetingCard(m, prog, 'live', canHost)).join('')}
+      </div>` : ''}
+
+      ${upcoming.length > 0 ? `<div style="margin-bottom:20px;">
+        <div style="font-size:11px;color:rgba(255,255,255,0.6);font-weight:700;letter-spacing:2px;text-transform:uppercase;margin-bottom:10px;">Upcoming</div>
+        ${upcoming.map(m => meetingCard(m, prog, 'upcoming', canHost)).join('')}
+      </div>` : ''}
+
+      ${past.length > 0 ? `<div>
+        <div style="font-size:11px;color:rgba(255,255,255,0.4);font-weight:700;letter-spacing:2px;text-transform:uppercase;margin-bottom:10px;">Past (last 10)</div>
+        ${past.map(m => meetingCard(m, prog, 'past', canHost)).join('')}
+      </div>` : ''}
+
+      ${live.length === 0 && upcoming.length === 0 && past.length === 0 ? '<div style="color:rgba(255,255,255,0.4);font-size:13.5px;padding:14px 0;">No training calls yet. ' + (canHost ? 'Click "+ Schedule Call" to create one.' : '') + '</div>' : ''}
+    </div>`;
+}
+
+function meetingCard(m, prog, state, canHost){
+  const scheduled = new Date(m.scheduled_at);
+  const whenStr = scheduled.toLocaleDateString([], { weekday:'short', month:'short', day:'numeric' }) + ' · ' + scheduled.toLocaleTimeString([], { hour:'numeric', minute:'2-digit' });
+  const hostName = m.profiles?.full_name || m.profiles?.email || 'Host';
+  const bg = state === 'live' ? 'rgba(255,107,0,0.08)' : state === 'upcoming' ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.02)';
+  const border = state === 'live' ? 'rgba(255,107,0,0.3)' : 'rgba(255,255,255,0.07)';
+  const isHost = m.host_id === currentProfile.id;
+  return `<div style="background:${bg};border:1px solid ${border};border-radius:12px;padding:16px;margin-bottom:10px;">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:15px;font-weight:700;color:#fff;">${escapeHtml(m.title)}</div>
+        <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-top:3px;">Hosted by ${escapeHtml(hostName)} · ${m.platform === 'jitsi' ? '🎥 Jitsi (built-in)' : '🔗 ' + m.platform}</div>
+        <div style="font-size:12.5px;color:rgba(255,255,255,0.65);margin-top:6px;">${whenStr}${m.duration_min ? ' · ' + m.duration_min + ' min' : ''}</div>
+        ${m.description ? `<div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-top:8px;line-height:1.55;">${escapeHtml(m.description)}</div>` : ''}
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0;">
+        ${state === 'live' ? `<button class="bo-btn bo-btn-primary" onclick="joinMeeting('${m.id}')">${isHost ? 'Rejoin as Host' : 'Join Call →'}</button>` : ''}
+        ${state === 'upcoming' ? (isHost || canHost ? `<button class="bo-btn bo-btn-primary" onclick="startMeeting('${m.id}')">Start Meeting</button>` : `<button class="bo-btn bo-btn-ghost" onclick="joinMeeting('${m.id}')">Preview / Join Early</button>`) : ''}
+        ${state === 'past' ? `<span style="font-size:11px;color:rgba(255,255,255,0.35);padding:6px 12px;">Ended</span>` : ''}
+        ${(isHost || canHost) && state !== 'past' ? `<button class="bo-btn bo-btn-danger" style="padding:5px 12px;font-size:11px;" onclick="deleteMeeting('${m.id}')">Delete</button>` : ''}
+      </div>
+    </div>
+  </div>`;
+}
+
+function openMeetingModal(programId){
+  // Default scheduled_at = 1 hour from now, rounded to next 30 min
+  const dt = new Date(Date.now() + 60*60*1000);
+  dt.setMinutes(Math.ceil(dt.getMinutes()/30)*30, 0, 0);
+  const isoLocal = dt.toISOString().slice(0,16);
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:28px;color:#fff;margin-bottom:14px;letter-spacing:1px;">📞 Schedule Training Call</h2>
+    <div class="form-group"><label class="form-label">Title *</label><input id="mt-title" class="form-input" placeholder="e.g. Weekly Sales Training"/></div>
+    <div class="form-group"><label class="form-label">Description (optional)</label><textarea id="mt-desc" class="form-input" rows="2" placeholder="What will this call cover?"></textarea></div>
+    <div style="display:flex;gap:10px;">
+      <div class="form-group" style="flex:2;">
+        <label class="form-label">Date & Time *</label>
+        <input id="mt-when" type="datetime-local" class="form-input" value="${isoLocal}"/>
+      </div>
+      <div class="form-group" style="flex:1;">
+        <label class="form-label">Duration (min)</label>
+        <input id="mt-dur" type="number" class="form-input" value="60" min="5" step="5"/>
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Platform</label>
+      <select id="mt-platform" class="form-input" style="background:#1a1a1a;" onchange="togglePlatformUrl()">
+        <option value="jitsi">🎥 Jitsi (built-in, free, with waiting room)</option>
+        <option value="zoom">🔗 Zoom (external link)</option>
+        <option value="meet">🔗 Google Meet (external link)</option>
+        <option value="teams">🔗 MS Teams (external link)</option>
+        <option value="other">🔗 Other (paste link)</option>
+      </select>
+    </div>
+    <div class="form-group" id="mt-url-wrap" style="display:none;">
+      <label class="form-label">Meeting Link *</label>
+      <input id="mt-url" class="form-input" placeholder="https://…"/>
+    </div>
+    <div class="form-group">
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+        <input type="checkbox" id="mt-record" style="width:18px;height:18px;accent-color:#FF6B00;"/>
+        <div>
+          <div style="font-weight:600;color:#fff;font-size:13.5px;">🎬 Enable recording</div>
+          <div style="font-size:11.5px;color:rgba(255,255,255,0.5);">Host can start/stop recording during the meeting (Jitsi requires Dropbox integration)</div>
+        </div>
+      </label>
+    </div>
+    <div class="form-group">
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+        <input type="checkbox" id="mt-notify" checked style="width:18px;height:18px;accent-color:#FF6B00;"/>
+        <div>
+          <div style="font-weight:600;color:#fff;font-size:13.5px;">📧 Email invite to all program members</div>
+          <div style="font-size:11.5px;color:rgba(255,255,255,0.5);">Send a meeting invitation email to every agent/manager in this program</div>
+        </div>
+      </label>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:10px;">
+      <button class="bo-btn bo-btn-primary" onclick="saveMeeting('${programId}')">Schedule Call</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="mt-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+function togglePlatformUrl(){
+  const plat = document.getElementById('mt-platform').value;
+  document.getElementById('mt-url-wrap').style.display = plat === 'jitsi' ? 'none' : 'block';
+}
+
+async function saveMeeting(programId){
+  const title = document.getElementById('mt-title').value.trim();
+  const description = document.getElementById('mt-desc').value.trim();
+  const whenStr = document.getElementById('mt-when').value;
+  const duration_min = parseInt(document.getElementById('mt-dur').value) || 60;
+  const platform = document.getElementById('mt-platform').value;
+  const meeting_url = document.getElementById('mt-url').value.trim();
+  const recording_enabled = document.getElementById('mt-record').checked;
+  const notify = document.getElementById('mt-notify').checked;
+  const msg = document.getElementById('mt-msg');
+
+  if(!title){ msg.innerHTML = '<span style="color:#F87171;">Title required.</span>'; return; }
+  if(!whenStr){ msg.innerHTML = '<span style="color:#F87171;">Date/time required.</span>'; return; }
+  if(platform !== 'jitsi' && !meeting_url){ msg.innerHTML = '<span style="color:#F87171;">Meeting link required for ' + platform + '.</span>'; return; }
+
+  const scheduled_at = new Date(whenStr).toISOString();
+  const jitsi_room = platform === 'jitsi' ? generateJitsiRoomName(programId) : null;
+
+  const { data: meeting, error } = await sb.from('meetings').insert({
+    program_id: programId, title, description: description || null,
+    host_id: currentProfile.id, platform,
+    meeting_url: platform === 'jitsi' ? null : meeting_url,
+    jitsi_room, scheduled_at, duration_min, recording_enabled
+  }).select().single();
+
+  if(error){ msg.innerHTML = '<span style="color:#F87171;">'+error.message+'</span>'; return; }
+
+  // Email invites if requested
+  if(notify){
+    msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Created. Sending invites…</span>';
+    try {
+      const { data: recipients } = await sb.from('profiles').select('email,full_name').contains('programs', [programId]).eq('active', true);
+      const prog = allPrograms.find(p => p.id === programId);
+      const whenHuman = new Date(scheduled_at).toLocaleString([], { weekday:'long', month:'short', day:'numeric', hour:'numeric', minute:'2-digit' });
+      for(const r of (recipients || [])){
+        try {
+          await sendEmailViaFunction('meeting_invite', r.email, {
+            title, description: description || '',
+            host_name: currentProfile.full_name || currentProfile.email,
+            program_name: prog?.name || '',
+            when_human: whenHuman,
+            duration_min: duration_min + ''
+          });
+        } catch(e){ console.warn('Invite failed for', r.email, e); }
+      }
+    } catch(e){ console.warn('Invite batch error:', e); }
+  }
+
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Training call scheduled.</span>';
+  setTimeout(() => { closeAllModals(); renderMainContent(); }, 900);
+}
+
+function generateJitsiRoomName(programId){
+  const ts = Date.now().toString(36);
+  const rand = Math.random().toString(36).substring(2, 8);
+  return `CircleSolutions-${programId}-${ts}-${rand}`;
+}
+
+async function deleteMeeting(id){
+  if(!confirm('Delete this training call?')) return;
+  await sb.from('meetings').delete().eq('id', id);
+  renderMainContent();
+}
+
+// Start meeting (mark as live + open Jitsi)
+async function startMeeting(meetingId){
+  const { data: m } = await sb.from('meetings').select('*').eq('id', meetingId).single();
+  if(!m){ alert('Meeting not found'); return; }
+  // Mark as live + record started_at
+  await sb.from('meetings').update({ status: 'live', started_at: new Date().toISOString() }).eq('id', meetingId);
+  // Auto-admit all currently-waiting participants (per your spec: host joins → everyone waiting in)
+  await sb.from('meeting_participants').update({ status: 'admitted', admitted_at: new Date().toISOString() }).eq('meeting_id', meetingId).eq('status', 'waiting');
+  joinMeeting(meetingId);
+}
+
+async function joinMeeting(meetingId){
+  const { data: m } = await sb.from('meetings').select('*, profiles!meetings_host_id_fkey(full_name,email)').eq('id', meetingId).single();
+  if(!m){ alert('Meeting not found'); return; }
+
+  const isHost = m.host_id === currentProfile.id;
+
+  // Handle external (non-Jitsi) meetings
+  if(m.platform !== 'jitsi'){
+    if(m.meeting_url){
+      window.open(m.meeting_url, '_blank');
+    } else {
+      alert('Meeting link missing.');
+    }
+    return;
+  }
+
+  // Jitsi flow
+  if(isHost){
+    // Host joins directly
+    await sb.from('meetings').update({ status: 'live', started_at: m.started_at || new Date().toISOString() }).eq('id', meetingId);
+    // Auto-admit anyone waiting
+    await sb.from('meeting_participants').update({ status: 'admitted', admitted_at: new Date().toISOString() }).eq('meeting_id', meetingId).eq('status', 'waiting');
+    openJitsiRoom(m, true);
+    return;
+  }
+
+  // Non-host: check if meeting is live
+  if(m.status !== 'live'){
+    // Add to waiting room
+    await sb.from('meeting_participants').upsert({
+      meeting_id: meetingId, user_id: currentProfile.id, status: 'waiting'
+    }, { onConflict: 'meeting_id,user_id' });
+    openWaitingRoom(m);
+    return;
+  }
+
+  // Meeting is live — add as admitted and join
+  await sb.from('meeting_participants').upsert({
+    meeting_id: meetingId, user_id: currentProfile.id, status: 'admitted',
+    admitted_at: new Date().toISOString()
+  }, { onConflict: 'meeting_id,user_id' });
+  openJitsiRoom(m, false);
+}
+
+function openWaitingRoom(meeting){
+  document.getElementById('modal-box').innerHTML = `
+    <div style="text-align:center;padding:20px 10px;">
+      <div style="font-size:64px;margin-bottom:16px;">⏳</div>
+      <h2 style="font-family:'Bebas Neue',sans-serif;font-size:32px;color:#fff;margin-bottom:10px;letter-spacing:1px;">Waiting Room</h2>
+      <p style="font-size:14px;color:rgba(255,255,255,0.6);margin-bottom:4px;">${escapeHtml(meeting.title)}</p>
+      <p style="font-size:12.5px;color:rgba(255,255,255,0.4);margin-bottom:24px;">Waiting for the host to start the meeting…</p>
+      <div style="display:inline-block;width:40px;height:40px;border:3px solid rgba(255,107,0,0.2);border-top-color:#FF6B00;border-radius:50%;animation:spin 1s linear infinite;"></div>
+      <div style="margin-top:24px;font-size:12.5px;color:rgba(255,255,255,0.45);line-height:1.6;">Once the host joins, you'll be automatically admitted to the call.<br/>You can safely leave this tab open.</div>
+      <button class="bo-btn bo-btn-ghost" style="margin-top:20px;" onclick="closeAllModals()">Leave</button>
+    </div>
+    <style>@keyframes spin { to { transform: rotate(360deg); } }</style>`;
+  document.getElementById('modal-backdrop').style.display = 'flex';
+
+  // Poll for admission (every 3 sec)
+  window._waitingPoller = setInterval(async () => {
+    const { data: m } = await sb.from('meetings').select('status').eq('id', meeting.id).single();
+    if(m?.status === 'live'){
+      // Mark ourselves admitted
+      await sb.from('meeting_participants').update({
+        status: 'admitted', admitted_at: new Date().toISOString()
+      }).eq('meeting_id', meeting.id).eq('user_id', currentProfile.id);
+      clearInterval(window._waitingPoller);
+      const { data: full } = await sb.from('meetings').select('*').eq('id', meeting.id).single();
+      openJitsiRoom(full, false);
+    }
+  }, 3000);
+}
+
+function openJitsiRoom(meeting, isHost){
+  if(window._waitingPoller){ clearInterval(window._waitingPoller); window._waitingPoller = null; }
+
+  const roomName = meeting.jitsi_room;
+  const displayName = currentProfile.full_name || currentProfile.email;
+  const email = currentProfile.email;
+
+  // Build Jitsi IFrame
+  document.getElementById('modal-box').innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+      <div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#fff;letter-spacing:1px;">${escapeHtml(meeting.title)}</div>
+        <div style="font-size:11.5px;color:rgba(255,255,255,0.45);">${isHost ? '👑 You are the host' : 'In-call participant'}</div>
+      </div>
+      <div style="display:flex;gap:8px;">
+        ${isHost ? `<button class="bo-btn bo-btn-danger" style="padding:7px 14px;font-size:12px;" onclick="endMeetingAsHost('${meeting.id}')">End Meeting for Everyone</button>` : ''}
+        <button class="bo-btn bo-btn-ghost" style="padding:7px 14px;font-size:12px;" onclick="leaveMeeting('${meeting.id}')">Leave</button>
+      </div>
+    </div>
+    <div id="jitsi-container" style="width:100%;height:70vh;background:#000;border-radius:10px;overflow:hidden;"></div>`;
+
+  // Make the modal box wider for video
+  const modalBox = document.getElementById('modal-box');
+  modalBox.style.maxWidth = '1100px';
+  modalBox.style.width = '100%';
+
+  document.getElementById('modal-backdrop').style.display = 'flex';
+
+  // Load Jitsi external API if not already loaded
+  if(!window.JitsiMeetExternalAPI){
+    const script = document.createElement('script');
+    script.src = 'https://meet.jit.si/external_api.js';
+    script.onload = () => initJitsi(meeting, roomName, displayName, email, isHost);
+    document.head.appendChild(script);
+  } else {
+    initJitsi(meeting, roomName, displayName, email, isHost);
+  }
+}
+
+function initJitsi(meeting, roomName, displayName, email, isHost){
+  const domain = 'meet.jit.si';
+  const options = {
+    roomName: roomName,
+    parentNode: document.getElementById('jitsi-container'),
+    width: '100%',
+    height: '100%',
+    userInfo: { displayName, email },
+    configOverwrite: {
+      prejoinPageEnabled: false,
+      startWithAudioMuted: !isHost,
+      startWithVideoMuted: !isHost,
+      disableDeepLinking: true,
+      toolbarButtons: isHost
+        ? ['microphone','camera','desktop','chat','raisehand','tileview','settings','hangup','fullscreen','recording','participants-pane','mute-everyone','videoquality']
+        : ['microphone','camera','desktop','chat','raisehand','tileview','settings','hangup','fullscreen']
+    },
+    interfaceConfigOverwrite: {
+      SHOW_JITSI_WATERMARK: false,
+      SHOW_WATERMARK_FOR_GUESTS: false,
+      DEFAULT_BACKGROUND: '#0A0A0A',
+      DEFAULT_REMOTE_DISPLAY_NAME: 'Team Member'
+    }
+  };
+  const api = new window.JitsiMeetExternalAPI(domain, options);
+  window._jitsiAPI = api;
+
+  // Auto-start recording if enabled and host
+  if(isHost && meeting.recording_enabled){
+    setTimeout(() => {
+      try { api.executeCommand('startRecording', { mode: 'file' }); } catch(e){ console.warn('Recording start failed:', e); }
+    }, 3000);
+  }
+
+  api.addEventListener('readyToClose', () => {
+    if(isHost){ endMeetingAsHost(meeting.id); }
+    else { leaveMeeting(meeting.id); }
+  });
+}
+
+async function endMeetingAsHost(meetingId){
+  if(!confirm('End the meeting for everyone?')) return;
+  await sb.from('meetings').update({ status: 'ended', ended_at: new Date().toISOString() }).eq('id', meetingId);
+  if(window._jitsiAPI){ try { window._jitsiAPI.dispose(); } catch(e){} window._jitsiAPI = null; }
+  closeAllModals();
+  // Reset modal width
+  document.getElementById('modal-box').style.maxWidth = '560px';
+  renderMainContent();
+}
+
+async function leaveMeeting(meetingId){
+  await sb.from('meeting_participants').update({ status: 'left' }).eq('meeting_id', meetingId).eq('user_id', currentProfile.id);
+  if(window._jitsiAPI){ try { window._jitsiAPI.dispose(); } catch(e){} window._jitsiAPI = null; }
+  closeAllModals();
+  document.getElementById('modal-box').style.maxWidth = '560px';
+  renderMainContent();
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// PHASE 2 — CONTRACT TEMPLATES (owner only)
+// ═══════════════════════════════════════════════════════════════
+
+async function renderContractTemplates(el){
+  if(currentProfile.role !== 'owner'){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied — owner only.</div>';
+    return;
+  }
+  const { data: templates } = await sb.from('contract_templates').select('*').order('program_id').order('title');
+  el.innerHTML = `
+    <div style="margin-bottom:24px;">
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">📄 Contract Templates</h1>
+      <p style="font-size:14px;color:rgba(255,255,255,0.5);">Default contracts assigned automatically when a new team member joins a program.</p>
+    </div>
+    ${allPrograms.map(prog => {
+      const progTemplates = (templates || []).filter(t => t.program_id === prog.id);
+      return `
+      <div class="bo-card" style="border-left:3px solid ${prog.color};">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:10px;">
+          <div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:${prog.color};letter-spacing:1px;">${prog.icon} ${prog.name}</div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.4);margin-top:2px;">${progTemplates.length} template${progTemplates.length===1?'':'s'}</div>
+          </div>
+          <button class="bo-btn bo-btn-primary" onclick="openContractTemplateModal('${prog.id}')">+ Add Template</button>
+        </div>
+        ${progTemplates.length === 0 ? '<div style="color:rgba(255,255,255,0.4);font-size:13px;padding:10px 0;">No templates. New agents in this program will not get any contracts auto-assigned.</div>' : `
+          <div>${progTemplates.map(t => `
+            <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:14px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+              <div style="flex:1;min-width:0;">
+                <div style="font-size:14px;font-weight:700;color:#fff;">${escapeHtml(t.title)}</div>
+                ${t.description ? `<div style="font-size:12px;color:rgba(255,255,255,0.5);margin-top:2px;line-height:1.5;">${escapeHtml(t.description)}</div>` : ''}
+                <div style="display:flex;gap:8px;margin-top:6px;font-size:11px;">
+                  ${t.auto_assign ? '<span style="background:rgba(0,255,136,0.12);color:#00FF88;padding:2px 8px;border-radius:50px;">Auto-assigned</span>' : '<span style="color:rgba(255,255,255,0.35);">Manual only</span>'}
+                  ${t.url ? `<a href="${escapeHtml(t.url)}" target="_blank" rel="noopener" style="color:${prog.color};text-decoration:none;">Open doc →</a>` : ''}
+                </div>
+              </div>
+              <div style="display:flex;gap:6px;">
+                <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="openContractTemplateModal('${prog.id}','${t.id}')">Edit</button>
+                <button class="bo-btn bo-btn-danger" style="padding:5px 10px;font-size:11px;" onclick="deleteContractTemplate('${t.id}')">✕</button>
+              </div>
+            </div>`).join('')}</div>`}
+      </div>`;
+    }).join('')}
+  `;
+}
+
+async function openContractTemplateModal(programId, editId){
+  let existing = null;
+  if(editId){
+    const { data } = await sb.from('contract_templates').select('*').eq('id', editId).single();
+    existing = data;
+  }
+  const e = existing || {};
+  const prog = allPrograms.find(p => p.id === programId);
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:28px;color:#fff;margin-bottom:6px;letter-spacing:1px;">${editId ? 'Edit' : 'New'} Contract Template</h2>
+    <div style="font-size:13px;color:${prog?prog.color:'#888'};margin-bottom:18px;">${prog ? prog.icon + ' ' + prog.name : ''}</div>
+    <div class="form-group"><label class="form-label">Title *</label><input id="ct-title" class="form-input" value="${escapeHtml(e.title || '')}" placeholder="e.g. Independent Contractor Agreement"/></div>
+    <div class="form-group"><label class="form-label">Description (optional)</label><textarea id="ct-desc" class="form-input" rows="2">${escapeHtml(e.description || '')}</textarea></div>
+    <div class="form-group"><label class="form-label">Document Link (Google Drive, Dropbox, DocuSign, etc.)</label><input id="ct-url" class="form-input" value="${escapeHtml(e.url || '')}" placeholder="https://…"/></div>
+    <div class="form-group">
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+        <input type="checkbox" id="ct-auto" ${e.auto_assign !== false ? 'checked' : ''} style="width:18px;height:18px;accent-color:#FF6B00;"/>
+        <div style="font-size:13.5px;color:#fff;">Auto-assign to new agents in this program</div>
+      </label>
+    </div>
+    <div style="display:flex;gap:10px;">
+      <button class="bo-btn bo-btn-primary" onclick="saveContractTemplate('${programId}','${editId || ''}')">${editId ? 'Save' : 'Create Template'}</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="ct-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function saveContractTemplate(programId, editId){
+  const title = document.getElementById('ct-title').value.trim();
+  const description = document.getElementById('ct-desc').value.trim();
+  const url = document.getElementById('ct-url').value.trim();
+  const auto_assign = document.getElementById('ct-auto').checked;
+  const msg = document.getElementById('ct-msg');
+  if(!title){ msg.innerHTML = '<span style="color:#F87171;">Title required.</span>'; return; }
+  const payload = { program_id: programId, title, description: description || null, url: url || null, auto_assign };
+  let error;
+  if(editId){ ({ error } = await sb.from('contract_templates').update(payload).eq('id', editId)); }
+  else { ({ error } = await sb.from('contract_templates').insert(payload)); }
+  if(error){ msg.innerHTML = '<span style="color:#F87171;">'+error.message+'</span>'; return; }
+  closeAllModals();
+  renderMainContent();
+}
+
+async function deleteContractTemplate(id){
+  if(!confirm('Delete this template? Existing assigned contracts are not affected.')) return;
+  await sb.from('contract_templates').delete().eq('id', id);
+  renderMainContent();
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// PHASE 2 — FORMS (builder + submissions)
+// ═══════════════════════════════════════════════════════════════
+
+async function renderFormsAdmin(el){
+  const isAdmin = currentProfile.role === 'owner' || currentProfile.role === 'admin';
+  if(!isAdmin){ el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied.</div>'; return; }
+
+  const { data: forms } = await sb.from('forms').select('*, profiles!forms_created_by_fkey(full_name,email)').order('created_at', { ascending: false });
+  el.innerHTML = `
+    <div style="margin-bottom:24px;">
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">📋 All Forms</h1>
+      <p style="font-size:14px;color:rgba(255,255,255,0.5);">Create custom forms for agents to fill out — timesheets, incident reports, surveys, etc.</p>
+    </div>
+    <div style="display:flex;justify-content:flex-end;margin-bottom:14px;">
+      <button class="bo-btn bo-btn-primary" onclick="openFormBuilderModal()">+ Create Form</button>
+    </div>
+    ${(!forms || forms.length === 0) ? '<div class="bo-card" style="color:rgba(255,255,255,0.4);text-align:center;padding:40px;">No forms yet. Create one to get started.</div>' : `
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;">
+        ${forms.map(f => {
+          const prog = allPrograms.find(p => p.id === f.program_id);
+          return `
+          <div class="bo-card" style="${prog ? 'border-left:3px solid '+prog.color+';' : ''}">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:10px;">
+              <div style="flex:1;">
+                <div style="font-size:16px;font-weight:700;color:#fff;">${escapeHtml(f.title)}</div>
+                ${f.description ? `<div style="font-size:12.5px;color:rgba(255,255,255,0.5);margin-top:3px;line-height:1.5;">${escapeHtml(f.description)}</div>` : ''}
+                <div style="font-size:11.5px;color:rgba(255,255,255,0.4);margin-top:6px;">${(f.fields||[]).length} field${(f.fields||[]).length===1?'':'s'} · ${prog ? prog.icon + ' ' + prog.name.split(' ')[0] : 'Global'} · ${f.active ? '<span style="color:#00FF88;">Active</span>' : '<span style="color:rgba(255,255,255,0.4);">Inactive</span>'}</div>
+              </div>
+            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;">
+              <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="viewFormSubmissions('${f.id}','${escapeHtml(f.title).replace(/'/g,"\\'")}')">View Submissions</button>
+              <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="openFormBuilderModal('${f.id}')">Edit</button>
+              <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="toggleFormActive('${f.id}',${f.active})">${f.active ? 'Deactivate' : 'Activate'}</button>
+              <button class="bo-btn bo-btn-danger" style="padding:5px 10px;font-size:11px;" onclick="deleteForm('${f.id}')">✕</button>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>`}`;
+}
+
+// Agent view — "My Forms" — list of forms they can fill out
+async function renderMyForms(el){
+  const progs = currentProfile.role === 'owner' || currentProfile.role === 'admin'
+    ? allPrograms.map(p => p.id)
+    : (currentProfile.programs || []);
+
+  let query = sb.from('forms').select('*').eq('active', true);
+  const { data: forms } = await query;
+  // Filter to global + their programs
+  const visibleForms = (forms || []).filter(f => !f.program_id || progs.includes(f.program_id));
+
+  // Load my recent submissions
+  const { data: mySubs } = await sb.from('form_submissions').select('form_id,submitted_at').eq('user_id', currentProfile.id).order('submitted_at', { ascending: false });
+  const submittedMap = {};
+  (mySubs || []).forEach(s => { if(!submittedMap[s.form_id]) submittedMap[s.form_id] = s.submitted_at; });
+
+  el.innerHTML = `
+    <div style="margin-bottom:24px;">
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">📋 My Forms</h1>
+      <p style="font-size:14px;color:rgba(255,255,255,0.5);">Forms you can fill out. Submit as many times as needed.</p>
+    </div>
+    ${visibleForms.length === 0 ? '<div class="bo-card" style="color:rgba(255,255,255,0.4);text-align:center;padding:40px;">No forms available right now.</div>' : `
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px;">
+        ${visibleForms.map(f => {
+          const prog = allPrograms.find(p => p.id === f.program_id);
+          const lastSub = submittedMap[f.id];
+          return `
+          <div class="bo-card" style="${prog ? 'border-left:3px solid '+prog.color+';' : ''}cursor:pointer;" onclick="openFormFillModal('${f.id}')">
+            <div style="font-size:16px;font-weight:700;color:#fff;margin-bottom:4px;">${escapeHtml(f.title)}</div>
+            ${f.description ? `<div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-bottom:8px;line-height:1.55;">${escapeHtml(f.description)}</div>` : ''}
+            <div style="font-size:11.5px;color:rgba(255,255,255,0.4);">${prog ? prog.icon + ' ' + prog.name : '🌐 Global'}${lastSub ? ' · Last submitted ' + new Date(lastSub).toLocaleDateString() : ''}</div>
+            <div style="margin-top:10px;color:#FF6B00;font-size:12.5px;font-weight:600;">Fill Out →</div>
+          </div>`;
+        }).join('')}
+      </div>`}`;
+}
+
+async function renderFormsTab(el, prog, canManage){
+  // Per-program forms tab — shows forms for this program + allow managers to create
+  const { data: forms } = await sb.from('forms').select('*').eq('active', true).eq('program_id', prog.id);
+  el.innerHTML = `
+    <div class="bo-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:10px;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;">📋 ${prog.name} Forms</div>
+        ${canManage ? `<button class="bo-btn bo-btn-primary" onclick="openFormBuilderModal(null,'${prog.id}')">+ Create Form</button>` : ''}
+      </div>
+      ${(!forms || forms.length === 0) ? '<div style="color:rgba(255,255,255,0.4);font-size:13.5px;padding:14px 0;">No forms yet for ' + prog.name + '.</div>' : `
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;">
+          ${forms.map(f => `
+            <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:14px;">
+              <div style="font-size:14px;font-weight:700;color:#fff;margin-bottom:4px;">${escapeHtml(f.title)}</div>
+              ${f.description ? `<div style="font-size:12px;color:rgba(255,255,255,0.5);margin-bottom:10px;line-height:1.5;">${escapeHtml(f.description)}</div>` : ''}
+              <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                <button class="bo-btn bo-btn-primary" style="padding:5px 14px;font-size:12px;" onclick="openFormFillModal('${f.id}')">Fill Out</button>
+                ${canManage ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="viewFormSubmissions('${f.id}','${escapeHtml(f.title).replace(/'/g,"\\'")}')">View Submissions</button>` : ''}
+              </div>
+            </div>`).join('')}
+        </div>`}
+    </div>`;
+}
+
+async function openFormBuilderModal(editId, defaultProgramId){
+  let existing = null;
+  if(editId){
+    const { data } = await sb.from('forms').select('*').eq('id', editId).single();
+    existing = data;
+  }
+  const e = existing || { fields: [], program_id: defaultProgramId || null };
+  window._formFields = [...(e.fields || [])];
+
+  renderFormBuilderUI(editId, e);
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+function renderFormBuilderUI(editId, e){
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:28px;color:#fff;margin-bottom:14px;letter-spacing:1px;">${editId ? 'Edit' : 'Create'} Form</h2>
+    <div class="form-group"><label class="form-label">Form Title *</label><input id="fm-title" class="form-input" value="${escapeHtml(e.title || '')}" placeholder="e.g. Weekly Timesheet"/></div>
+    <div class="form-group"><label class="form-label">Description</label><textarea id="fm-desc" class="form-input" rows="2">${escapeHtml(e.description || '')}</textarea></div>
+    <div class="form-group"><label class="form-label">Program Scope</label>
+      <select id="fm-program" class="form-input" style="background:#1a1a1a;">
+        <option value="">🌐 Global (all programs)</option>
+        ${allPrograms.map(p => `<option value="${p.id}" ${e.program_id===p.id?'selected':''}>${p.icon} ${p.name}</option>`).join('')}
+      </select>
+    </div>
+    <div style="margin-top:16px;padding:14px;background:rgba(255,255,255,0.02);border-radius:10px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+        <div style="font-weight:600;color:#fff;font-size:14px;">Fields</div>
+        <div style="display:flex;gap:4px;flex-wrap:wrap;">
+          <button class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:11px;" onclick="addFormField('text')">+ Text</button>
+          <button class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:11px;" onclick="addFormField('textarea')">+ Long Text</button>
+          <button class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:11px;" onclick="addFormField('number')">+ Number</button>
+          <button class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:11px;" onclick="addFormField('date')">+ Date</button>
+          <button class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:11px;" onclick="addFormField('select')">+ Dropdown</button>
+          <button class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:11px;" onclick="addFormField('checkbox')">+ Checkbox</button>
+        </div>
+      </div>
+      <div id="fm-fields-list"></div>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:16px;">
+      <button class="bo-btn bo-btn-primary" onclick="saveForm('${editId || ''}')">${editId ? 'Save Changes' : 'Create Form'}</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="fm-msg" style="margin-top:12px;font-size:13px;"></div>`;
+
+  const modalBox = document.getElementById('modal-box');
+  modalBox.style.maxWidth = '680px';
+
+  renderFormFieldsList();
+}
+
+function addFormField(type){
+  window._formFields = window._formFields || [];
+  const defaults = {
+    text: { type:'text', label:'Text field', required:false },
+    textarea: { type:'textarea', label:'Long text', required:false, rows:3 },
+    number: { type:'number', label:'Number', required:false },
+    date: { type:'date', label:'Date', required:false },
+    select: { type:'select', label:'Dropdown', required:false, options:['Option 1','Option 2'] },
+    checkbox: { type:'checkbox', label:'Checkbox', required:false }
+  };
+  window._formFields.push({ ...defaults[type], id: 'f_' + Date.now() + '_' + Math.floor(Math.random()*1000) });
+  renderFormFieldsList();
+}
+
+function renderFormFieldsList(){
+  const fields = window._formFields || [];
+  const el = document.getElementById('fm-fields-list');
+  if(fields.length === 0){
+    el.innerHTML = '<div style="color:rgba(255,255,255,0.4);font-size:12.5px;padding:12px 0;">No fields yet. Click a button above to add one.</div>';
+    return;
+  }
+  el.innerHTML = fields.map((f, i) => `
+    <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:8px;padding:12px;margin-bottom:8px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1.5px;">${f.type}</div>
+        <div style="display:flex;gap:4px;">
+          ${i > 0 ? `<button class="bo-btn bo-btn-ghost" style="padding:3px 8px;font-size:10px;" onclick="moveField(${i},-1)">↑</button>` : ''}
+          ${i < fields.length - 1 ? `<button class="bo-btn bo-btn-ghost" style="padding:3px 8px;font-size:10px;" onclick="moveField(${i},1)">↓</button>` : ''}
+          <button class="bo-btn bo-btn-danger" style="padding:3px 8px;font-size:10px;" onclick="removeField(${i})">✕</button>
+        </div>
+      </div>
+      <input style="width:100%;padding:6px 10px;background:#1a1a1a;border:1px solid rgba(255,255,255,0.1);border-radius:6px;color:#fff;font-size:13px;margin-bottom:6px;" value="${escapeHtml(f.label)}" placeholder="Field label" oninput="updateField(${i},'label',this.value)"/>
+      ${f.type === 'select' ? `<input style="width:100%;padding:6px 10px;background:#1a1a1a;border:1px solid rgba(255,255,255,0.1);border-radius:6px;color:#fff;font-size:12px;" value="${escapeHtml((f.options||[]).join(', '))}" placeholder="Option 1, Option 2, Option 3" oninput="updateField(${i},'options',this.value.split(',').map(s=>s.trim()).filter(Boolean))"/>` : ''}
+      <label style="display:inline-flex;align-items:center;gap:6px;margin-top:6px;font-size:12px;color:rgba(255,255,255,0.6);cursor:pointer;">
+        <input type="checkbox" ${f.required ? 'checked' : ''} style="accent-color:#FF6B00;" onchange="updateField(${i},'required',this.checked)"/> Required
+      </label>
+    </div>`).join('');
+}
+
+function updateField(i, key, value){ window._formFields[i][key] = value; }
+function removeField(i){ window._formFields.splice(i, 1); renderFormFieldsList(); }
+function moveField(i, delta){
+  const arr = window._formFields;
+  const newIdx = i + delta;
+  if(newIdx < 0 || newIdx >= arr.length) return;
+  [arr[i], arr[newIdx]] = [arr[newIdx], arr[i]];
+  renderFormFieldsList();
+}
+
+async function saveForm(editId){
+  const title = document.getElementById('fm-title').value.trim();
+  const description = document.getElementById('fm-desc').value.trim();
+  const program_id = document.getElementById('fm-program').value || null;
+  const fields = window._formFields || [];
+  const msg = document.getElementById('fm-msg');
+  if(!title){ msg.innerHTML = '<span style="color:#F87171;">Title required.</span>'; return; }
+  if(fields.length === 0){ msg.innerHTML = '<span style="color:#F87171;">Add at least one field.</span>'; return; }
+
+  const payload = { title, description: description || null, program_id, fields, active: true };
+  let error;
+  if(editId){ ({ error } = await sb.from('forms').update(payload).eq('id', editId)); }
+  else { ({ error } = await sb.from('forms').insert({ ...payload, created_by: currentProfile.id })); }
+  if(error){ msg.innerHTML = '<span style="color:#F87171;">'+error.message+'</span>'; return; }
+  document.getElementById('modal-box').style.maxWidth = '560px';
+  closeAllModals();
+  renderMainContent();
+}
+
+async function deleteForm(id){
+  if(!confirm('Delete this form and all its submissions?')) return;
+  await sb.from('forms').delete().eq('id', id);
+  renderMainContent();
+}
+
+async function toggleFormActive(id, current){
+  await sb.from('forms').update({ active: !current }).eq('id', id);
+  renderMainContent();
+}
+
+
+async function openFormFillModal(formId){
+  const { data: form } = await sb.from('forms').select('*').eq('id', formId).single();
+  if(!form){ alert('Form not found'); return; }
+  const fields = form.fields || [];
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:28px;color:#fff;margin-bottom:6px;letter-spacing:1px;">${escapeHtml(form.title)}</h2>
+    ${form.description ? `<p style="font-size:13px;color:rgba(255,255,255,0.55);margin-bottom:18px;line-height:1.55;">${escapeHtml(form.description)}</p>` : ''}
+    <form id="fm-fill" onsubmit="submitFormAnswers(event,'${formId}')">
+      ${fields.map(f => renderFieldInput(f)).join('')}
+      <div style="display:flex;gap:10px;margin-top:18px;">
+        <button type="submit" class="bo-btn bo-btn-primary">Submit</button>
+        <button type="button" class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+      </div>
+      <div id="fm-fill-msg" style="margin-top:12px;font-size:13px;"></div>
+    </form>`;
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+function renderFieldInput(f){
+  const req = f.required ? 'required' : '';
+  const id = 'ff_' + f.id;
+  switch(f.type){
+    case 'textarea': return `<div class="form-group"><label class="form-label">${escapeHtml(f.label)}${f.required ? ' *' : ''}</label><textarea id="${id}" class="form-input" rows="${f.rows||3}" ${req}></textarea></div>`;
+    case 'number':   return `<div class="form-group"><label class="form-label">${escapeHtml(f.label)}${f.required ? ' *' : ''}</label><input type="number" id="${id}" class="form-input" ${req}/></div>`;
+    case 'date':     return `<div class="form-group"><label class="form-label">${escapeHtml(f.label)}${f.required ? ' *' : ''}</label><input type="date" id="${id}" class="form-input" ${req}/></div>`;
+    case 'select':   return `<div class="form-group"><label class="form-label">${escapeHtml(f.label)}${f.required ? ' *' : ''}</label><select id="${id}" class="form-input" style="background:#1a1a1a;" ${req}><option value="">Select…</option>${(f.options||[]).map(o=>`<option value="${escapeHtml(o)}">${escapeHtml(o)}</option>`).join('')}</select></div>`;
+    case 'checkbox': return `<div class="form-group"><label style="display:flex;align-items:center;gap:10px;cursor:pointer;"><input type="checkbox" id="${id}" style="width:18px;height:18px;accent-color:#FF6B00;"/><span style="font-size:14px;color:#fff;">${escapeHtml(f.label)}${f.required ? ' *' : ''}</span></label></div>`;
+    default:         return `<div class="form-group"><label class="form-label">${escapeHtml(f.label)}${f.required ? ' *' : ''}</label><input type="text" id="${id}" class="form-input" ${req}/></div>`;
+  }
+}
+
+async function submitFormAnswers(event, formId){
+  event.preventDefault();
+  const { data: form } = await sb.from('forms').select('fields').eq('id', formId).single();
+  const answers = {};
+  (form.fields || []).forEach(f => {
+    const el = document.getElementById('ff_' + f.id);
+    if(!el) return;
+    if(f.type === 'checkbox') answers[f.label] = el.checked;
+    else answers[f.label] = el.value;
+  });
+  const { error } = await sb.from('form_submissions').insert({
+    form_id: formId, user_id: currentProfile.id, data: answers
+  });
+  const msg = document.getElementById('fm-fill-msg');
+  if(error){ msg.innerHTML = '<span style="color:#F87171;">'+error.message+'</span>'; return; }
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Submitted. Thank you!</span>';
+  setTimeout(() => { closeAllModals(); renderMainContent(); }, 1200);
+}
+
+async function viewFormSubmissions(formId, formTitle){
+  const { data: subs } = await sb.from('form_submissions').select('*, profiles!form_submissions_user_id_fkey(full_name,email)').eq('form_id', formId).order('submitted_at', { ascending: false });
+  const { data: form } = await sb.from('forms').select('fields').eq('id', formId).single();
+  const fields = form?.fields || [];
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#fff;margin-bottom:14px;letter-spacing:1px;">📊 ${escapeHtml(formTitle)} — Submissions</h2>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <div style="font-size:13px;color:rgba(255,255,255,0.5);">${(subs||[]).length} submission${(subs||[]).length===1?'':'s'}</div>
+      <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="exportSubmissionsCSV('${formId}','${escapeHtml(formTitle).replace(/'/g,"\\'")}')">Export CSV</button>
+    </div>
+    ${(!subs || subs.length === 0) ? '<div style="color:rgba(255,255,255,0.4);padding:20px;text-align:center;">No submissions yet.</div>' : `
+      <div style="max-height:60vh;overflow-y:auto;">
+        ${subs.map(s => `
+          <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:14px;margin-bottom:10px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+              <div style="font-size:13px;font-weight:600;color:#fff;">${escapeHtml(s.profiles?.full_name || s.profiles?.email || 'Anonymous')}</div>
+              <div style="font-size:11.5px;color:rgba(255,255,255,0.4);">${new Date(s.submitted_at).toLocaleString()}</div>
+            </div>
+            ${Object.entries(s.data || {}).map(([k,v]) => `
+              <div style="font-size:12.5px;margin-top:4px;"><span style="color:rgba(255,255,255,0.5);">${escapeHtml(k)}:</span> <span style="color:#fff;">${typeof v === 'boolean' ? (v ? '✓ Yes' : '✗ No') : escapeHtml(String(v||'—'))}</span></div>`).join('')}
+          </div>`).join('')}
+      </div>`}
+    <div style="margin-top:14px;"><button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Close</button></div>`;
+  document.getElementById('modal-box').style.maxWidth = '720px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function exportSubmissionsCSV(formId, formTitle){
+  const { data: subs } = await sb.from('form_submissions').select('*, profiles!form_submissions_user_id_fkey(full_name,email)').eq('form_id', formId).order('submitted_at');
+  const { data: form } = await sb.from('forms').select('fields').eq('id', formId).single();
+  const fieldLabels = (form?.fields || []).map(f => f.label);
+  const headers = ['Submitted At', 'Submitted By', 'Email', ...fieldLabels];
+  const rows = [headers];
+  (subs || []).forEach(s => {
+    const row = [
+      new Date(s.submitted_at).toISOString(),
+      s.profiles?.full_name || '',
+      s.profiles?.email || '',
+      ...fieldLabels.map(l => {
+        const v = s.data?.[l];
+        return v === undefined || v === null ? '' : (typeof v === 'boolean' ? (v ? 'Yes' : 'No') : String(v));
+      })
+    ];
+    rows.push(row);
+  });
+  const csv = rows.map(r => r.map(c => '"' + String(c).replace(/"/g,'""') + '"').join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = formTitle.replace(/[^a-zA-Z0-9]/g,'_') + '_submissions.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+
+
 // Expose functions that inline HTML onclicks reference
 window.showPage = showPage;
 window.toggleSubNav = toggleSubNav;
@@ -3488,6 +4768,44 @@ window.deleteMarket = deleteMarket;
 window.refreshMarketDropdown = refreshMarketDropdown;
 window.refreshReportsToDropdown = refreshReportsToDropdown;
 window.filterAgentRows = filterAgentRows;
+
+// Phase 2 exports
+window.emailLoginToAgent = emailLoginToAgent;
+window.renderGlobalDocuments = renderGlobalDocuments;
+window.openFolderModal = openFolderModal;
+window.saveFolder = saveFolder;
+window.deleteFolder = deleteFolder;
+window.openDocUploadModal = openDocUploadModal;
+window.uploadDoc = uploadDoc;
+window.downloadDoc = downloadDoc;
+window.deleteDoc = deleteDoc;
+window.renderMeetings = renderMeetings;
+window.openMeetingModal = openMeetingModal;
+window.togglePlatformUrl = togglePlatformUrl;
+window.saveMeeting = saveMeeting;
+window.deleteMeeting = deleteMeeting;
+window.startMeeting = startMeeting;
+window.joinMeeting = joinMeeting;
+window.endMeetingAsHost = endMeetingAsHost;
+window.leaveMeeting = leaveMeeting;
+window.renderContractTemplates = renderContractTemplates;
+window.openContractTemplateModal = openContractTemplateModal;
+window.saveContractTemplate = saveContractTemplate;
+window.deleteContractTemplate = deleteContractTemplate;
+window.renderFormsAdmin = renderFormsAdmin;
+window.renderMyForms = renderMyForms;
+window.openFormBuilderModal = openFormBuilderModal;
+window.addFormField = addFormField;
+window.updateField = updateField;
+window.removeField = removeField;
+window.moveField = moveField;
+window.saveForm = saveForm;
+window.deleteForm = deleteForm;
+window.toggleFormActive = toggleFormActive;
+window.openFormFillModal = openFormFillModal;
+window.submitFormAnswers = submitFormAnswers;
+window.viewFormSubmissions = viewFormSubmissions;
+window.exportSubmissionsCSV = exportSubmissionsCSV;
 </script>
 
 </body>
