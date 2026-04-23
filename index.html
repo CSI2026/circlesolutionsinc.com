@@ -1911,6 +1911,14 @@ async function loadCurrentProfile(){
   }
   currentProfile = profile;
 
+  // Master Center access grant (owner is implicit; others need explicit grant)
+  if(profile.role === 'owner'){
+    currentProfile.has_master_center_access = true;
+  } else {
+    const { data: grant } = await sb.from('master_center_access').select('user_id').eq('user_id', user.id).maybeSingle();
+    currentProfile.has_master_center_access = !!grant;
+  }
+
   // Load programs once
   if(allPrograms.length === 0){
     const { data: progs } = await sb.from('programs').select('*').order('name');
@@ -1949,6 +1957,14 @@ function enterBackOffice(){
   if(currentProfile.must_change_password){
     showPage('backoffice');
     setTimeout(() => openForcePasswordChangeModal(), 100);
+    return;
+  }
+
+  // Onboarding lockout: agents with pending onboarding go straight to the wizard
+  if(currentProfile.onboarding_status === 'in_progress' || currentProfile.onboarding_status === 'not_started'){
+    // Check if they have a packet assigned
+    showPage('backoffice');
+    setTimeout(() => checkAndShowOnboardingLockout(), 100);
     return;
   }
 
@@ -2058,6 +2074,16 @@ function renderSidebar(){
     navItems.push({ id:'programs-admin', label:'🎯 Programs' });
   }
 
+  // Onboarding Center — owner OR users with master_center_access grant
+  if(isOwner || currentProfile.has_master_center_access){
+    navItems.push({ id:'onboarding-master', label:'🎯 Onboarding Center' });
+  }
+
+  // Onboarding Status — owner + admin can view all in-progress agents + send packets
+  if(isOwner || isAdmin){
+    navItems.push({ id:'onboarding-pending', label:'📋 Pending Onboarding' });
+  }
+
   adminNav.innerHTML = navItems.map(it => `
     <button class="bo-nav-item ${activeAdminView === it.id ? 'active' : ''}"
             onclick="boShowAdmin('${it.id}')">${it.label}</button>
@@ -2105,6 +2131,8 @@ function renderMainContent(){
   if(activeAdminView === 'contract-templates'){ renderContractTemplates(el); return; }
   if(activeAdminView === 'forms-admin'){ renderFormsAdmin(el); return; }
   if(activeAdminView === 'my-forms'){ renderMyForms(el); return; }
+  if(activeAdminView === 'onboarding-master'){ renderOnboardingMaster(el); return; }
+  if(activeAdminView === 'onboarding-pending'){ renderOnboardingPending(el); return; }
 
   if(!activeProgramId){
     el.innerHTML = `
@@ -2609,6 +2637,15 @@ function openAnnModal(programId){
         </div>
       </label>
     </div>
+    <div class="form-group">
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+        <input type="checkbox" id="ann-sms" style="width:18px;height:18px;accent-color:#FF0080;"/>
+        <div>
+          <div style="font-weight:600;color:#FF0080;font-size:13.5px;">🚨 Urgent — also send as SMS</div>
+          <div style="font-size:11.5px;color:rgba(255,255,255,0.5);">Texts everyone in scope who has SMS notifications on. Free via carrier gateways.</div>
+        </div>
+      </label>
+    </div>
     <div style="display:flex;gap:10px;margin-top:18px;">
       <button class="bo-btn bo-btn-primary" onclick="saveAnn('${programId}')">Post</button>
       <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
@@ -2624,6 +2661,7 @@ async function saveAnn(programId){
   const market_id = scope === 'market' ? (document.getElementById('ann-market').value || currentProfile.market_id) : null;
   const team_of = scope === 'team' ? currentProfile.id : null;
   const doEmail = document.getElementById('ann-email').checked;
+  const doSms = document.getElementById('ann-sms').checked;
   const msg = document.getElementById('ann-msg');
 
   if(!title || !body){ msg.innerHTML = '<span style="color:#F87171;">Title and body are required.</span>'; return; }
@@ -2636,21 +2674,35 @@ async function saveAnn(programId){
 
   if(error){ msg.innerHTML = '<span style="color:#F87171;">'+error.message+'</span>'; return; }
 
-  // Optional email broadcast
-  if(doEmail){
-    msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Posted. Sending emails…</span>';
+  // Build recipient query once for both email + SMS
+  const buildRecipientsQuery = () => {
+    let q = sb.from('profiles').select('email,full_name,phone,phone_carrier,sms_opt_in,notify_announcements').eq('active', true);
+    if(scope === 'program')      q = q.contains('programs', [programId]);
+    else if(scope === 'market')  q = q.eq('market_id', market_id).contains('programs', [programId]);
+    else if(scope === 'team')    q = q.eq('reports_to', currentProfile.id);
+    return q;
+  };
+
+  if(doEmail || doSms){
+    msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Posted. Sending notifications…</span>';
     try {
-      let recipientsQuery = sb.from('profiles').select('email,full_name').eq('active', true);
-      if(scope === 'program')      recipientsQuery = recipientsQuery.contains('programs', [programId]);
-      else if(scope === 'market')  recipientsQuery = recipientsQuery.eq('market_id', market_id).contains('programs', [programId]);
-      else if(scope === 'team')    recipientsQuery = recipientsQuery.eq('reports_to', currentProfile.id);
-      const { data: recipients } = await recipientsQuery;
+      const { data: recipients } = await buildRecipientsQuery();
       for(const r of (recipients || [])){
-        try {
-          await sendEmailViaFunction('announcement', r.email, {
-            title, body, posted_by: currentProfile.full_name || currentProfile.email
-          });
-        } catch(e){ console.warn('Announcement email failed for', r.email, e); }
+        if(doEmail){
+          try {
+            await sendEmailViaFunction('announcement', r.email, {
+              title, body, posted_by: currentProfile.full_name || currentProfile.email
+            });
+          } catch(e){ console.warn('Announcement email failed for', r.email, e); }
+        }
+        if(doSms && r.phone && r.phone_carrier && r.sms_opt_in !== false && r.notify_announcements !== false){
+          try {
+            await sendSmsViaFunction({
+              to_phone: r.phone, carrier: r.phone_carrier,
+              message: '🚨 ' + title + ' — ' + body.substring(0, 120)
+            });
+          } catch(e){ console.warn('Announcement SMS failed for', r.phone, e); }
+        }
       }
     } catch(e){ console.warn('Broadcast error:', e); }
   }
@@ -2873,6 +2925,24 @@ function renderAgentModalUI(existing, editId, availablePrograms, isOwner, isAdmi
       <div style="font-size:11.5px;color:rgba(255,255,255,0.4);margin-top:4px;">Who manages this person (a Team Lead or Manager).</div>
     </div>
 
+    <div class="form-group">
+      <label class="form-label">Phone Carrier (for SMS notifications)</label>
+      <select id="ag-carrier" class="form-input" style="background:#1a1a1a;">
+        ${carrierOptionsHtml(e.phone_carrier)}
+      </select>
+      <div style="font-size:11.5px;color:rgba(255,255,255,0.4);margin-top:4px;">Free SMS via carrier email-to-text gateway. No paid SMS service used.</div>
+    </div>
+
+    <div class="form-group" style="padding:12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:10px;">
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+        <input type="checkbox" id="ag-sms-opt-in" ${e.sms_opt_in !== false ? 'checked' : ''} style="width:18px;height:18px;accent-color:#FF6B00;"/>
+        <div style="flex:1;">
+          <div style="font-weight:600;color:#fff;font-size:13.5px;">📱 Receive SMS notifications</div>
+          <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-top:2px;">Meeting reminders, urgent announcements, password resets</div>
+        </div>
+      </label>
+    </div>
+
     ${isOwner ? `<div class="form-group" style="padding:14px;background:rgba(255,215,0,0.05);border:1px solid rgba(255,215,0,0.2);border-radius:10px;">
       <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
         <input type="checkbox" id="ag-can-host" ${e.can_host_meetings ? 'checked' : ''} style="width:18px;height:18px;accent-color:#FFD700;"/>
@@ -2939,6 +3009,8 @@ async function saveAgent(editId){
   const programs = Array.from(document.querySelectorAll('#modal-box input[type=checkbox]:checked')).map(c => c.value);
   const market_id = document.getElementById('ag-market').value || null;
   const reports_to = document.getElementById('ag-reports-to').value || null;
+  const phone_carrier = document.getElementById('ag-carrier').value || null;
+  const sms_opt_in = document.getElementById('ag-sms-opt-in').checked;
   const canHostEl = document.getElementById('ag-can-host');
   const can_host_meetings = canHostEl ? (canHostEl.type === 'checkbox' ? canHostEl.checked : canHostEl.value === 'on') : false;
   const msg = document.getElementById('ag-msg');
@@ -2948,6 +3020,7 @@ async function saveAgent(editId){
   if(editId){
     const updateData = {
       full_name, phone: phone || null, role, programs, market_id, reports_to,
+      phone_carrier, sms_opt_in,
       updated_at: new Date().toISOString()
     };
     // Only owners can change can_host_meetings
@@ -2977,7 +3050,8 @@ async function saveAgent(editId){
 
   // Build profile update
   const profileUpdate = {
-    full_name, phone: phone || null, role, programs, market_id, reports_to
+    full_name, phone: phone || null, role, programs, market_id, reports_to,
+    phone_carrier, sms_opt_in
   };
   if(currentProfile.role === 'owner'){ profileUpdate.can_host_meetings = can_host_meetings; }
 
@@ -3128,6 +3202,8 @@ async function generateAndSetPassword(userId){
         <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-top:8px;line-height:1.5;">Copy this now and send it to the user securely (text, private message, etc.). They'll be prompted to change it on next login.</div>
       </div>`;
     msg.innerHTML = '';
+    // Notify the user via SMS (if they have notify_password enabled + carrier set)
+    notifyUserOfPasswordChange(userId);
   } catch(e){
     msg.innerHTML = '<span style="color:#F87171;">Error: '+e.message+'. Make sure the admin-set-password Edge Function is deployed.</span>';
   }
@@ -3149,9 +3225,23 @@ async function setCustomPassword(userId){
     }
     msg.innerHTML = '<span style="color:#00FF88;">✓ Password set. Remember to share it with the user — we won\'t display it again. They will be prompted to change it on next login.</span>';
     document.getElementById('pwm-custom').value = '';
+    notifyUserOfPasswordChange(userId);
   } catch(e){
     msg.innerHTML = '<span style="color:#F87171;">Error: '+e.message+'. Make sure the admin-set-password Edge Function is deployed.</span>';
   }
+}
+
+async function notifyUserOfPasswordChange(userId){
+  // Best-effort SMS — silently skips if user has no carrier or opted out.
+  try {
+    const { data: target } = await sb.from('profiles').select('phone,phone_carrier,sms_opt_in,notify_password,full_name').eq('id', userId).single();
+    if(!target || !target.phone || !target.phone_carrier) return;
+    if(target.sms_opt_in === false || target.notify_password === false) return;
+    await sendSmsViaFunction({
+      to_phone: target.phone, carrier: target.phone_carrier,
+      message: 'Circle Solutions: your password was just changed by an admin. Sign in at circlesolutionsinc.com to set your own.'
+    });
+  } catch(e){ /* silent */ }
 }
 
 async function sendPasswordResetEmail(userId){
@@ -3546,7 +3636,100 @@ async function renderMyProfile(el){
       <div style="margin-top:20px;padding-top:20px;border-top:1px solid rgba(255,255,255,0.06);">
         <button class="bo-btn bo-btn-ghost" onclick="openAgentModal('${p.id}')">Edit My Profile</button>
       </div>
+    </div>
+
+    <div class="bo-card" style="max-width:640px;margin-top:20px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;margin-bottom:6px;">📱 Notification Preferences</div>
+      <div style="font-size:12.5px;color:rgba(255,255,255,0.5);margin-bottom:18px;line-height:1.55;">SMS uses your carrier's free email-to-text gateway. We don't pay for any SMS service, so this is always free for you and us.</div>
+
+      <div class="form-group">
+        <label class="form-label">My Phone Carrier</label>
+        <select id="np-carrier" class="form-input" style="background:#1a1a1a;">
+          ${carrierOptionsHtml(p.phone_carrier)}
+        </select>
+        <div style="font-size:11.5px;color:rgba(255,255,255,0.4);margin-top:4px;">Required for SMS to work. We never share this.</div>
+      </div>
+
+      <div style="display:flex;flex-direction:column;gap:10px;margin-top:14px;">
+        <label style="display:flex;align-items:center;gap:10px;padding:12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:10px;cursor:pointer;">
+          <input type="checkbox" id="np-sms" ${p.sms_opt_in !== false ? 'checked' : ''} style="width:18px;height:18px;accent-color:#FF6B00;"/>
+          <div style="flex:1;">
+            <div style="font-weight:600;color:#fff;font-size:13.5px;">Receive SMS notifications (master toggle)</div>
+            <div style="font-size:11.5px;color:rgba(255,255,255,0.5);">Off = no texts ever, regardless of categories below.</div>
+          </div>
+        </label>
+        <label style="display:flex;align-items:center;gap:10px;padding:12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:10px;cursor:pointer;">
+          <input type="checkbox" id="np-meetings" ${p.notify_meetings !== false ? 'checked' : ''} style="width:18px;height:18px;accent-color:#00C6FF;"/>
+          <div style="flex:1;">
+            <div style="font-weight:600;color:#fff;font-size:13.5px;">📞 Meeting reminders</div>
+            <div style="font-size:11.5px;color:rgba(255,255,255,0.5);">Text 5 min before training calls start.</div>
+          </div>
+        </label>
+        <label style="display:flex;align-items:center;gap:10px;padding:12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:10px;cursor:pointer;">
+          <input type="checkbox" id="np-announcements" ${p.notify_announcements !== false ? 'checked' : ''} style="width:18px;height:18px;accent-color:#A855F7;"/>
+          <div style="flex:1;">
+            <div style="font-weight:600;color:#fff;font-size:13.5px;">📢 Urgent announcements</div>
+            <div style="font-size:11.5px;color:rgba(255,255,255,0.5);">When a manager marks an announcement as urgent.</div>
+          </div>
+        </label>
+        <label style="display:flex;align-items:center;gap:10px;padding:12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:10px;cursor:pointer;">
+          <input type="checkbox" id="np-password" ${p.notify_password !== false ? 'checked' : ''} style="width:18px;height:18px;accent-color:#00FF88;"/>
+          <div style="flex:1;">
+            <div style="font-weight:600;color:#fff;font-size:13.5px;">🔐 Password & security alerts</div>
+            <div style="font-size:11.5px;color:rgba(255,255,255,0.5);">Text when an admin resets your password.</div>
+          </div>
+        </label>
+      </div>
+
+      <div style="margin-top:18px;display:flex;gap:10px;align-items:center;">
+        <button class="bo-btn bo-btn-primary" onclick="saveNotificationPrefs()">Save Preferences</button>
+        <button class="bo-btn bo-btn-ghost" onclick="sendTestSms()">Send Test SMS to Me</button>
+      </div>
+      <div id="np-msg" style="margin-top:12px;font-size:13px;"></div>
     </div>`;
+}
+
+async function saveNotificationPrefs(){
+  const phone_carrier = document.getElementById('np-carrier').value || null;
+  const sms_opt_in = document.getElementById('np-sms').checked;
+  const notify_meetings = document.getElementById('np-meetings').checked;
+  const notify_announcements = document.getElementById('np-announcements').checked;
+  const notify_password = document.getElementById('np-password').checked;
+  const msg = document.getElementById('np-msg');
+
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Saving…</span>';
+  const { error } = await sb.from('profiles').update({
+    phone_carrier, sms_opt_in, notify_meetings, notify_announcements, notify_password
+  }).eq('id', currentProfile.id);
+  if(error){ msg.innerHTML = '<span style="color:#F87171;">'+error.message+'</span>'; return; }
+
+  // Update local cached profile
+  Object.assign(currentProfile, { phone_carrier, sms_opt_in, notify_meetings, notify_announcements, notify_password });
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Saved.</span>';
+}
+
+async function sendTestSms(){
+  const msg = document.getElementById('np-msg');
+  if(!currentProfile.phone){
+    msg.innerHTML = '<span style="color:#F87171;">No phone number on file. Edit your profile to add one first.</span>';
+    return;
+  }
+  const carrier = document.getElementById('np-carrier').value;
+  if(!carrier){
+    msg.innerHTML = '<span style="color:#F87171;">Select your carrier above first.</span>';
+    return;
+  }
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Sending test SMS…</span>';
+  const result = await sendSmsViaFunction({
+    to_phone: currentProfile.phone,
+    carrier,
+    message: 'Circle Solutions: this is a test SMS. If you received this, your free SMS notifications are working!'
+  });
+  if(result?.success){
+    msg.innerHTML = '<span style="color:#00FF88;">✓ Test sent. Check your phone (can take up to 60 seconds — carrier gateways are sometimes slow).</span>';
+  } else {
+    msg.innerHTML = '<span style="color:#F87171;">Send failed: ' + (result?.error?.message || 'Make sure send-sms Edge Function is deployed.') + '</span>';
+  }
 }
 
 // Dedicated self-avatar upload (separate from admin avatar upload)
@@ -3752,6 +3935,37 @@ async function sendEmailViaFunction(template, to, variables){
   });
   if(error){ console.error('Email send error:', error); throw error; }
   return data;
+}
+
+// SMS via free carrier email-to-SMS gateways (no paid SMS service)
+async function sendSmsViaFunction(opts){
+  // opts: { user_id } OR { to_phone, carrier }, plus { message }
+  try {
+    const { data, error } = await sb.functions.invoke('send-sms', { body: opts });
+    if(error){ console.warn('SMS send error:', error); return { success:false, error }; }
+    return data;
+  } catch(e){
+    console.warn('SMS send exception:', e);
+    return { success:false, error:e };
+  }
+}
+
+// Carrier list — keep in sync with send-sms Edge Function and SQL constraint
+const CARRIER_OPTIONS = [
+  { value:'',           label:'— Select carrier —' },
+  { value:'verizon',    label:'Verizon' },
+  { value:'att',        label:'AT&T' },
+  { value:'tmobile',    label:'T-Mobile' },
+  { value:'sprint',     label:'Sprint (legacy)' },
+  { value:'cricket',    label:'Cricket' },
+  { value:'boost',      label:'Boost Mobile' },
+  { value:'metro',      label:'Metro by T-Mobile' },
+  { value:'uscellular', label:'US Cellular' },
+  { value:'googlefi',   label:'Google Fi' },
+  { value:'xfinity',    label:'Xfinity Mobile' }
+];
+function carrierOptionsHtml(selected){
+  return CARRIER_OPTIONS.map(o => `<option value="${o.value}" ${o.value===(selected||'')?'selected':''}>${o.label}</option>`).join('');
 }
 
 // "Email Login" button handler — sends welcome email with login details
@@ -5014,6 +5228,1082 @@ async function exportSubmissionsCSV(formId, formTitle){
 }
 
 
+// ═══════════════════════════════════════════════════════════════
+// PHASE 2.3 — ONBOARDING SYSTEM
+// ═══════════════════════════════════════════════════════════════
+// 5 modules:
+//   1. Onboarding lockout (agent forced into wizard)
+//   2. Onboarding wizard (agent fills out their packet)
+//   3. Master Onboarding Center (owner builds packets)
+//   4. Pending Onboarding view (admins watch progress, send packets)
+//   5. Onboarding status panel (on agent profile)
+// ═══════════════════════════════════════════════════════════════
+
+// Available step types — used by master center and wizard
+const STEP_TYPES = {
+  document:         { icon:'📄', label:'Document to sign' },
+  personal_info:    { icon:'👤', label:'Personal info (name, DOB, SSN, address)' },
+  w9:               { icon:'📑', label:'W-9 tax info' },
+  direct_deposit:   { icon:'🏦', label:'Direct deposit' },
+  emergency_contact:{ icon:'🚑', label:'Emergency contact' },
+  id_upload:        { icon:'🪪', label:'Driver license / ID upload' },
+  profile_photo:    { icon:'📸', label:'Profile photo' },
+  background_check: { icon:'🔍', label:'Background check authorization' },
+  custom:           { icon:'⚙️', label:'Custom step' }
+};
+
+// Steps that contain sensitive PII (full SSN, DL, banking)
+const PII_STEPS = ['personal_info','w9','direct_deposit','id_upload'];
+
+
+// ─────────────────────────────────────────────────────────────────
+// 1. ONBOARDING LOCKOUT — agent forced into wizard before anything else
+// ─────────────────────────────────────────────────────────────────
+async function checkAndShowOnboardingLockout(){
+  // Find any in-progress packets for this user
+  const { data: packets } = await sb.from('agent_onboarding')
+    .select('*')
+    .eq('user_id', currentProfile.id)
+    .eq('status', 'in_progress');
+
+  if(!packets || packets.length === 0){
+    // No packets assigned yet — show a holding screen
+    document.getElementById('bo-content').innerHTML = `
+      <div style="max-width:560px;margin:80px auto;text-align:center;padding:40px;background:#0d0d0d;border:1px solid rgba(255,255,255,0.08);border-radius:18px;">
+        <div style="font-size:60px;margin-bottom:18px;">⏳</div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:36px;color:#fff;margin-bottom:10px;letter-spacing:1px;">WELCOME TO CIRCLE SOLUTIONS</h1>
+        <p style="color:rgba(255,255,255,0.6);font-size:14px;line-height:1.6;margin-bottom:24px;">Your account is set up and waiting on your onboarding packet.<br/>Your manager will send it to you shortly.</p>
+        <p style="color:rgba(255,255,255,0.4);font-size:12.5px;line-height:1.6;">Once they do, you'll see a banner at the top of this page guiding you through it. You'll have access to the rest of the back office once your onboarding is complete.</p>
+        <button class="bo-btn bo-btn-ghost" style="margin-top:24px;" onclick="doLogout()">Sign Out</button>
+      </div>`;
+    // Hide sidebar to prevent navigation away
+    const sidebar = document.getElementById('bo-sidebar');
+    if(sidebar) sidebar.style.display = 'none';
+    return;
+  }
+
+  // Show lockout screen with packets to complete
+  const sidebar = document.getElementById('bo-sidebar');
+  if(sidebar) sidebar.style.display = 'none';
+
+  const packetCards = await Promise.all(packets.map(async pk => {
+    const { data: steps } = await sb.from('agent_onboarding_steps')
+      .select('*').eq('agent_onboarding_id', pk.id).order('display_order');
+    const total = steps?.length || 0;
+    const done = (steps || []).filter(s => s.status === 'complete').length;
+    const pct = total ? Math.round((done/total)*100) : 0;
+    const packetName = pk.packet_snapshot?.name || 'Onboarding Packet';
+    return `
+      <div style="background:#0d0d0d;border:1px solid rgba(255,255,255,0.08);border-radius:18px;padding:28px;margin-bottom:16px;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:18px;flex-wrap:wrap;">
+          <div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:28px;color:#fff;letter-spacing:1px;">${escapeHtml(packetName)}</div>
+            <div style="font-size:13px;color:rgba(255,255,255,0.5);margin-top:4px;">${done} of ${total} steps complete</div>
+          </div>
+          <button class="bo-btn bo-btn-primary" style="padding:12px 22px;" onclick="openOnboardingWizard('${pk.id}')">${done === 0 ? 'Start →' : (done < total ? 'Continue →' : 'Review')}</button>
+        </div>
+        <div style="background:rgba(255,255,255,0.06);border-radius:50px;height:10px;overflow:hidden;">
+          <div style="background:linear-gradient(90deg,#FF6B00,#FF0080);height:100%;width:${pct}%;transition:width 0.4s;"></div>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:16px;">
+          ${(steps || []).map(s => `
+            <div style="display:flex;align-items:center;gap:6px;padding:5px 10px;background:${s.status==='complete'?'rgba(0,255,136,0.1)':'rgba(255,255,255,0.04)'};border:1px solid ${s.status==='complete'?'rgba(0,255,136,0.3)':'rgba(255,255,255,0.07)'};border-radius:50px;font-size:11.5px;color:${s.status==='complete'?'#00FF88':'rgba(255,255,255,0.65)'};">
+              ${s.status==='complete'?'✓':'○'} ${escapeHtml(s.title)}
+            </div>`).join('')}
+        </div>
+      </div>`;
+  }));
+
+  document.getElementById('bo-content').innerHTML = `
+    <div style="max-width:760px;margin:30px auto;padding:0 20px;">
+      <div style="margin-bottom:24px;">
+        <div style="font-size:11px;color:#FF6B00;font-weight:700;letter-spacing:3px;text-transform:uppercase;margin-bottom:8px;">🔒 Onboarding Required</div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;line-height:1;letter-spacing:1px;">FINISH YOUR ONBOARDING</h1>
+        <p style="color:rgba(255,255,255,0.6);font-size:14px;line-height:1.6;margin-top:10px;">Complete each step below to unlock the rest of your back office, including codes, training calls, and program access.</p>
+      </div>
+      ${packetCards.join('')}
+      <div style="text-align:center;margin-top:24px;">
+        <button class="bo-btn bo-btn-ghost" onclick="doLogout()">Sign Out</button>
+      </div>
+    </div>`;
+}
+
+
+// ─────────────────────────────────────────────────────────────────
+// 2. ONBOARDING WIZARD — agent fills out one step at a time
+// ─────────────────────────────────────────────────────────────────
+let _wizardState = null;
+
+async function openOnboardingWizard(agentOnboardingId){
+  const { data: pk } = await sb.from('agent_onboarding').select('*').eq('id', agentOnboardingId).single();
+  if(!pk){ alert('Packet not found'); return; }
+  const { data: steps } = await sb.from('agent_onboarding_steps')
+    .select('*').eq('agent_onboarding_id', agentOnboardingId).order('display_order');
+
+  _wizardState = {
+    packetId: agentOnboardingId,
+    packetName: pk.packet_snapshot?.name || 'Onboarding',
+    steps: steps || [],
+    currentIndex: (steps || []).findIndex(s => s.status !== 'complete')
+  };
+  if(_wizardState.currentIndex === -1) _wizardState.currentIndex = 0;
+
+  renderWizardStep();
+}
+
+function renderWizardStep(){
+  const { steps, currentIndex, packetName, packetId } = _wizardState;
+  const step = steps[currentIndex];
+  if(!step){ closeAllModals(); return; }
+  const total = steps.length;
+  const completedCount = steps.filter(s => s.status === 'complete').length;
+  const stepInfo = STEP_TYPES[step.step_type] || { icon:'📋', label:step.step_type };
+
+  document.getElementById('modal-box').innerHTML = `
+    <div style="margin-bottom:18px;">
+      <div style="font-size:11px;color:#FF6B00;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:6px;">${escapeHtml(packetName)} · Step ${currentIndex+1} of ${total}</div>
+      <div style="background:rgba(255,255,255,0.06);border-radius:50px;height:6px;overflow:hidden;">
+        <div style="background:linear-gradient(90deg,#FF6B00,#FF0080);height:100%;width:${Math.round((completedCount/total)*100)}%;"></div>
+      </div>
+    </div>
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:28px;color:#fff;margin-bottom:6px;letter-spacing:1px;">${stepInfo.icon} ${escapeHtml(step.title)}</h2>
+    ${step.status === 'complete' ? '<div style="background:rgba(0,255,136,0.08);border:1px solid rgba(0,255,136,0.3);border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:12.5px;color:#00FF88;">✓ Already submitted on ' + new Date(step.completed_at).toLocaleString() + '</div>' : ''}
+    <div id="wizard-step-body">${renderWizardStepBody(step)}</div>
+    <div style="display:flex;justify-content:space-between;gap:10px;margin-top:24px;padding-top:18px;border-top:1px solid rgba(255,255,255,0.07);">
+      <button class="bo-btn bo-btn-ghost" onclick="closeWizard()">Save & Close</button>
+      <div style="display:flex;gap:8px;">
+        ${currentIndex > 0 ? '<button class="bo-btn bo-btn-ghost" onclick="wizardPrev()">← Back</button>' : ''}
+        ${step.status !== 'complete' ? `<button class="bo-btn bo-btn-primary" onclick="wizardSubmit('${step.id}','${step.step_type}')">Submit & Continue →</button>` : (currentIndex < total-1 ? '<button class="bo-btn bo-btn-primary" onclick="wizardNext()">Next →</button>' : '<button class="bo-btn bo-btn-primary" onclick="closeWizard()">Done</button>')}
+      </div>
+    </div>
+    <div id="wizard-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  const modalBox = document.getElementById('modal-box');
+  modalBox.style.maxWidth = '640px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+function renderWizardStepBody(step){
+  const data = step.submitted_data || {};
+  const readonly = step.status === 'complete';
+  const ro = readonly ? 'readonly disabled' : '';
+
+  switch(step.step_type){
+    case 'personal_info':
+      return `<p style="font-size:13px;color:rgba(255,255,255,0.55);line-height:1.6;margin-bottom:14px;">All fields required. Your full SSN is encrypted and only viewable by the company owner.</p>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+          <div class="form-group"><label class="form-label">First Name *</label><input id="wz-first" class="form-input" value="${escapeHtml(data.first_name||'')}" ${ro}/></div>
+          <div class="form-group"><label class="form-label">Middle Name *</label><input id="wz-middle" class="form-input" value="${escapeHtml(data.middle_name||'')}" ${ro}/></div>
+        </div>
+        <div class="form-group"><label class="form-label">Last Name *</label><input id="wz-last" class="form-input" value="${escapeHtml(data.last_name||'')}" ${ro}/></div>
+        <div class="form-group"><label class="form-label">Date of Birth *</label><input id="wz-dob" type="date" class="form-input" value="${escapeHtml(data.dob||'')}" ${ro}/></div>
+        <div class="form-group"><label class="form-label">Full Social Security Number *</label><input id="wz-ssn" class="form-input" placeholder="XXX-XX-XXXX" value="${escapeHtml(data.ssn||'')}" ${ro}/><div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">🔒 Encrypted. Only the owner can view this in full.</div></div>
+        <div class="form-group"><label class="form-label">Street Address *</label><input id="wz-address" class="form-input" value="${escapeHtml(data.address||'')}" ${ro}/></div>
+        <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:10px;">
+          <div class="form-group"><label class="form-label">City *</label><input id="wz-city" class="form-input" value="${escapeHtml(data.city||'')}" ${ro}/></div>
+          <div class="form-group"><label class="form-label">State *</label><input id="wz-state" class="form-input" value="${escapeHtml(data.state||'')}" maxlength="2" ${ro}/></div>
+          <div class="form-group"><label class="form-label">ZIP *</label><input id="wz-zip" class="form-input" value="${escapeHtml(data.zip||'')}" ${ro}/></div>
+        </div>`;
+
+    case 'w9':
+      return `<p style="font-size:13px;color:rgba(255,255,255,0.55);line-height:1.6;margin-bottom:14px;">For 1099 tax reporting. SSN or EIN is encrypted.</p>
+        <div class="form-group"><label class="form-label">Legal Name (as it appears on tax return) *</label><input id="wz-w9-name" class="form-input" value="${escapeHtml(data.legal_name||'')}" ${ro}/></div>
+        <div class="form-group"><label class="form-label">Business Name (if different)</label><input id="wz-w9-bus" class="form-input" value="${escapeHtml(data.business_name||'')}" ${ro}/></div>
+        <div class="form-group"><label class="form-label">Tax Classification *</label>
+          <select id="wz-w9-class" class="form-input" style="background:#1a1a1a;" ${ro}>
+            <option value="individual" ${data.tax_class==='individual'?'selected':''}>Individual / Sole Proprietor</option>
+            <option value="llc" ${data.tax_class==='llc'?'selected':''}>LLC</option>
+            <option value="corp_c" ${data.tax_class==='corp_c'?'selected':''}>C-Corporation</option>
+            <option value="corp_s" ${data.tax_class==='corp_s'?'selected':''}>S-Corporation</option>
+            <option value="partnership" ${data.tax_class==='partnership'?'selected':''}>Partnership</option>
+          </select></div>
+        <div class="form-group"><label class="form-label">SSN or EIN *</label><input id="wz-w9-tin" class="form-input" placeholder="XXX-XX-XXXX or XX-XXXXXXX" value="${escapeHtml(data.tin||'')}" ${ro}/><div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">🔒 Encrypted. Only the owner can view this.</div></div>`;
+
+    case 'direct_deposit':
+      return `<p style="font-size:13px;color:rgba(255,255,255,0.55);line-height:1.6;margin-bottom:14px;">Where do you want commissions and payments deposited?</p>
+        <div class="form-group"><label class="form-label">Bank Name *</label><input id="wz-bank-name" class="form-input" value="${escapeHtml(data.bank_name||'')}" ${ro}/></div>
+        <div class="form-group"><label class="form-label">Account Type *</label>
+          <select id="wz-bank-type" class="form-input" style="background:#1a1a1a;" ${ro}>
+            <option value="checking" ${data.account_type==='checking'?'selected':''}>Checking</option>
+            <option value="savings" ${data.account_type==='savings'?'selected':''}>Savings</option>
+          </select></div>
+        <div class="form-group"><label class="form-label">Routing Number * (9 digits)</label><input id="wz-routing" class="form-input" maxlength="9" value="${escapeHtml(data.routing||'')}" ${ro}/></div>
+        <div class="form-group"><label class="form-label">Account Number *</label><input id="wz-account" class="form-input" value="${escapeHtml(data.account||'')}" ${ro}/><div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">🔒 Encrypted. Only the owner can view this.</div></div>`;
+
+    case 'emergency_contact':
+      return `<div class="form-group"><label class="form-label">Contact Full Name *</label><input id="wz-ec-name" class="form-input" value="${escapeHtml(data.name||'')}" ${ro}/></div>
+        <div class="form-group"><label class="form-label">Relationship *</label><input id="wz-ec-rel" class="form-input" placeholder="Spouse, Parent, Sibling…" value="${escapeHtml(data.relationship||'')}" ${ro}/></div>
+        <div class="form-group"><label class="form-label">Phone Number *</label><input id="wz-ec-phone" class="form-input" placeholder="(555) 123-4567" value="${escapeHtml(data.phone||'')}" ${ro}/></div>`;
+
+    case 'id_upload':
+      return `<p style="font-size:13px;color:rgba(255,255,255,0.55);line-height:1.6;margin-bottom:14px;">Upload clear photos of both sides of your driver's license or state ID.</p>
+        ${readonly && data.front_path ? `<div style="margin-bottom:10px;color:#00FF88;font-size:13px;">✓ Front: ${escapeHtml(data.front_name||'submitted')}</div>` : '<div class="form-group"><label class="form-label">Front of ID *</label><input id="wz-id-front" type="file" class="form-input" accept="image/*" ' + ro + '/></div>'}
+        ${readonly && data.back_path ? `<div style="margin-bottom:10px;color:#00FF88;font-size:13px;">✓ Back: ${escapeHtml(data.back_name||'submitted')}</div>` : '<div class="form-group"><label class="form-label">Back of ID *</label><input id="wz-id-back" type="file" class="form-input" accept="image/*" ' + ro + '/></div>'}`;
+
+    case 'profile_photo':
+      return `<p style="font-size:13px;color:rgba(255,255,255,0.55);line-height:1.6;margin-bottom:14px;">A clear, professional headshot. This becomes your back-office profile photo.</p>
+        ${readonly && data.photo_path ? `<div style="color:#00FF88;font-size:13px;">✓ Photo uploaded</div>` : '<div class="form-group"><input id="wz-photo" type="file" class="form-input" accept="image/*" ' + ro + '/></div>'}`;
+
+    case 'background_check':
+      return `<div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:18px;margin-bottom:18px;font-size:13px;color:rgba(255,255,255,0.75);line-height:1.7;max-height:280px;overflow-y:auto;">
+        <p style="font-weight:700;color:#fff;margin-bottom:10px;">BACKGROUND CHECK AUTHORIZATION</p>
+        <p>I authorize Circle Solutions Inc. and its third-party service providers to obtain and review consumer reports, criminal history records, motor vehicle records, and any other public records relating to me, for the purpose of evaluating my eligibility to perform services as an independent contractor or employee.</p>
+        <p style="margin-top:10px;">I understand this authorization will remain in effect throughout my relationship with the company unless I revoke it in writing.</p>
+        <p style="margin-top:10px;">I certify that the personal information I have provided in this onboarding (name, date of birth, social security number, address) is true and accurate.</p>
+      </div>
+      ${readonly ? '<div style="color:#00FF88;font-size:13px;">✓ Authorized on ' + new Date(step.completed_at).toLocaleString() + '</div>' : `
+      <div class="form-group"><label class="form-label">Type your full legal name to authorize *</label><input id="wz-bg-name" class="form-input" placeholder="Your full legal name" ${ro}/></div>
+      <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:10px;background:rgba(255,107,0,0.05);border:1px solid rgba(255,107,0,0.2);border-radius:8px;">
+        <input type="checkbox" id="wz-bg-agree" style="width:18px;height:18px;accent-color:#FF6B00;flex-shrink:0;margin-top:2px;"/>
+        <div style="font-size:12.5px;color:#fff;line-height:1.55;">I have read and authorize Circle Solutions Inc. to conduct a background check as described above. I agree this electronic authorization carries the same legal weight as a written, signed authorization.</div>
+      </label>`}`;
+
+    case 'document':
+      const sigMethod = step.config?.signature_method || 'click_to_sign';
+      const docUrl = step.config?.document_url || '';
+      return `<p style="font-size:13px;color:rgba(255,255,255,0.55);line-height:1.6;margin-bottom:14px;">Review the document, then ${sigMethod === 'acknowledge' ? 'check the box to acknowledge' : 'type your full legal name to sign'}.</p>
+        ${docUrl ? `<div style="margin-bottom:14px;"><a href="${escapeHtml(docUrl)}" target="_blank" rel="noopener" class="bo-btn bo-btn-ghost" style="display:inline-block;text-decoration:none;">📄 Open Document</a></div>` : ''}
+        ${readonly ? '<div style="color:#00FF88;font-size:13px;">✓ Signed on ' + new Date(step.completed_at).toLocaleString() + ' as: ' + escapeHtml(data.signature_value||'') + '</div>' : (sigMethod === 'click_to_sign' ? `
+          <div class="form-group"><label class="form-label">Type your full legal name *</label><input id="wz-doc-name" class="form-input" placeholder="First Middle Last" ${ro}/></div>
+          <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:10px;background:rgba(255,107,0,0.05);border:1px solid rgba(255,107,0,0.2);border-radius:8px;">
+            <input type="checkbox" id="wz-doc-agree" style="width:18px;height:18px;accent-color:#FF6B00;flex-shrink:0;margin-top:2px;"/>
+            <div style="font-size:12.5px;color:#fff;line-height:1.55;">I have read this document and agree to be bound by it as if I had physically signed it. I understand this electronic signature carries the same legal weight as a wet ink signature.</div>
+          </label>` : `
+          <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:10px;background:rgba(255,107,0,0.05);border:1px solid rgba(255,107,0,0.2);border-radius:8px;">
+            <input type="checkbox" id="wz-doc-ack" style="width:18px;height:18px;accent-color:#FF6B00;flex-shrink:0;margin-top:2px;"/>
+            <div style="font-size:12.5px;color:#fff;line-height:1.55;">I have read this document and I agree.</div>
+          </label>`)}`;
+
+    case 'custom':
+      const fields = step.config?.fields || [];
+      return `<p style="font-size:13px;color:rgba(255,255,255,0.55);line-height:1.6;margin-bottom:14px;">${escapeHtml(step.description||'Complete the following:')}</p>
+        ${fields.map((f,i) => `<div class="form-group"><label class="form-label">${escapeHtml(f.label)}${f.required?' *':''}</label><input id="wz-cf-${i}" class="form-input" value="${escapeHtml((data.fields||{})[f.label]||'')}" ${ro}/></div>`).join('')}`;
+
+    default:
+      return '<div style="color:rgba(255,255,255,0.5);">Unknown step type.</div>';
+  }
+}
+
+async function wizardSubmit(stepId, stepType){
+  const msg = document.getElementById('wizard-msg');
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Saving…</span>';
+
+  let submittedData = {};
+  let signedDocPayload = null;
+
+  try {
+    switch(stepType){
+      case 'personal_info': {
+        const fields = ['first','middle','last','dob','ssn','address','city','state','zip'];
+        for(const f of fields){
+          const v = document.getElementById('wz-'+f).value.trim();
+          if(!v){ msg.innerHTML = '<span style="color:#F87171;">All fields required.</span>'; return; }
+        }
+        submittedData = {
+          first_name: document.getElementById('wz-first').value.trim(),
+          middle_name: document.getElementById('wz-middle').value.trim(),
+          last_name: document.getElementById('wz-last').value.trim(),
+          dob: document.getElementById('wz-dob').value,
+          ssn: document.getElementById('wz-ssn').value.trim(),
+          address: document.getElementById('wz-address').value.trim(),
+          city: document.getElementById('wz-city').value.trim(),
+          state: document.getElementById('wz-state').value.trim().toUpperCase(),
+          zip: document.getElementById('wz-zip').value.trim()
+        };
+        break;
+      }
+      case 'w9': {
+        const fields = ['w9-name','w9-class','w9-tin'];
+        for(const f of fields){
+          if(!document.getElementById('wz-'+f).value.trim()){ msg.innerHTML='<span style="color:#F87171;">All required fields needed.</span>'; return; }
+        }
+        submittedData = {
+          legal_name: document.getElementById('wz-w9-name').value.trim(),
+          business_name: document.getElementById('wz-w9-bus').value.trim(),
+          tax_class: document.getElementById('wz-w9-class').value,
+          tin: document.getElementById('wz-w9-tin').value.trim()
+        };
+        break;
+      }
+      case 'direct_deposit': {
+        const fields = ['bank-name','bank-type','routing','account'];
+        for(const f of fields){
+          if(!document.getElementById('wz-'+f).value.trim()){ msg.innerHTML='<span style="color:#F87171;">All fields required.</span>'; return; }
+        }
+        const routing = document.getElementById('wz-routing').value.trim();
+        if(!/^\d{9}$/.test(routing)){ msg.innerHTML='<span style="color:#F87171;">Routing number must be exactly 9 digits.</span>'; return; }
+        submittedData = {
+          bank_name: document.getElementById('wz-bank-name').value.trim(),
+          account_type: document.getElementById('wz-bank-type').value,
+          routing,
+          account: document.getElementById('wz-account').value.trim()
+        };
+        break;
+      }
+      case 'emergency_contact': {
+        const fields = ['ec-name','ec-rel','ec-phone'];
+        for(const f of fields){
+          if(!document.getElementById('wz-'+f).value.trim()){ msg.innerHTML='<span style="color:#F87171;">All fields required.</span>'; return; }
+        }
+        submittedData = {
+          name: document.getElementById('wz-ec-name').value.trim(),
+          relationship: document.getElementById('wz-ec-rel').value.trim(),
+          phone: document.getElementById('wz-ec-phone').value.trim()
+        };
+        break;
+      }
+      case 'id_upload': {
+        const front = document.getElementById('wz-id-front')?.files?.[0];
+        const back = document.getElementById('wz-id-back')?.files?.[0];
+        if(!front || !back){ msg.innerHTML='<span style="color:#F87171;">Upload both sides of your ID.</span>'; return; }
+        if(front.size > 5*1024*1024 || back.size > 5*1024*1024){ msg.innerHTML='<span style="color:#F87171;">Each image must be under 5MB.</span>'; return; }
+        const ts = Date.now();
+        const frontPath = `${currentProfile.id}/id-front-${ts}-${front.name.replace(/[^a-zA-Z0-9.]/g,'_')}`;
+        const backPath = `${currentProfile.id}/id-back-${ts}-${back.name.replace(/[^a-zA-Z0-9.]/g,'_')}`;
+        const { error: e1 } = await sb.storage.from('onboarding-docs').upload(frontPath, front);
+        if(e1){ msg.innerHTML='<span style="color:#F87171;">Front upload failed: '+e1.message+'</span>'; return; }
+        const { error: e2 } = await sb.storage.from('onboarding-docs').upload(backPath, back);
+        if(e2){ msg.innerHTML='<span style="color:#F87171;">Back upload failed: '+e2.message+'</span>'; return; }
+        submittedData = { front_path: frontPath, back_path: backPath, front_name: front.name, back_name: back.name };
+        break;
+      }
+      case 'profile_photo': {
+        const file = document.getElementById('wz-photo')?.files?.[0];
+        if(!file){ msg.innerHTML='<span style="color:#F87171;">Upload a photo.</span>'; return; }
+        if(file.size > 3*1024*1024){ msg.innerHTML='<span style="color:#F87171;">Photo must be under 3MB.</span>'; return; }
+        const ext = (file.name.split('.').pop() || 'jpg').toLowerCase();
+        const filename = currentProfile.id + '-onb-' + Date.now() + '.' + ext;
+        const { error: upErr } = await sb.storage.from('avatars').upload(filename, file, { upsert: true });
+        if(upErr){ msg.innerHTML='<span style="color:#F87171;">Upload failed: '+upErr.message+'</span>'; return; }
+        const { data: pub } = sb.storage.from('avatars').getPublicUrl(filename);
+        submittedData = { photo_url: pub.publicUrl, photo_path: filename };
+        // Also update the user's profile avatar immediately
+        await sb.from('profiles').update({ avatar_url: pub.publicUrl }).eq('id', currentProfile.id);
+        break;
+      }
+      case 'background_check': {
+        const name = document.getElementById('wz-bg-name').value.trim();
+        const agree = document.getElementById('wz-bg-agree').checked;
+        if(!name || !agree){ msg.innerHTML='<span style="color:#F87171;">Type your name and check the authorization box.</span>'; return; }
+        submittedData = { authorized_by_name: name, authorized: true };
+        signedDocPayload = {
+          document_title: 'Background Check Authorization',
+          signature_method: 'click_to_sign',
+          signature_value: name,
+          legal_text: 'I authorize Circle Solutions Inc. and its third-party service providers to obtain and review consumer reports, criminal history records, motor vehicle records, and any other public records relating to me. (Full text in onboarding wizard.)'
+        };
+        break;
+      }
+      case 'document': {
+        const step = _wizardState.steps.find(s => s.id === stepId);
+        const sigMethod = step.config?.signature_method || 'click_to_sign';
+        if(sigMethod === 'click_to_sign'){
+          const name = document.getElementById('wz-doc-name').value.trim();
+          const agree = document.getElementById('wz-doc-agree').checked;
+          if(!name || !agree){ msg.innerHTML='<span style="color:#F87171;">Type your name and check the agreement box.</span>'; return; }
+          submittedData = { signature_value: name, signed: true };
+          signedDocPayload = {
+            document_title: step.title,
+            document_url: step.config?.document_url || null,
+            signature_method: 'click_to_sign',
+            signature_value: name,
+            legal_text: 'I have read this document and agree to be bound by it as if I had physically signed it.'
+          };
+        } else {
+          const ack = document.getElementById('wz-doc-ack').checked;
+          if(!ack){ msg.innerHTML='<span style="color:#F87171;">Check the acknowledgment box.</span>'; return; }
+          submittedData = { signature_value: 'ACKNOWLEDGED', signed: true };
+          signedDocPayload = {
+            document_title: step.title,
+            document_url: step.config?.document_url || null,
+            signature_method: 'acknowledge',
+            signature_value: 'ACKNOWLEDGED',
+            legal_text: 'I have read this document and I agree.'
+          };
+        }
+        break;
+      }
+      case 'custom': {
+        const step = _wizardState.steps.find(s => s.id === stepId);
+        const fields = step.config?.fields || [];
+        const out = {};
+        for(let i=0; i<fields.length; i++){
+          const v = document.getElementById('wz-cf-'+i).value.trim();
+          if(fields[i].required && !v){ msg.innerHTML='<span style="color:#F87171;">"'+fields[i].label+'" is required.</span>'; return; }
+          out[fields[i].label] = v;
+        }
+        submittedData = { fields: out };
+        break;
+      }
+    }
+
+    // Save the step
+    const { error: stepErr } = await sb.from('agent_onboarding_steps').update({
+      submitted_data: submittedData,
+      status: 'complete',
+      completed_at: new Date().toISOString()
+    }).eq('id', stepId);
+    if(stepErr){ msg.innerHTML='<span style="color:#F87171;">'+stepErr.message+'</span>'; return; }
+
+    // Audit-trail entry for signed docs
+    if(signedDocPayload){
+      let ip = null;
+      try { const r = await fetch('https://api.ipify.org?format=json'); const j = await r.json(); ip = j.ip; } catch(e){}
+      await sb.from('signed_documents').insert({
+        user_id: currentProfile.id,
+        agent_onboarding_id: _wizardState.packetId,
+        step_id: stepId,
+        ...signedDocPayload,
+        ip_address: ip,
+        user_agent: navigator.userAgent
+      });
+    }
+
+    // Update local state and check completion
+    const stepObj = _wizardState.steps.find(s => s.id === stepId);
+    stepObj.status = 'complete';
+    stepObj.completed_at = new Date().toISOString();
+    stepObj.submitted_data = submittedData;
+
+    // Check if all steps complete
+    const allDone = _wizardState.steps.every(s => s.status === 'complete');
+    if(allDone){
+      await sb.from('agent_onboarding').update({ status:'complete', completed_at: new Date().toISOString() }).eq('id', _wizardState.packetId);
+      // Check if ALL packets are now done
+      const { data: allPackets } = await sb.from('agent_onboarding').select('status').eq('user_id', currentProfile.id);
+      const everythingDone = (allPackets || []).every(p => p.status === 'complete');
+      if(everythingDone){
+        await sb.from('profiles').update({
+          onboarding_status: 'complete',
+          onboarding_completed_at: new Date().toISOString()
+        }).eq('id', currentProfile.id);
+        currentProfile.onboarding_status = 'complete';
+        showOnboardingCompleteScreen();
+        return;
+      }
+    } else {
+      // Mark profile as in_progress
+      if(currentProfile.onboarding_status !== 'in_progress'){
+        await sb.from('profiles').update({
+          onboarding_status: 'in_progress',
+          onboarding_started_at: new Date().toISOString()
+        }).eq('id', currentProfile.id);
+        currentProfile.onboarding_status = 'in_progress';
+      }
+    }
+
+    // Move to next incomplete step
+    msg.innerHTML = '<span style="color:#00FF88;">✓ Saved.</span>';
+    setTimeout(() => {
+      const nextIdx = _wizardState.steps.findIndex((s, i) => i > _wizardState.currentIndex && s.status !== 'complete');
+      if(nextIdx === -1){
+        // All done — close wizard, refresh lockout view
+        closeAllModals();
+        document.getElementById('modal-box').style.maxWidth = '560px';
+        checkAndShowOnboardingLockout();
+      } else {
+        _wizardState.currentIndex = nextIdx;
+        renderWizardStep();
+      }
+    }, 600);
+
+  } catch(e){
+    msg.innerHTML = '<span style="color:#F87171;">Error: '+e.message+'</span>';
+  }
+}
+
+function wizardPrev(){
+  if(_wizardState.currentIndex > 0){ _wizardState.currentIndex--; renderWizardStep(); }
+}
+function wizardNext(){
+  if(_wizardState.currentIndex < _wizardState.steps.length-1){ _wizardState.currentIndex++; renderWizardStep(); }
+}
+function closeWizard(){
+  closeAllModals();
+  document.getElementById('modal-box').style.maxWidth = '560px';
+  checkAndShowOnboardingLockout();
+}
+
+function showOnboardingCompleteScreen(){
+  closeAllModals();
+  document.getElementById('modal-box').style.maxWidth = '560px';
+  document.getElementById('bo-content').innerHTML = `
+    <div style="max-width:560px;margin:60px auto;text-align:center;padding:48px 32px;background:#0d0d0d;border:1px solid rgba(0,255,136,0.3);border-radius:18px;">
+      <div style="font-size:80px;margin-bottom:18px;">🎉</div>
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:42px;color:#00FF88;margin-bottom:10px;letter-spacing:1px;">ONBOARDING COMPLETE</h1>
+      <p style="color:rgba(255,255,255,0.7);font-size:14px;line-height:1.6;margin-bottom:24px;">Nice work. Your manager has been notified that you're ready for codes and training. Sign in again to access your full back office.</p>
+      <button class="bo-btn bo-btn-primary" style="padding:12px 24px;" onclick="doLogout()">Sign Out & Continue Later</button>
+    </div>`;
+}
+
+
+// ─────────────────────────────────────────────────────────────────
+// 3. MASTER ONBOARDING CENTER (owner / granted users)
+// ─────────────────────────────────────────────────────────────────
+async function renderOnboardingMaster(el){
+  if(!currentProfile.has_master_center_access){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied — Master Center is owner-restricted.</div>';
+    return;
+  }
+  const isOwner = currentProfile.role === 'owner';
+
+  const { data: packets } = await sb.from('onboarding_packets').select('*').order('program_id').order('updated_at', { ascending: false });
+  // Stats per packet
+  const packetStats = {};
+  for(const p of (packets || [])){
+    const { count } = await sb.from('agent_onboarding').select('id', { count: 'exact', head: true }).eq('packet_id', p.id);
+    packetStats[p.id] = count || 0;
+  }
+
+  // Access grants (owner only sees this section)
+  let grantsHtml = '';
+  if(isOwner){
+    const { data: grants } = await sb.from('master_center_access')
+      .select('*, profiles:user_id (full_name,email,role)')
+      .order('granted_at', { ascending: false });
+    grantsHtml = `
+      <div class="bo-card" style="margin-bottom:18px;border-left:3px solid #FFD700;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:10px;">
+          <div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#FFD700;letter-spacing:1px;">🔑 Access Grants</div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-top:2px;">People you've allowed to edit master packets (besides yourself)</div>
+          </div>
+          <button class="bo-btn bo-btn-primary" onclick="openGrantAccessModal()">+ Grant Access</button>
+        </div>
+        ${(grants || []).length === 0 ? '<div style="color:rgba(255,255,255,0.4);font-size:13px;padding:8px 0;">Only you have access right now.</div>' :
+          '<div>' + grants.map(g => `
+            <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:12px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+              <div>
+                <div style="font-size:13.5px;font-weight:600;color:#fff;">${escapeHtml(g.profiles?.full_name || g.profiles?.email || 'Unknown')}</div>
+                <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-top:2px;">${roleLabel(g.profiles?.role || '')} · Granted ${new Date(g.granted_at).toLocaleDateString()}${g.notes ? ' · ' + escapeHtml(g.notes) : ''}</div>
+              </div>
+              <button class="bo-btn bo-btn-danger" style="padding:5px 10px;font-size:11px;" onclick="revokeMasterAccess('${g.user_id}')">Revoke</button>
+            </div>`).join('') + '</div>'
+        }
+      </div>`;
+  }
+
+  el.innerHTML = `
+    <div style="margin-bottom:24px;">
+      <div style="font-size:11px;color:#FF6B00;font-weight:700;letter-spacing:3px;text-transform:uppercase;margin-bottom:6px;">🔒 Master Center</div>
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">🎯 Onboarding Packets</h1>
+      <p style="font-size:14px;color:rgba(255,255,255,0.5);">Build the onboarding flow each new agent goes through. Edits apply to NEW agents — agents already in progress keep their original packet.</p>
+    </div>
+    ${grantsHtml}
+    ${allPrograms.map(prog => {
+      const progPackets = (packets || []).filter(p => p.program_id === prog.id);
+      return `
+      <div class="bo-card" style="border-left:3px solid ${prog.color};margin-bottom:14px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:10px;">
+          <div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:${prog.color};letter-spacing:1px;">${prog.icon} ${prog.name}</div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.4);margin-top:2px;">${progPackets.length} packet${progPackets.length===1?'':'s'}</div>
+          </div>
+          <button class="bo-btn bo-btn-primary" onclick="openPacketEditor('${prog.id}')">+ New Packet</button>
+        </div>
+        ${progPackets.length === 0 ? '<div style="color:rgba(255,255,255,0.4);font-size:13px;padding:6px 0;">No packets for this program yet. New agents in this program have nothing to onboard with.</div>' :
+          progPackets.map(pk => `
+            <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:14px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+              <div style="flex:1;min-width:0;">
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                  <div style="font-size:14.5px;font-weight:700;color:#fff;">${escapeHtml(pk.name)}</div>
+                  ${pk.active ? '<span style="background:rgba(0,255,136,0.12);color:#00FF88;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">ACTIVE</span>' : '<span style="color:rgba(255,255,255,0.4);font-size:11px;">Inactive</span>'}
+                </div>
+                ${pk.description ? `<div style="font-size:12px;color:rgba(255,255,255,0.5);margin-top:3px;">${escapeHtml(pk.description)}</div>` : ''}
+                <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:6px;">${packetStats[pk.id]} agent${packetStats[pk.id]===1?'':'s'} assigned · v${pk.version} · Updated ${new Date(pk.updated_at).toLocaleDateString()}</div>
+              </div>
+              <div style="display:flex;gap:6px;">
+                <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="openPacketEditor('${prog.id}','${pk.id}')">Edit</button>
+                <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="togglePacketActive('${pk.id}',${pk.active})">${pk.active?'Deactivate':'Activate'}</button>
+                <button class="bo-btn bo-btn-danger" style="padding:5px 10px;font-size:11px;" onclick="deletePacket('${pk.id}')">✕</button>
+              </div>
+            </div>`).join('')
+        }
+      </div>`;
+    }).join('')}`;
+}
+
+async function openPacketEditor(programId, packetId){
+  let packet = null;
+  let steps = [];
+  if(packetId){
+    const { data: pk } = await sb.from('onboarding_packets').select('*').eq('id', packetId).single();
+    packet = pk;
+    const { data: st } = await sb.from('onboarding_steps').select('*').eq('packet_id', packetId).order('display_order');
+    steps = st || [];
+  }
+  window._packetEditor = { programId, packetId, name: packet?.name || '', description: packet?.description || '', steps: [...steps] };
+  renderPacketEditor();
+}
+
+function renderPacketEditor(){
+  const ed = window._packetEditor;
+  const prog = allPrograms.find(p => p.id === ed.programId);
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:#fff;margin-bottom:6px;letter-spacing:1px;">${ed.packetId ? 'Edit' : 'New'} Onboarding Packet</h2>
+    <div style="font-size:13px;color:${prog?prog.color:'#888'};margin-bottom:16px;">${prog?.icon} ${prog?.name}</div>
+    <div class="form-group"><label class="form-label">Packet Name *</label><input id="pe-name" class="form-input" value="${escapeHtml(ed.name)}" placeholder="e.g. Standard Retail Onboarding"/></div>
+    <div class="form-group"><label class="form-label">Description (optional)</label><textarea id="pe-desc" class="form-input" rows="2">${escapeHtml(ed.description)}</textarea></div>
+
+    <div style="margin-top:12px;padding:14px;background:rgba(255,255,255,0.02);border-radius:10px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:10px;">
+        <div style="font-weight:600;color:#fff;font-size:14px;">Steps (${ed.steps.length})</div>
+        <select id="pe-add-type" class="form-input" style="background:#1a1a1a;width:auto;padding:6px 10px;font-size:12.5px;">
+          ${Object.entries(STEP_TYPES).map(([k,v]) => `<option value="${k}">${v.icon} ${v.label}</option>`).join('')}
+        </select>
+        <button class="bo-btn bo-btn-primary" style="padding:6px 14px;font-size:12px;" onclick="packetEditorAddStep()">+ Add Step</button>
+      </div>
+      <div id="pe-steps-list"></div>
+    </div>
+
+    <div style="display:flex;gap:10px;margin-top:18px;">
+      <button class="bo-btn bo-btn-primary" onclick="savePacket()">${ed.packetId?'Save Changes':'Create Packet'}</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closePacketEditor()">Cancel</button>
+    </div>
+    <div id="pe-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-box').style.maxWidth = '720px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+  renderPacketStepsList();
+}
+
+function renderPacketStepsList(){
+  const ed = window._packetEditor;
+  const el = document.getElementById('pe-steps-list');
+  if(ed.steps.length === 0){
+    el.innerHTML = '<div style="color:rgba(255,255,255,0.4);font-size:12.5px;padding:12px 0;">No steps yet. Pick a type above and add one.</div>';
+    return;
+  }
+  el.innerHTML = ed.steps.map((s, i) => {
+    const t = STEP_TYPES[s.step_type] || { icon:'📋', label:s.step_type };
+    return `
+      <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:8px;padding:12px;margin-bottom:8px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;">
+          <div style="display:flex;align-items:center;gap:8px;flex:1;">
+            <span style="font-size:18px;">${t.icon}</span>
+            <span style="font-size:11px;color:rgba(255,255,255,0.45);text-transform:uppercase;letter-spacing:1.5px;">${t.label}</span>
+          </div>
+          <div style="display:flex;gap:4px;">
+            ${i > 0 ? `<button class="bo-btn bo-btn-ghost" style="padding:3px 8px;font-size:10px;" onclick="packetMoveStep(${i},-1)">↑</button>` : ''}
+            ${i < ed.steps.length-1 ? `<button class="bo-btn bo-btn-ghost" style="padding:3px 8px;font-size:10px;" onclick="packetMoveStep(${i},1)">↓</button>` : ''}
+            <button class="bo-btn bo-btn-danger" style="padding:3px 8px;font-size:10px;" onclick="packetRemoveStep(${i})">✕</button>
+          </div>
+        </div>
+        <input style="width:100%;padding:6px 10px;background:#1a1a1a;border:1px solid rgba(255,255,255,0.1);border-radius:6px;color:#fff;font-size:13px;margin-bottom:6px;" value="${escapeHtml(s.title)}" placeholder="Step title (shown to agent)" oninput="packetUpdateStep(${i},'title',this.value)"/>
+        <input style="width:100%;padding:6px 10px;background:#1a1a1a;border:1px solid rgba(255,255,255,0.1);border-radius:6px;color:#fff;font-size:12px;margin-bottom:6px;" value="${escapeHtml(s.description||'')}" placeholder="Description / instructions (optional)" oninput="packetUpdateStep(${i},'description',this.value)"/>
+        ${s.step_type === 'document' ? `
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+            <select onchange="packetUpdateConfig(${i},'signature_method',this.value)" style="padding:6px 10px;background:#1a1a1a;border:1px solid rgba(255,255,255,0.1);border-radius:6px;color:#fff;font-size:12px;">
+              <option value="click_to_sign" ${(s.config?.signature_method||'click_to_sign')==='click_to_sign'?'selected':''}>Click-to-sign (typed name)</option>
+              <option value="acknowledge" ${s.config?.signature_method==='acknowledge'?'selected':''}>Acknowledge only (checkbox)</option>
+            </select>
+            ${s.config?.document_url ? `<span style="font-size:11px;color:#00FF88;">✓ Document uploaded</span><button class="bo-btn bo-btn-ghost" style="padding:3px 8px;font-size:10px;" onclick="packetClearDoc(${i})">Replace</button>` : `
+              <input type="file" accept=".pdf,.doc,.docx" onchange="packetUploadDoc(${i},this)" style="font-size:11px;color:rgba(255,255,255,0.65);"/>`}
+          </div>` : ''}
+        <label style="display:inline-flex;align-items:center;gap:6px;margin-top:6px;font-size:12px;color:rgba(255,255,255,0.6);cursor:pointer;">
+          <input type="checkbox" ${s.required!==false?'checked':''} style="accent-color:#FF6B00;" onchange="packetUpdateStep(${i},'required',this.checked)"/> Required
+        </label>
+      </div>`;
+  }).join('');
+}
+
+function packetEditorAddStep(){
+  const type = document.getElementById('pe-add-type').value;
+  const t = STEP_TYPES[type];
+  window._packetEditor.steps.push({
+    step_type: type,
+    title: t.label,
+    description: '',
+    required: true,
+    config: type === 'document' ? { signature_method: 'click_to_sign' } : {}
+  });
+  renderPacketStepsList();
+}
+function packetUpdateStep(i, key, val){ window._packetEditor.steps[i][key] = val; }
+function packetUpdateConfig(i, key, val){
+  const s = window._packetEditor.steps[i];
+  s.config = s.config || {};
+  s.config[key] = val;
+}
+function packetRemoveStep(i){ window._packetEditor.steps.splice(i,1); renderPacketStepsList(); }
+function packetMoveStep(i, delta){
+  const arr = window._packetEditor.steps;
+  const ni = i + delta;
+  if(ni < 0 || ni >= arr.length) return;
+  [arr[i], arr[ni]] = [arr[ni], arr[i]];
+  renderPacketStepsList();
+}
+async function packetUploadDoc(i, input){
+  const file = input.files[0];
+  if(!file) return;
+  if(file.size > 10*1024*1024){ alert('Document must be under 10MB'); return; }
+  const ts = Date.now();
+  const path = `templates/${ts}-${file.name.replace(/[^a-zA-Z0-9.]/g,'_')}`;
+  const { error } = await sb.storage.from('onboarding-docs').upload(path, file);
+  if(error){ alert('Upload failed: ' + error.message); return; }
+  const { data: signed } = await sb.storage.from('onboarding-docs').createSignedUrl(path, 60*60*24*365*5);
+  const s = window._packetEditor.steps[i];
+  s.config = s.config || {};
+  s.config.document_url = signed?.signedUrl || '';
+  s.config.document_path = path;
+  renderPacketStepsList();
+}
+function packetClearDoc(i){
+  const s = window._packetEditor.steps[i];
+  s.config = s.config || {};
+  delete s.config.document_url;
+  delete s.config.document_path;
+  renderPacketStepsList();
+}
+
+async function savePacket(){
+  const ed = window._packetEditor;
+  const name = document.getElementById('pe-name').value.trim();
+  const desc = document.getElementById('pe-desc').value.trim();
+  const msg = document.getElementById('pe-msg');
+  if(!name){ msg.innerHTML = '<span style="color:#F87171;">Name required.</span>'; return; }
+  if(ed.steps.length === 0){ msg.innerHTML = '<span style="color:#F87171;">Add at least one step.</span>'; return; }
+
+  let packetId = ed.packetId;
+  try {
+    if(packetId){
+      // Update packet metadata, bump version
+      const { data: existing } = await sb.from('onboarding_packets').select('version').eq('id', packetId).single();
+      const newVersion = (existing?.version || 1) + 1;
+      const { error } = await sb.from('onboarding_packets').update({
+        name, description: desc || null, version: newVersion, updated_at: new Date().toISOString()
+      }).eq('id', packetId);
+      if(error) throw error;
+      // Wipe old steps, recreate
+      await sb.from('onboarding_steps').delete().eq('packet_id', packetId);
+    } else {
+      const { data, error } = await sb.from('onboarding_packets').insert({
+        program_id: ed.programId, name, description: desc || null, active: true, version: 1
+      }).select().single();
+      if(error) throw error;
+      packetId = data.id;
+    }
+
+    // Insert steps
+    const stepRows = ed.steps.map((s, i) => ({
+      packet_id: packetId,
+      step_type: s.step_type,
+      title: s.title,
+      description: s.description || null,
+      display_order: i,
+      required: s.required !== false,
+      signature_method: s.config?.signature_method || null,
+      document_url: s.config?.document_url || null,
+      document_path: s.config?.document_path || null,
+      config: s.config || {}
+    }));
+    if(stepRows.length > 0){
+      const { error } = await sb.from('onboarding_steps').insert(stepRows);
+      if(error) throw error;
+    }
+
+    closePacketEditor();
+    renderMainContent();
+  } catch(e){ msg.innerHTML = '<span style="color:#F87171;">'+e.message+'</span>'; }
+}
+
+function closePacketEditor(){
+  closeAllModals();
+  document.getElementById('modal-box').style.maxWidth = '560px';
+  window._packetEditor = null;
+}
+
+async function togglePacketActive(packetId, currentlyActive){
+  await sb.from('onboarding_packets').update({ active: !currentlyActive }).eq('id', packetId);
+  renderMainContent();
+}
+
+async function deletePacket(packetId){
+  if(!confirm('Delete this packet? Agents already assigned this packet keep their snapshot. New agents won\'t see it.')) return;
+  await sb.from('onboarding_packets').delete().eq('id', packetId);
+  renderMainContent();
+}
+
+// Grant access modal
+async function openGrantAccessModal(){
+  if(currentProfile.role !== 'owner'){ alert('Owner only.'); return; }
+  const { data: users } = await sb.from('profiles').select('id,full_name,email,role').neq('id', currentProfile.id).eq('active', true).order('full_name');
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:#FFD700;margin-bottom:14px;letter-spacing:1px;">🔑 Grant Master Center Access</h2>
+    <div style="font-size:13px;color:rgba(255,255,255,0.6);line-height:1.55;margin-bottom:14px;">This person will be able to view and edit onboarding packets. They cannot grant access to others — only you can.</div>
+    <div class="form-group"><label class="form-label">User *</label>
+      <select id="ga-user" class="form-input" style="background:#1a1a1a;">
+        <option value="">— Select user —</option>
+        ${(users||[]).map(u => `<option value="${u.id}">${escapeHtml(u.full_name || u.email)} (${roleLabel(u.role)})</option>`).join('')}
+      </select>
+    </div>
+    <div class="form-group"><label class="form-label">Notes (optional)</label><input id="ga-notes" class="form-input" placeholder="e.g. temporary access while I'm out of office"/></div>
+    <div style="display:flex;gap:10px;">
+      <button class="bo-btn bo-btn-primary" onclick="grantMasterAccess()">Grant Access</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="ga-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+async function grantMasterAccess(){
+  const user_id = document.getElementById('ga-user').value;
+  const notes = document.getElementById('ga-notes').value.trim();
+  const msg = document.getElementById('ga-msg');
+  if(!user_id){ msg.innerHTML='<span style="color:#F87171;">Select a user.</span>'; return; }
+  const { error } = await sb.from('master_center_access').insert({
+    user_id, granted_by: currentProfile.id, notes: notes || null
+  });
+  if(error){ msg.innerHTML='<span style="color:#F87171;">'+error.message+'</span>'; return; }
+  closeAllModals();
+  renderMainContent();
+}
+async function revokeMasterAccess(userId){
+  if(!confirm('Revoke this user\'s master center access?')) return;
+  await sb.from('master_center_access').delete().eq('user_id', userId);
+  renderMainContent();
+}
+
+
+// ─────────────────────────────────────────────────────────────────
+// 4. PENDING ONBOARDING (admin view) — see all in-progress agents, send packets
+// ─────────────────────────────────────────────────────────────────
+async function renderOnboardingPending(el){
+  const isOwner = currentProfile.role === 'owner';
+  const isAdmin = isOwner || currentProfile.role === 'admin';
+  if(!isAdmin){ el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied.</div>'; return; }
+
+  // Get all agents (not exempt) and their onboarding state
+  const { data: agents } = await sb.from('profiles')
+    .select('id,full_name,email,role,programs,avatar_url,onboarding_status,onboarding_started_at,onboarding_completed_at,codes_unlocked')
+    .not('onboarding_status','eq','exempt')
+    .eq('active', true)
+    .order('onboarding_status', { ascending: true })
+    .order('full_name');
+
+  // For each agent, get their packets
+  const enriched = await Promise.all((agents||[]).map(async a => {
+    const { data: pkts } = await sb.from('agent_onboarding').select('id,status,packet_snapshot').eq('user_id', a.id);
+    let totalSteps = 0, doneSteps = 0;
+    for(const pk of (pkts || [])){
+      const { data: stps } = await sb.from('agent_onboarding_steps').select('status').eq('agent_onboarding_id', pk.id);
+      totalSteps += (stps || []).length;
+      doneSteps += (stps || []).filter(s => s.status === 'complete').length;
+    }
+    return { ...a, packets: pkts || [], totalSteps, doneSteps };
+  }));
+
+  const notStarted = enriched.filter(a => a.packets.length === 0);
+  const inProgress = enriched.filter(a => a.packets.length > 0 && a.onboarding_status !== 'complete');
+  const complete = enriched.filter(a => a.onboarding_status === 'complete');
+
+  el.innerHTML = `
+    <div style="margin-bottom:24px;">
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">📋 Onboarding Pipeline</h1>
+      <p style="font-size:14px;color:rgba(255,255,255,0.5);">All non-exempt agents and their onboarding status. Send packets here.</p>
+    </div>
+
+    ${notStarted.length > 0 ? `
+      <div class="bo-card" style="border-left:3px solid #F87171;margin-bottom:14px;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#F87171;letter-spacing:1px;margin-bottom:10px;">⚠️ No Packet Assigned (${notStarted.length})</div>
+        <div style="font-size:12.5px;color:rgba(255,255,255,0.5);margin-bottom:10px;">These agents are locked out until you send them a packet.</div>
+        ${notStarted.map(a => onbAgentRow(a, isAdmin)).join('')}
+      </div>` : ''}
+
+    ${inProgress.length > 0 ? `
+      <div class="bo-card" style="border-left:3px solid #FF6B00;margin-bottom:14px;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#FF6B00;letter-spacing:1px;margin-bottom:10px;">🔄 In Progress (${inProgress.length})</div>
+        ${inProgress.map(a => onbAgentRow(a, isAdmin)).join('')}
+      </div>` : ''}
+
+    ${complete.length > 0 ? `
+      <div class="bo-card" style="border-left:3px solid #00FF88;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#00FF88;letter-spacing:1px;margin-bottom:10px;">✓ Ready for Codes & Training (${complete.length})</div>
+        ${complete.map(a => onbAgentRow(a, isAdmin)).join('')}
+      </div>` : ''}
+
+    ${enriched.length === 0 ? '<div class="bo-card" style="color:rgba(255,255,255,0.4);text-align:center;padding:40px;">No agents in the pipeline. New non-exempt team members appear here automatically.</div>' : ''}
+  `;
+}
+
+function onbAgentRow(a, isAdmin){
+  const pct = a.totalSteps ? Math.round((a.doneSteps/a.totalSteps)*100) : 0;
+  const statusBadge = a.onboarding_status === 'complete'
+    ? '<span style="background:rgba(0,255,136,0.12);color:#00FF88;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">PENDING CODES</span>'
+    : a.packets.length === 0
+    ? '<span style="background:rgba(248,113,113,0.12);color:#F87171;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">NO PACKET</span>'
+    : `<span style="background:rgba(255,107,0,0.12);color:#FF6B00;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">${a.doneSteps}/${a.totalSteps}</span>`;
+  const avatarHtml = a.avatar_url
+    ? `<img src="${a.avatar_url}" style="width:36px;height:36px;border-radius:50%;object-fit:cover;"/>`
+    : `<div style="width:36px;height:36px;border-radius:50%;background:${roleBadgeBg(a.role)};color:${roleBadgeColor(a.role)};display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;">${(a.full_name||a.email).substring(0,1).toUpperCase()}</div>`;
+  const progPills = (a.programs || []).map(pid => {
+    const p = allPrograms.find(x => x.id === pid);
+    return p ? `<span style="background:${p.color}22;color:${p.color};padding:1px 6px;border-radius:50px;font-size:10px;font-weight:600;">${p.icon}</span>` : '';
+  }).join(' ');
+
+  return `
+    <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:12px;margin-bottom:8px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+        <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+          ${avatarHtml}
+          <div style="flex:1;min-width:0;">
+            <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+              <div style="font-size:13.5px;font-weight:600;color:#fff;">${escapeHtml(a.full_name || a.email)}</div>
+              ${statusBadge}
+              ${progPills}
+            </div>
+            <div style="font-size:11px;color:rgba(255,255,255,0.45);margin-top:2px;">${a.email}</div>
+            ${a.totalSteps > 0 ? `<div style="background:rgba(255,255,255,0.06);border-radius:50px;height:5px;overflow:hidden;margin-top:6px;max-width:300px;"><div style="background:linear-gradient(90deg,#FF6B00,#FF0080);height:100%;width:${pct}%;"></div></div>` : ''}
+          </div>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          ${a.packets.length === 0 ? `<button class="bo-btn bo-btn-primary" style="padding:6px 14px;font-size:12px;" onclick="openSendPacketModal('${a.id}')">📨 Send Packet</button>` : `<button class="bo-btn bo-btn-ghost" style="padding:6px 14px;font-size:12px;" onclick="viewAgentOnboardingDetail('${a.id}')">View Detail</button>`}
+          ${a.onboarding_status === 'complete' && !a.codes_unlocked ? `<button class="bo-btn bo-btn-primary" style="padding:6px 14px;font-size:12px;background:linear-gradient(135deg,#00FF88,#00C6FF);" onclick="unlockCodesForAgent('${a.id}')">🔓 Unlock Codes</button>` : ''}
+        </div>
+      </div>
+    </div>`;
+}
+
+async function openSendPacketModal(userId){
+  const { data: profile } = await sb.from('profiles').select('full_name,email,programs').eq('id', userId).single();
+  if(!profile){ alert('User not found'); return; }
+
+  // Find packets matching their programs
+  const { data: packets } = await sb.from('onboarding_packets').select('*').eq('active', true).in('program_id', profile.programs || []);
+
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:#fff;margin-bottom:6px;letter-spacing:1px;">📨 Send Onboarding Packet</h2>
+    <div style="font-size:13px;color:rgba(255,255,255,0.55);margin-bottom:14px;">To: <strong style="color:#fff;">${escapeHtml(profile.full_name || profile.email)}</strong></div>
+
+    ${(packets || []).length === 0 ? `<div style="background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.3);border-radius:10px;padding:14px;color:#F87171;font-size:13px;line-height:1.55;">No active packets exist for this agent's programs. ${currentProfile.role === 'owner' ? 'Go to the <strong>🎯 Onboarding Center</strong> to create one first.' : 'Ask the owner to create one.'}</div>` : `
+      <div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-bottom:10px;">Pick which packet(s) to send. The agent will be locked out of everything else until they complete every packet you send.</div>
+      <div style="max-height:300px;overflow-y:auto;">
+        ${packets.map(p => {
+          const prog = allPrograms.find(x => x.id === p.program_id);
+          return `
+            <label style="display:flex;align-items:center;gap:10px;padding:12px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;margin-bottom:6px;cursor:pointer;">
+              <input type="checkbox" class="sp-packet" value="${p.id}" style="width:18px;height:18px;accent-color:#FF6B00;"/>
+              <div style="flex:1;">
+                <div style="font-size:13.5px;font-weight:600;color:#fff;">${escapeHtml(p.name)}</div>
+                <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-top:2px;">${prog?prog.icon+' '+prog.name:''} · v${p.version}</div>
+              </div>
+            </label>`;
+        }).join('')}
+      </div>
+      <div style="display:flex;gap:10px;margin-top:14px;">
+        <button class="bo-btn bo-btn-primary" onclick="sendPacketsToAgent('${userId}')">Send Selected Packets</button>
+        <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+      </div>`}
+    <div id="sp-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function sendPacketsToAgent(userId){
+  const checked = Array.from(document.querySelectorAll('.sp-packet:checked')).map(c => c.value);
+  const msg = document.getElementById('sp-msg');
+  if(checked.length === 0){ msg.innerHTML='<span style="color:#F87171;">Select at least one packet.</span>'; return; }
+
+  msg.innerHTML='<span style="color:rgba(255,255,255,0.6);">Sending…</span>';
+  try {
+    for(const packetId of checked){
+      // Load packet + steps
+      const { data: pk } = await sb.from('onboarding_packets').select('*').eq('id', packetId).single();
+      const { data: steps } = await sb.from('onboarding_steps').select('*').eq('packet_id', packetId).order('display_order');
+      const snapshot = { ...pk, steps };
+
+      const { data: ao, error: aoErr } = await sb.from('agent_onboarding').insert({
+        user_id: userId, packet_id: packetId, packet_snapshot: snapshot,
+        assigned_by: currentProfile.id, status: 'in_progress'
+      }).select().single();
+      if(aoErr) throw aoErr;
+
+      // Insert per-step progress rows
+      const stepRows = (steps || []).map(s => ({
+        agent_onboarding_id: ao.id,
+        step_id: s.id,
+        step_type: s.step_type,
+        title: s.title,
+        display_order: s.display_order,
+        contains_pii: PII_STEPS.includes(s.step_type),
+        status: 'pending'
+      }));
+      if(stepRows.length > 0){
+        const { error: spErr } = await sb.from('agent_onboarding_steps').insert(stepRows);
+        if(spErr) throw spErr;
+      }
+    }
+    // Mark profile as not_started → will go in_progress on first save
+    await sb.from('profiles').update({ onboarding_status: 'not_started' }).eq('id', userId);
+
+    // Email the agent
+    try {
+      const { data: profile } = await sb.from('profiles').select('email,full_name').eq('id', userId).single();
+      if(profile){
+        await sendEmailViaFunction('welcome', profile.email, {
+          full_name: profile.full_name,
+          email: profile.email,
+          password: 'Sign in with your existing password to begin onboarding.',
+          role_label: 'Onboarding required',
+          programs: []
+        });
+      }
+    } catch(e){ /* email is best-effort */ }
+
+    msg.innerHTML='<span style="color:#00FF88;">✓ Packet(s) sent. Agent will see the onboarding wizard next time they log in.</span>';
+    setTimeout(() => { closeAllModals(); renderMainContent(); }, 1200);
+  } catch(e){
+    msg.innerHTML='<span style="color:#F87171;">'+e.message+'</span>';
+  }
+}
+
+async function viewAgentOnboardingDetail(userId){
+  const { data: profile } = await sb.from('profiles').select('full_name,email').eq('id', userId).single();
+  const { data: packets } = await sb.from('agent_onboarding').select('*').eq('user_id', userId);
+  const isOwner = currentProfile.role === 'owner';
+
+  let packetSections = '';
+  for(const pk of (packets || [])){
+    const { data: steps } = await sb.from('agent_onboarding_steps').select('*').eq('agent_onboarding_id', pk.id).order('display_order');
+    packetSections += `
+      <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:14px;margin-bottom:10px;">
+        <div style="font-size:14px;font-weight:700;color:#fff;margin-bottom:8px;">${escapeHtml(pk.packet_snapshot?.name || 'Packet')}</div>
+        ${(steps || []).map(s => {
+          const t = STEP_TYPES[s.step_type] || { icon:'📋' };
+          const isPii = s.contains_pii;
+          const canSeeData = !isPii || isOwner || s.user_id === currentProfile.id;
+          let detail = '';
+          if(s.status === 'complete' && canSeeData && s.submitted_data){
+            detail = '<pre style="background:#0a0a0a;padding:10px;border-radius:6px;font-size:11px;color:rgba(255,255,255,0.7);overflow-x:auto;margin-top:6px;max-height:200px;">' + escapeHtml(JSON.stringify(s.submitted_data, null, 2)) + '</pre>';
+          } else if(s.status === 'complete' && !canSeeData){
+            detail = '<div style="font-size:11.5px;color:#FFD700;margin-top:4px;">🔒 Submitted (sensitive — owner-only view)</div>';
+          }
+          return `
+            <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.05);">
+              <div style="display:flex;align-items:center;gap:8px;flex:1;">
+                <span style="font-size:16px;">${t.icon}</span>
+                <span style="font-size:12.5px;color:#fff;">${escapeHtml(s.title)}</span>
+                ${isPii ? '<span style="font-size:10px;color:#FFD700;">🔒</span>' : ''}
+              </div>
+              <span style="font-size:11px;color:${s.status==='complete'?'#00FF88':'rgba(255,255,255,0.4)'};">${s.status==='complete'?'✓ '+new Date(s.completed_at).toLocaleDateString():'Pending'}</span>
+            </div>
+            ${detail}`;
+        }).join('')}
+      </div>`;
+  }
+
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#fff;margin-bottom:6px;letter-spacing:1px;">Onboarding Detail</h2>
+    <div style="font-size:13px;color:rgba(255,255,255,0.55);margin-bottom:14px;">${escapeHtml(profile?.full_name || profile?.email || '')}</div>
+    <div style="max-height:60vh;overflow-y:auto;">${packetSections || '<div style="color:rgba(255,255,255,0.4);">No packets assigned.</div>'}</div>
+    <div style="margin-top:14px;text-align:right;"><button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Close</button></div>`;
+  document.getElementById('modal-box').style.maxWidth = '700px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function unlockCodesForAgent(userId){
+  if(!confirm('Mark this agent as ready for codes? This unlocks their full back office.')) return;
+  await sb.from('profiles').update({ codes_unlocked: true }).eq('id', userId);
+  renderMainContent();
+}
+
+
 // Expose functions that inline HTML onclicks reference
 window.showPage = showPage;
 window.toggleSubNav = toggleSubNav;
@@ -5100,6 +6390,36 @@ window.openForcePasswordChangeModal = openForcePasswordChangeModal;
 window.saveForcedPasswordChange = saveForcedPasswordChange;
 window.requestRecordPermission = requestRecordPermission;
 window.respondRecordRequest = respondRecordRequest;
+window.saveNotificationPrefs = saveNotificationPrefs;
+window.sendTestSms = sendTestSms;
+window.sendSmsViaFunction = sendSmsViaFunction;
+window.checkAndShowOnboardingLockout = checkAndShowOnboardingLockout;
+window.openOnboardingWizard = openOnboardingWizard;
+window.wizardSubmit = wizardSubmit;
+window.wizardPrev = wizardPrev;
+window.wizardNext = wizardNext;
+window.closeWizard = closeWizard;
+window.renderOnboardingMaster = renderOnboardingMaster;
+window.openPacketEditor = openPacketEditor;
+window.packetEditorAddStep = packetEditorAddStep;
+window.packetUpdateStep = packetUpdateStep;
+window.packetUpdateConfig = packetUpdateConfig;
+window.packetRemoveStep = packetRemoveStep;
+window.packetMoveStep = packetMoveStep;
+window.packetUploadDoc = packetUploadDoc;
+window.packetClearDoc = packetClearDoc;
+window.savePacket = savePacket;
+window.closePacketEditor = closePacketEditor;
+window.togglePacketActive = togglePacketActive;
+window.deletePacket = deletePacket;
+window.openGrantAccessModal = openGrantAccessModal;
+window.grantMasterAccess = grantMasterAccess;
+window.revokeMasterAccess = revokeMasterAccess;
+window.renderOnboardingPending = renderOnboardingPending;
+window.openSendPacketModal = openSendPacketModal;
+window.sendPacketsToAgent = sendPacketsToAgent;
+window.viewAgentOnboardingDetail = viewAgentOnboardingDetail;
+window.unlockCodesForAgent = unlockCodesForAgent;
 </script>
 
 </body>
