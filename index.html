@@ -5,6 +5,16 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>Circle Solutions Inc.</title>
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Outfit:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet"/>
+<!-- Supabase JS SDK (loaded before page scripts) -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+  // ─── Supabase Config ─────────────────────────────────────────
+  // These values are safe to expose in client code — the anon key
+  // only allows operations permitted by the Row Level Security
+  // policies defined in SUPABASE_SETUP.sql.
+  window.CSI_SUPABASE_URL = 'https://liqsqsocwjfqiupmehpn.supabase.co';
+  window.CSI_SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxpcXNxc29jd2pmcWl1cG1laHBuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY4OTA2MjYsImV4cCI6MjA5MjQ2NjYyNn0.nk195GfjdFy8XyMIyOIy6GbGFUVTiM4YUnRZcVW69RI';
+</script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;}
 html{scroll-behavior:smooth;}
@@ -1092,94 +1102,126 @@ footer{
 
 
 <!-- ════════════ LOGIN ════════════ -->
+
+<!-- ════════════ LOGIN (REWRITTEN FOR SUPABASE) ════════════ -->
 <div id="login" class="page">
   <div id="login-page">
     <div class="login-box">
       <div class="login-logo-wrap"></div>
       <h2 class="login-title">Agent Portal</h2>
-      <p class="login-sub">Sign in to access your dashboard, resources &amp; training.</p>
-      <div class="login-error" id="login-error">Incorrect email or password.</div>
-      <div class="form-group">
-        <label class="form-label">Agent Email</label>
-        <input class="form-input" type="email" id="login-email" placeholder="your@circlesolutions.com"/>
+      <p class="login-sub">Sign in to access your back office.</p>
+      <form onsubmit="doLogin(event)">
+        <div class="form-group">
+          <label class="form-label">Email</label>
+          <input id="login-email" type="email" class="form-input" required autocomplete="username"/>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Password</label>
+          <input id="login-password" type="password" class="form-input" required autocomplete="current-password"/>
+        </div>
+        <button type="submit" class="btn-fire" style="width:100%;margin-top:10px;">Sign In</button>
+        <div id="login-error" style="display:none;margin-top:14px;padding:10px 14px;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;font-size:13px;color:#FCA5A5;"></div>
+        <div id="login-loading" style="display:none;margin-top:14px;text-align:center;color:rgba(255,255,255,0.5);font-size:13px;">Signing in…</div>
+      </form>
+      <div style="margin-top:22px;padding-top:22px;border-top:1px solid rgba(255,255,255,0.06);text-align:center;">
+        <a onclick="showPage('home')" style="color:rgba(255,255,255,0.4);font-size:12px;cursor:pointer;">← Back to home</a>
       </div>
-      <div class="form-group">
-        <label class="form-label">Password</label>
-        <input class="form-input" type="password" id="login-pass" placeholder="••••••••"/>
-      </div>
-      <button class="login-btn" onclick="doLogin()">Sign In →</button>
-      <button class="back-link" onclick="showPage('home')">← Back to website</button>
     </div>
   </div>
 </div>
 
-<!-- ════════════ PORTAL ════════════ -->
-<div id="portal" class="page">
-<div id="portal-page">
+
+<!-- ════════════ BACK OFFICE (UNIFIED — ROLE + PROGRAM SCOPED) ════════════ -->
+<div id="backoffice" class="page">
   <div class="portal-header">
-    <div onclick="showPage(\'home\')" style="cursor:pointer;width:40px;height:40px;"></div>
-    <div style="display:flex;align-items:center;gap:14px">
-      <div class="agent-badge" id="agent-badge-name">Agent</div>
+    <div style="display:flex;align-items:center;gap:16px;">
+      <div onclick="showPage('home')" style="cursor:pointer;"><span style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:2px;">CIRCLE SOLUTIONS</span></div>
+      <div id="bo-role-badge" class="role-badge role-agent" style="padding:5px 13px;font-size:11px;"></div>
+    </div>
+    <div style="display:flex;align-items:center;gap:14px;">
+      <div class="agent-badge" id="bo-user-name">User</div>
       <button class="logout-btn" onclick="doLogout()">Sign Out</button>
     </div>
   </div>
-  <div class="portal-body">
-    <div class="portal-welcome">
-      <div>
-        <div class="pw-greeting">Welcome Back</div>
-        <div class="pw-name" id="portal-agent-name">Agent</div>
-        <div class="pw-sub" id="pw-sub">Every door is an opportunity. Let's go.</div>
+
+  <div style="display:flex;min-height:calc(100vh - 76px);">
+    <!-- Sidebar: programs + admin nav -->
+    <aside id="bo-sidebar" style="width:260px;background:#0D0D0D;border-right:1px solid rgba(255,255,255,0.06);padding:24px 0;flex-shrink:0;overflow-y:auto;">
+      <div style="padding:0 24px 14px;font-size:10.5px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:rgba(255,255,255,0.35);">My Programs</div>
+      <div id="bo-program-list"></div>
+
+      <div id="bo-admin-nav-wrap" style="display:none;">
+        <div style="padding:24px 24px 14px 24px;margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);font-size:10.5px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:rgba(255,255,255,0.35);">Administration</div>
+        <div id="bo-admin-nav"></div>
       </div>
-      <div style="text-align:center;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:14px;padding:20px 28px">
-        <div style="font-size:36px">🏆</div>
-        <div style="font-size:11px;color:rgba(255,255,255,0.35);text-transform:uppercase;letter-spacing:1.5px;margin-top:4px">Team Member</div>
-      </div>
-    </div>
-    <div class="portal-two-col">
-      <div class="portal-card">
-        <div class="portal-card-title">📢 Announcements</div>
-        <div class="ann-list" id="portal-ann-list"></div>
-      </div>
-      <div class="portal-card">
-        <div class="portal-card-title">📊 Your Performance</div>
-        <div class="perf-grid">
-          <div class="perf-stat">
-            <div class="perf-num" style="color:#FF6B00">24</div>
-            <div class="perf-lbl">Enrollments</div>
-            <div class="perf-delta">+18%</div>
-          </div>
-          <div class="perf-stat">
-            <div class="perf-num" style="color:#00FF88">98%</div>
-            <div class="perf-lbl">Quality</div>
-            <div class="perf-delta">↑ Excellent</div>
-          </div>
-          <div class="perf-stat">
-            <div class="perf-num" style="color:#00C6FF">6</div>
-            <div class="perf-lbl">Weeks Active</div>
-            <div class="perf-delta">🔥 Keep going</div>
-          </div>
-        </div>
-        <div style="margin-top:20px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:16px">
-          <div style="font-size:13px;font-weight:600;color:#fff;margin-bottom:8px">Next Level: Team Trainer — 68% there</div>
-          <div class="progress-bar"><div class="progress-fill" style="width:68%"></div></div>
-        </div>
-      </div>
-    </div>
-    <div class="portal-full">
-      <div class="portal-card">
-        <div class="portal-card-title">🔗 Important Links</div>
-        <div class="links-list" id="portal-links-list"></div>
-      </div>
-    </div>
-    <div class="portal-full">
-      <div class="portal-card">
-        <div class="portal-card-title">🎓 Training Materials</div>
-        <div class="training-grid" id="portal-training-list"></div>
-      </div>
-    </div>
+
+      <div style="padding:24px 24px 14px 24px;margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);font-size:10.5px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:rgba(255,255,255,0.35);">Account</div>
+      <button class="bo-nav-item" onclick="boShowView('profile')">👤 My Profile</button>
+      <button class="bo-nav-item" onclick="boShowView('credentials')">🔐 Change Password</button>
+    </aside>
+
+    <!-- Main content area -->
+    <main style="flex:1;padding:32px 40px;max-width:1400px;min-width:0;">
+      <div id="bo-content"></div>
+    </main>
   </div>
 </div>
-</div>
+
+<style>
+.bo-nav-item{
+  width:100%;text-align:left;padding:11px 24px;
+  background:none;border:none;color:rgba(255,255,255,0.6);
+  font-family:'Outfit',sans-serif;font-size:13.5px;font-weight:500;
+  cursor:pointer;transition:all 0.15s;
+  display:flex;align-items:center;gap:10px;
+}
+.bo-nav-item:hover{background:rgba(255,255,255,0.04);color:#fff;}
+.bo-nav-item.active{background:rgba(255,107,0,0.1);color:#FF6B00;border-left:3px solid #FF6B00;padding-left:21px;}
+.bo-program-tab{
+  width:100%;text-align:left;padding:13px 24px;
+  background:none;border:none;color:rgba(255,255,255,0.7);
+  font-family:'Outfit',sans-serif;font-size:14px;font-weight:600;
+  cursor:pointer;transition:all 0.15s;
+  display:flex;align-items:center;gap:12px;border-left:3px solid transparent;
+}
+.bo-program-tab:hover{background:rgba(255,255,255,0.04);color:#fff;}
+.bo-program-tab.active{background:rgba(255,255,255,0.05);border-left-color:var(--prog-color,#FF6B00);color:#fff;}
+.bo-prog-icon{font-size:18px;width:22px;text-align:center;}
+.bo-sub-tab{
+  padding:10px 18px;border-radius:50px;border:1px solid rgba(255,255,255,0.1);
+  background:rgba(255,255,255,0.03);color:rgba(255,255,255,0.6);
+  font-family:'Outfit',sans-serif;font-size:13px;font-weight:600;cursor:pointer;
+  transition:all 0.15s;
+}
+.bo-sub-tab:hover{background:rgba(255,255,255,0.06);color:#fff;}
+.bo-sub-tab.active{background:var(--prog-color,#FF6B00);border-color:transparent;color:#fff;}
+.bo-card{background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:14px;padding:22px;margin-bottom:16px;}
+.bo-table{width:100%;border-collapse:collapse;}
+.bo-table th{text-align:left;padding:10px 14px;font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:rgba(255,255,255,0.4);border-bottom:1px solid rgba(255,255,255,0.08);}
+.bo-table td{padding:14px;font-size:13.5px;color:rgba(255,255,255,0.8);border-bottom:1px solid rgba(255,255,255,0.04);}
+.bo-table tr:hover td{background:rgba(255,255,255,0.02);}
+.bo-btn{padding:9px 18px;border-radius:50px;border:none;font-family:'Outfit',sans-serif;font-size:13px;font-weight:600;cursor:pointer;transition:all 0.15s;}
+.bo-btn-primary{background:linear-gradient(135deg,#FF6B00,#FF0080);color:#fff;}
+.bo-btn-primary:hover{transform:translateY(-1px);box-shadow:0 6px 20px rgba(255,107,0,0.4);}
+.bo-btn-ghost{background:rgba(255,255,255,0.05);color:rgba(255,255,255,0.8);border:1px solid rgba(255,255,255,0.1);}
+.bo-btn-ghost:hover{background:rgba(255,255,255,0.1);}
+.bo-btn-danger{background:rgba(239,68,68,0.15);color:#F87171;border:1px solid rgba(239,68,68,0.3);}
+.bo-btn-danger:hover{background:rgba(239,68,68,0.25);}
+.prog-checkbox-row{display:flex;align-items:center;gap:10px;padding:10px 14px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:10px;margin-bottom:8px;cursor:pointer;transition:all 0.15s;}
+.prog-checkbox-row:hover{background:rgba(255,255,255,0.05);}
+.prog-checkbox-row input{accent-color:#FF6B00;width:18px;height:18px;cursor:pointer;}
+.stat-card{background:linear-gradient(135deg,rgba(255,255,255,0.04),rgba(255,255,255,0.01));border:1px solid rgba(255,255,255,0.07);border-radius:14px;padding:22px;}
+.stat-num{font-family:'Bebas Neue',sans-serif;font-size:42px;line-height:1;margin-bottom:6px;}
+.stat-lbl{font-size:12px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1.5px;}
+@media (max-width: 900px){
+  #bo-sidebar{width:200px;}
+}
+@media (max-width: 700px){
+  #backoffice > div:last-child{flex-direction:column;}
+  #bo-sidebar{width:100%;border-right:none;border-bottom:1px solid rgba(255,255,255,0.06);}
+  #backoffice main{padding:20px;}
+}
+</style>
 
 
 <!-- ════════════ ABOUT ════════════ -->
@@ -1771,446 +1813,6 @@ footer{
 </div>
 
 
-<!-- ════════════ ADMIN ════════════ -->
-<div id="admin" class="page">
-<div id="admin-page">
-  <div class="portal-header">
-    <div onclick="showPage(\'home\')" style="cursor:pointer"><span style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:2px;">CIRCLE SOLUTIONS · ADMIN</span></div>
-    <div style="display:flex;align-items:center;gap:14px">
-      <div class="agent-badge" style="background:rgba(255,0,128,0.15);border-color:rgba(255,0,128,0.3);color:#FF0080" id="admin-badge-name">Admin</div>
-      <button class="logout-btn" onclick="doLogout()">Sign Out</button>
-    </div>
-  </div>
-  <div style="padding:32px 40px;max-width:1400px;margin:0 auto;">
-    <!-- TABS -->
-    <div style="display:flex;gap:6px;margin-bottom:28px;flex-wrap:wrap;" id="admin-tabs">
-      <button class="camp-tab active-reliant" data-tab="agents" onclick="showAdminTab('agents')" style="background:linear-gradient(135deg,#FF6B00,#FF0080)">Agents</button>
-      <button class="camp-tab" data-tab="applications" onclick="showAdminTab('applications')">Applications</button>
-      <button class="camp-tab" data-tab="announcements" onclick="showAdminTab('announcements')">Announcements</button>
-      <button class="camp-tab" data-tab="links" onclick="showAdminTab('links')">Links</button>
-      <button class="camp-tab" data-tab="training" onclick="showAdminTab('training')">Training</button>
-      <button class="camp-tab" data-tab="campaigns" onclick="showAdminTab('campaigns')">Campaigns</button>
-    </div>
-
-    <!-- AGENTS -->
-    <div id="admin-tab-agents" class="admin-tab-content">
-      <div class="camp-card">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
-          <div class="camp-card-title">👥 Team Members</div>
-          <button onclick="openAgentModal()" class="btn-fire" style="padding:10px 22px;font-size:13px;">+ Add Agent</button>
-        </div>
-        <div style="overflow-x:auto;">
-          <table style="width:100%;border-collapse:collapse;min-width:900px;">
-            <thead><tr style="border-bottom:1px solid rgba(255,255,255,0.08)">
-              <th class="th-cell">Name</th>
-              <th class="th-cell">Role</th>
-              <th class="th-cell">Password</th>
-              <th class="th-cell">Status</th>
-              <th class="th-cell">Joined</th>
-              <th class="th-cell">Actions</th>
-            </tr></thead>
-            <tbody id="agents-tbody"></tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-
-    <!-- APPLICATIONS -->
-    <div id="admin-tab-applications" class="admin-tab-content" style="display:none;">
-      <div class="camp-card">
-        <div class="camp-card-title">📋 Applications Received</div>
-        <div id="apps-list" style="display:flex;flex-direction:column;gap:12px;"></div>
-      </div>
-    </div>
-
-    <!-- ANNOUNCEMENTS -->
-    <div id="admin-tab-announcements" class="admin-tab-content" style="display:none;">
-      <div class="camp-card">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
-          <div class="camp-card-title">📢 Announcements</div>
-          <button onclick="openAnnounceModal()" class="btn-fire" style="padding:10px 22px;font-size:13px;">+ New Announcement</button>
-        </div>
-        <div id="admin-announcements"></div>
-      </div>
-    </div>
-
-    <!-- LINKS -->
-    <div id="admin-tab-links" class="admin-tab-content" style="display:none;">
-      <div class="camp-card">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
-          <div class="camp-card-title">🔗 Important Links</div>
-          <button onclick="openLinkModal()" class="btn-fire" style="padding:10px 22px;font-size:13px;">+ New Link</button>
-        </div>
-        <div id="admin-links"></div>
-      </div>
-    </div>
-
-    <!-- TRAINING -->
-    <div id="admin-tab-training" class="admin-tab-content" style="display:none;">
-      <div class="camp-card">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
-          <div class="camp-card-title">🎓 Training Materials</div>
-          <button onclick="openTrainingModal()" class="btn-fire" style="padding:10px 22px;font-size:13px;">+ New Module</button>
-        </div>
-        <div id="admin-training"></div>
-      </div>
-    </div>
-
-    <!-- CAMPAIGNS -->
-    <div id="admin-tab-campaigns" class="admin-tab-content" style="display:none;">
-      <div style="display:flex;gap:6px;margin-bottom:20px;flex-wrap:wrap;">
-        <button class="camp-tab active-reliant" id="camp-subtab-reliant" onclick="showCampAdminTab('reliant')">Reliant Energy</button>
-        <button class="camp-tab" id="camp-subtab-united" onclick="showCampAdminTab('united')">United Energy Services</button>
-      </div>
-      <div class="camp-card">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
-          <div class="camp-card-title" id="camp-admin-title">🧡 Reliant Agents</div>
-          <button onclick="addCampAgent()" class="btn-fire" style="padding:10px 22px;font-size:13px;">+ Add Agent</button>
-        </div>
-        <div id="camp-admin-list"></div>
-      </div>
-    </div>
-
-  </div>
-</div>
-</div>
-
-<!-- ════════════ RELIANT PORTAL ════════════ -->
-<div id="reliant-portal" class="page">
-<div class="camp-page">
-  <div class="camp-header">
-    <div class="camp-brand">
-      <div class="camp-logo reliant">RELIANT</div>
-      <div class="camp-agent-name" id="reliant-agent-name">Agent</div>
-    </div>
-    <button class="camp-back" onclick="showPage('portal')">← Back to Main Portal</button>
-  </div>
-  <div class="camp-body">
-    <div class="camp-tabs">
-      <button class="camp-tab active-reliant" data-camp="reliant" data-tab="dash" onclick="showCampTab('reliant','dash')">Dashboard</button>
-      <button class="camp-tab" data-camp="reliant" data-tab="leaderboard" onclick="showCampTab('reliant','leaderboard')">Leaderboard</button>
-      <button class="camp-tab" data-camp="reliant" data-tab="progress" onclick="showCampTab('reliant','progress')">My Progress</button>
-      <button class="camp-tab" data-camp="reliant" data-tab="toolkit" onclick="showCampTab('reliant','toolkit')">Toolkit</button>
-      <button class="camp-tab" data-camp="reliant" data-tab="documents" onclick="showCampTab('reliant','documents')">Documents</button>
-      <button class="camp-tab" data-camp="reliant" data-tab="commission" onclick="showCampTab('reliant','commission')">Commission</button>
-    </div>
-    <div id="reliant-content"></div>
-  </div>
-</div>
-</div>
-
-<!-- ════════════ UNITED PORTAL ════════════ -->
-<div id="united-portal" class="page">
-<div class="camp-page">
-  <div class="camp-header">
-    <div class="camp-brand">
-      <div class="camp-logo united">UNITED</div>
-      <div class="camp-agent-name" id="united-agent-name">Agent</div>
-    </div>
-    <button class="camp-back" onclick="showPage('portal')">← Back to Main Portal</button>
-  </div>
-  <div class="camp-body">
-    <div class="camp-tabs">
-      <button class="camp-tab active-united" data-camp="united" data-tab="dash" onclick="showCampTab('united','dash')">Dashboard</button>
-      <button class="camp-tab" data-camp="united" data-tab="leaderboard" onclick="showCampTab('united','leaderboard')">Leaderboard</button>
-      <button class="camp-tab" data-camp="united" data-tab="progress" onclick="showCampTab('united','progress')">My Progress</button>
-      <button class="camp-tab" data-camp="united" data-tab="toolkit" onclick="showCampTab('united','toolkit')">Toolkit</button>
-      <button class="camp-tab" data-camp="united" data-tab="documents" onclick="showCampTab('united','documents')">Documents</button>
-      <button class="camp-tab" data-camp="united" data-tab="commission" onclick="showCampTab('united','commission')">Commission</button>
-    </div>
-    <div id="united-content"></div>
-  </div>
-</div>
-</div>
-
-<!-- ════════════ OWNER CONTROL CENTER ════════════ -->
-<div id="owner-center" class="page">
-<div style="min-height:100vh;display:flex;background:#0A0A0A;">
-  <aside style="width:260px;background:#000;border-right:1px solid rgba(255,255,255,0.07);padding:24px 0;position:sticky;top:0;height:100vh;overflow-y:auto;">
-    <div style="padding:0 24px 24px;border-bottom:1px solid rgba(255,255,255,0.07);margin-bottom:16px;">
-      <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#FFD700;letter-spacing:2px;">OWNER CENTER</div>
-      <div style="font-size:11px;color:rgba(255,255,255,0.35);margin-top:4px;">Full control panel</div>
-    </div>
-    <nav id="oc-nav" style="display:flex;flex-direction:column;padding:0 12px;gap:2px;"></nav>
-    <div style="padding:16px 24px;margin-top:24px;border-top:1px solid rgba(255,255,255,0.07);">
-      <button class="logout-btn" onclick="doLogout()" style="width:100%;">Sign Out</button>
-    </div>
-  </aside>
-  <main style="flex:1;padding:32px 40px;max-width:calc(100vw - 260px);overflow-x:auto;">
-    <div id="oc-body"></div>
-  </main>
-</div>
-</div>
-
-<!-- ════════════ DOCUMENT VIEWER OVERLAY ════════════ -->
-<div class="doc-viewer-overlay" id="doc-viewer">
-  <div class="doc-viewer-bar">
-    <div class="doc-viewer-title" id="doc-viewer-title">Document</div>
-    <button class="doc-viewer-close" onclick="closeDocViewer()">✕ Close</button>
-  </div>
-  <div class="doc-viewer-body">
-    <div class="doc-viewer-content" id="doc-viewer-content">
-      <div class="doc-viewer-notice">🔒 This document is view-only. Printing, copying, and downloading are disabled.</div>
-      <div id="doc-viewer-text"></div>
-    </div>
-  </div>
-</div>
-
-<!-- ════════════ MODALS ════════════ -->
-<div id="modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.85);backdrop-filter:blur(8px);z-index:10000;align-items:center;justify-content:center;padding:20px;">
-  <div id="modal-box" style="background:#111;border:1px solid rgba(255,255,255,0.1);border-radius:16px;padding:32px;max-width:520px;width:100%;max-height:90vh;overflow-y:auto;">
-    <div id="modal-content"></div>
-  </div>
-</div>
-
-
-<!-- ════════════ ADMIN ════════════ -->
-<div id="admin" class="page">
-<div id="admin-page">
-  <div class="portal-header">
-    <div style="display:flex;align-items:center;gap:14px;">
-      <div onclick="showPage(\'home\')" style="cursor:pointer;width:40px;height:40px;"></div>
-      <div class="role-badge role-admin" style="padding:5px 13px;font-size:11px;">ADMIN</div>
-    </div>
-    <div style="display:flex;align-items:center;gap:14px">
-      <div class="agent-badge" id="admin-badge-name">Admin</div>
-      <button class="logout-btn" onclick="doLogout()">Sign Out</button>
-    </div>
-  </div>
-  <div class="portal-body">
-    <div class="portal-welcome" style="background:linear-gradient(135deg,rgba(255,0,128,0.12),rgba(0,198,255,0.08));">
-      <div>
-        <div class="pw-greeting" style="color:#FF0080;">Control Center</div>
-        <div class="pw-name">Admin Dashboard</div>
-        <div class="pw-sub">Manage agents, applications, announcements, links &amp; training.</div>
-      </div>
-      <div style="text-align:center;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:14px;padding:20px 28px">
-        <div style="font-size:36px">⚙️</div>
-        <div style="font-size:11px;color:rgba(255,255,255,0.35);text-transform:uppercase;letter-spacing:1.5px;margin-top:4px">Admin Access</div>
-      </div>
-    </div>
-
-    <div style="display:flex;gap:8px;margin-bottom:28px;flex-wrap:wrap;">
-      <button class="admin-tab camp-tab active-reliant" id="tab-agents" onclick="showAdminTab('agents')">👥 Agents</button>
-      <button class="admin-tab camp-tab" id="tab-applications" onclick="showAdminTab('applications')">📝 Applications</button>
-      <button class="admin-tab camp-tab" id="tab-announcements" onclick="showAdminTab('announcements')">📢 Announcements</button>
-      <button class="admin-tab camp-tab" id="tab-links" onclick="showAdminTab('links')">🔗 Links</button>
-      <button class="admin-tab camp-tab" id="tab-training" onclick="showAdminTab('training')">🎓 Training</button>
-      <button class="admin-tab camp-tab" id="tab-welcome" onclick="showAdminTab('welcome')">✨ Welcome Message</button>
-      <button class="admin-tab camp-tab" id="tab-campaigns" onclick="showAdminTab('campaigns')">🎯 Campaigns</button>
-    </div>
-
-    <!-- AGENTS TAB -->
-    <div id="admin-tab-agents">
-      <div class="portal-card">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px;flex-wrap:wrap;gap:12px;">
-          <div class="portal-card-title" style="margin-bottom:0;">👥 Agent Directory</div>
-          <button onclick="openAgentModal()" class="btn-fire" style="padding:10px 22px;font-size:13px;">+ Add Agent</button>
-        </div>
-        <div style="overflow-x:auto;">
-          <table style="width:100%;border-collapse:collapse;">
-            <thead>
-              <tr style="border-bottom:1px solid rgba(255,255,255,0.08);">
-                <th class="th-cell">Name</th>
-                <th class="th-cell">Role</th>
-                <th class="th-cell">Password</th>
-                <th class="th-cell">Status</th>
-                <th class="th-cell">Joined</th>
-                <th class="th-cell">Actions</th>
-              </tr>
-            </thead>
-            <tbody id="admin-agents-tbody"></tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-
-    <!-- APPLICATIONS TAB -->
-    <div id="admin-tab-applications" style="display:none;">
-      <div class="portal-card">
-        <div class="portal-card-title">📝 Job Applications</div>
-        <div id="applications-list"></div>
-      </div>
-    </div>
-
-    <!-- ANNOUNCEMENTS TAB -->
-    <div id="admin-tab-announcements" style="display:none;">
-      <div class="portal-card">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px;flex-wrap:wrap;gap:12px;">
-          <div class="portal-card-title" style="margin-bottom:0;">📢 Manage Announcements</div>
-          <button onclick="openAnnounceModal()" class="btn-fire" style="padding:10px 22px;font-size:13px;">+ New Announcement</button>
-        </div>
-        <div id="admin-announcements-list"></div>
-      </div>
-    </div>
-
-    <!-- LINKS TAB -->
-    <div id="admin-tab-links" style="display:none;">
-      <div class="portal-card">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px;flex-wrap:wrap;gap:12px;">
-          <div class="portal-card-title" style="margin-bottom:0;">🔗 Important Links</div>
-          <button onclick="openLinkModal()" class="btn-fire" style="padding:10px 22px;font-size:13px;">+ Add Link</button>
-        </div>
-        <div id="admin-links-list"></div>
-      </div>
-    </div>
-
-    <!-- TRAINING TAB -->
-    <div id="admin-tab-training" style="display:none;">
-      <div class="portal-card">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px;flex-wrap:wrap;gap:12px;">
-          <div class="portal-card-title" style="margin-bottom:0;">🎓 Training Materials</div>
-          <button onclick="openTrainingModal()" class="btn-fire" style="padding:10px 22px;font-size:13px;">+ Add Module</button>
-        </div>
-        <div id="admin-training-list"></div>
-      </div>
-    </div>
-
-    <!-- WELCOME TAB -->
-    <div id="admin-tab-welcome" style="display:none;">
-      <div class="portal-card">
-        <div class="portal-card-title">✨ Portal Welcome Message</div>
-        <p style="font-size:14px;color:rgba(255,255,255,0.5);margin-bottom:20px;">This is the motivational message agents see at the top of their portal.</p>
-        <textarea id="welcome-msg-input" rows="3" class="form-input" style="resize:vertical;font-size:14.5px;line-height:1.6;"></textarea>
-        <button onclick="saveWelcomeMessage()" class="btn-fire" style="margin-top:14px;padding:10px 22px;font-size:13px;">Save Message</button>
-        <div id="welcome-saved" style="display:none;color:#00FF88;font-size:13px;margin-top:10px;">✓ Saved.</div>
-      </div>
-    </div>
-
-    <!-- CAMPAIGNS TAB -->
-    <div id="admin-tab-campaigns" style="display:none;">
-      <div style="display:flex;gap:8px;margin-bottom:20px;flex-wrap:wrap;">
-        <button class="camp-tab active-reliant" id="ctab-reliant" onclick="showCampAdminTab('reliant')">🟠 Reliant</button>
-        <button class="camp-tab" id="ctab-united" onclick="showCampAdminTab('united')">🔵 United</button>
-      </div>
-      <div id="camp-admin-content"></div>
-    </div>
-  </div>
-</div>
-</div>
-
-<!-- ════════════ RELIANT PORTAL ════════════ -->
-<div id="reliant-portal" class="page">
-<div class="camp-page">
-  <div class="camp-header">
-    <div class="camp-brand">
-      <div class="camp-logo reliant">RELIANT</div>
-      <span class="camp-agent-name" id="rel-agent-name">Agent</span>
-    </div>
-    <button class="camp-back" onclick="showPage('portal')">← Back to Main Portal</button>
-  </div>
-  <div class="camp-body">
-    <div class="camp-tabs">
-      <button class="camp-tab active-reliant" id="rel-tab-dash" onclick="showCampTab('reliant','dash')">📊 Dashboard</button>
-      <button class="camp-tab" id="rel-tab-lb" onclick="showCampTab('reliant','lb')">🏆 Leaderboard</button>
-      <button class="camp-tab" id="rel-tab-flow" onclick="showCampTab('reliant','flow')">📈 Progress</button>
-      <button class="camp-tab" id="rel-tab-tools" onclick="showCampTab('reliant','tools')">🛠️ Toolkit</button>
-      <button class="camp-tab" id="rel-tab-docs" onclick="showCampTab('reliant','docs')">📄 Documents</button>
-      <button class="camp-tab" id="rel-tab-comm" onclick="showCampTab('reliant','comm')">💰 Commission</button>
-    </div>
-    <div id="rel-content-dash"></div>
-    <div id="rel-content-lb" style="display:none;"></div>
-    <div id="rel-content-flow" style="display:none;"></div>
-    <div id="rel-content-tools" style="display:none;"></div>
-    <div id="rel-content-docs" style="display:none;"></div>
-    <div id="rel-content-comm" style="display:none;"></div>
-  </div>
-</div>
-</div>
-
-<!-- ════════════ UNITED PORTAL ════════════ -->
-<div id="united-portal" class="page">
-<div class="camp-page">
-  <div class="camp-header">
-    <div class="camp-brand">
-      <div class="camp-logo united">UNITED</div>
-      <span class="camp-agent-name" id="uni-agent-name">Agent</span>
-    </div>
-    <button class="camp-back" onclick="showPage('portal')">← Back to Main Portal</button>
-  </div>
-  <div class="camp-body">
-    <div class="camp-tabs">
-      <button class="camp-tab active-united" id="uni-tab-dash" onclick="showCampTab('united','dash')">📊 Dashboard</button>
-      <button class="camp-tab" id="uni-tab-lb" onclick="showCampTab('united','lb')">🏆 Leaderboard</button>
-      <button class="camp-tab" id="uni-tab-flow" onclick="showCampTab('united','flow')">📈 Progress</button>
-      <button class="camp-tab" id="uni-tab-tools" onclick="showCampTab('united','tools')">🛠️ Toolkit</button>
-      <button class="camp-tab" id="uni-tab-docs" onclick="showCampTab('united','docs')">📄 Documents</button>
-      <button class="camp-tab" id="uni-tab-comm" onclick="showCampTab('united','comm')">💰 Commission</button>
-    </div>
-    <div id="uni-content-dash"></div>
-    <div id="uni-content-lb" style="display:none;"></div>
-    <div id="uni-content-flow" style="display:none;"></div>
-    <div id="uni-content-tools" style="display:none;"></div>
-    <div id="uni-content-docs" style="display:none;"></div>
-    <div id="uni-content-comm" style="display:none;"></div>
-  </div>
-</div>
-</div>
-
-<!-- ════════════ DOC VIEWER ════════════ -->
-<div id="doc-viewer" class="doc-viewer-overlay" oncontextmenu="return false;">
-  <div class="doc-viewer-bar">
-    <div class="doc-viewer-title" id="doc-viewer-title">Document</div>
-    <button class="doc-viewer-close" onclick="closeDocViewer()">Close ✕</button>
-  </div>
-  <div class="doc-viewer-body">
-    <div class="doc-viewer-content" id="doc-viewer-content">
-      <div class="doc-viewer-notice">🔒 View-only — printing, copying, and downloading are disabled.</div>
-      <div id="doc-viewer-text"></div>
-    </div>
-  </div>
-</div>
-
-<!-- ════════════ OWNER CONTROL CENTER ════════════ -->
-<div id="owner-center" class="page">
-<div style="min-height:100vh;background:#0A0A0A;display:flex;">
-  <!-- Sidebar -->
-  <div style="width:260px;background:#000;border-right:1px solid rgba(255,255,255,0.07);padding:24px 0;position:sticky;top:0;height:100vh;overflow-y:auto;">
-    <div style="padding:0 24px 20px;border-bottom:1px solid rgba(255,255,255,0.07);">
-      <div onclick="showPage('home')" style="cursor:pointer;width:40px;height:40px;"></div>
-      <div style="margin-top:8px;font-size:11px;font-weight:700;letter-spacing:2px;color:#FFD700;text-transform:uppercase;">👑 Owner Center</div>
-    </div>
-    <div style="padding:16px 0;">
-      <div style="padding:0 24px;font-size:10px;letter-spacing:2px;color:rgba(255,255,255,0.3);margin-bottom:8px;text-transform:uppercase;">Dashboard</div>
-      <button class="oc-nav" data-sec="dash" onclick="ocShowSection('dash')">📊 Overview</button>
-      <button class="oc-nav" data-sec="activity" onclick="ocShowSection('activity')">📈 Activity Log</button>
-      <div style="padding:16px 24px 8px;font-size:10px;letter-spacing:2px;color:rgba(255,255,255,0.3);text-transform:uppercase;">Content</div>
-      <button class="oc-nav" data-sec="announcements" onclick="ocShowSection('announcements')">📢 Announcements</button>
-      <button class="oc-nav" data-sec="links" onclick="ocShowSection('links')">🔗 Links</button>
-      <button class="oc-nav" data-sec="training" onclick="ocShowSection('training')">🎓 Training</button>
-      <button class="oc-nav" data-sec="welcome" onclick="ocShowSection('welcome')">✨ Welcome Message</button>
-      <div style="padding:16px 24px 8px;font-size:10px;letter-spacing:2px;color:rgba(255,255,255,0.3);text-transform:uppercase;">People</div>
-      <button class="oc-nav" data-sec="agents" onclick="ocShowSection('agents')">👥 Agents</button>
-      <button class="oc-nav" data-sec="applications" onclick="ocShowSection('applications')">📝 Applications</button>
-      <div style="padding:16px 24px 8px;font-size:10px;letter-spacing:2px;color:rgba(255,255,255,0.3);text-transform:uppercase;">Campaigns</div>
-      <button class="oc-nav" data-sec="reliant" onclick="ocShowSection('reliant')">🟠 Reliant</button>
-      <button class="oc-nav" data-sec="united" onclick="ocShowSection('united')">🔵 United</button>
-      <button class="oc-nav" data-sec="workspaces" onclick="ocShowSection('workspaces')">➕ All Workspaces</button>
-      <div style="padding:16px 24px 8px;font-size:10px;letter-spacing:2px;color:rgba(255,255,255,0.3);text-transform:uppercase;">System</div>
-      <button class="oc-nav" data-sec="tools" onclick="ocShowSection('tools')">🛠️ Owner Tools</button>
-      <button class="oc-nav" data-sec="settings" onclick="ocShowSection('settings')">⚙️ Settings</button>
-      <button class="oc-nav" data-sec="credentials" onclick="ocShowSection('credentials')">🔐 Credentials</button>
-      <div style="padding:24px;">
-        <button class="logout-btn" style="width:100%;" onclick="doLogout()">Sign Out</button>
-      </div>
-    </div>
-  </div>
-  <!-- Main -->
-  <div style="flex:1;padding:32px 40px;overflow-y:auto;">
-    <div id="oc-content"></div>
-  </div>
-</div>
-<style>
-.oc-nav{
-  width:100%;text-align:left;padding:10px 24px;
-  background:none;border:none;color:rgba(255,255,255,0.55);
-  font-family:'Outfit',sans-serif;font-size:13.5px;font-weight:500;
-  cursor:pointer;transition:all 0.15s;
-}
-.oc-nav:hover{background:rgba(255,255,255,0.04);color:#fff;}
-.oc-nav.active{background:rgba(255,215,0,0.08);color:#FFD700;border-left:3px solid #FFD700;padding-left:21px;}
-</style>
-</div>
 
 <!-- MODALS -->
 <div id="modal-backdrop" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:10000;align-items:center;justify-content:center;padding:20px;" onclick="closeAllModals()">
@@ -2219,275 +1821,1061 @@ footer{
 
 
 <script>
-// ═══════════════════════════════════════════════════════════
-// DEFAULT DATA (authoritative — second script wins)
-// ═══════════════════════════════════════════════════════════
-const DEFAULT_AGENTS = [
-  {id:1,name:'Admin User',email:'admin@circlesolutions.com',password:'CSIAdmin2025',role:'admin',active:true,joined:'2024-01-15'},
-  {id:2,name:'Marcus Johnson',email:'marcus@circlesolutions.com',password:'mj2024',role:'manager',active:true,joined:'2024-03-20'},
-  {id:3,name:'Sarah Chen',email:'sarah@circlesolutions.com',password:'sc2024',role:'trainer',active:true,joined:'2024-06-10'},
-  {id:4,name:'Jordan Rivera',email:'jordan@circlesolutions.com',password:'jr2024',role:'agent',active:true,joined:'2024-09-05'}
-];
-const DEFAULT_ANNOUNCEMENTS = [
-  {id:1,color:'orange',date:'This Week',title:'🔥 New Commission Structure',body:'Tier bonuses now kick in at 15 enrollments per week. Push for the stretch!'},
-  {id:2,color:'cyan',date:'Ongoing',title:'📅 Fiber Campaign Expansion',body:'New territories opening in TX and FL. Talk to your manager about transfer opportunities.'},
-  {id:3,color:'pink',date:'New',title:'🎯 B2B Energy Launch',body:'Business-to-business commercial energy program now live. Training modules available in the learning center.'}
-];
-const DEFAULT_LINKS = [
-  {id:1,color:'#FF6B00',name:'Company Handbook',desc:'Policies, expectations, and procedures',url:'#'},
-  {id:2,color:'#00C6FF',name:'Commission Calculator',desc:'Track your earnings in real time',url:'#'},
-  {id:3,color:'#FF0080',name:'Training Portal',desc:'All your training materials in one place',url:'#'},
-  {id:4,color:'#00FF88',name:'Script Library',desc:'Pitches and objection handlers for every program',url:'#'}
-];
-const DEFAULT_TRAINING = [
-  {id:1,icon:'⚡',title:'Residential Energy Fundamentals',meta:'Required · 4 modules · 45 min',tag:'req'},
-  {id:2,icon:'🏢',title:'B2B Energy Sales Playbook',meta:'Required · 5 modules · 60 min',tag:'new'},
-  {id:3,icon:'🌐',title:'Fiber Internet Pitch Mastery',meta:'Required · 3 modules · 30 min',tag:'req'},
-  {id:4,icon:'🛡️',title:'Compliance &amp; Ethics',meta:'Required · 2 modules · 20 min',tag:'req'},
-  {id:5,icon:'💬',title:'Objection Handling',meta:'Optional · 6 modules · 75 min',tag:'opt'}
-];
-const DEFAULT_WELCOME = 'Every door is an opportunity. Let\'s go.';
-const DEFAULT_RELIANT_AGENTS = [
-  {id:1,name:'Marcus Johnson',enrollments:42,active:true},
-  {id:2,name:'Sarah Chen',enrollments:38,active:true},
-  {id:3,name:'Jordan Rivera',enrollments:31,active:true},
-  {id:4,name:'You',enrollments:24,active:true,isYou:true},
-  {id:5,name:'Alex Park',enrollments:22,active:true}
-];
-const DEFAULT_UNITED_AGENTS = [
-  {id:1,name:'Taylor Wright',enrollments:51,active:true},
-  {id:2,name:'You',enrollments:28,active:true,isYou:true},
-  {id:3,name:'Jamie Lopez',enrollments:25,active:true},
-  {id:4,name:'Sam Cole',enrollments:19,active:true}
-];
-const DEFAULT_ONBOARDING_STAGES = [
-  {id:1,title:'Application Submitted',desc:'Your information is in — we\'ll review it shortly.',state:'done'},
-  {id:2,title:'Initial Interview',desc:'A hiring manager will call to discuss the role.',state:'done'},
-  {id:3,title:'Campaign Training',desc:'Complete required training modules.',state:'active'},
-  {id:4,title:'First Field Day',desc:'Shadow an experienced rep in the field.',state:'locked'},
-  {id:5,title:'Certified Active',desc:'You\'re fully certified and earning commissions.',state:'locked'}
-];
-const DEFAULT_RELIANT_TOOLS = [
-  {id:1,icon:'📋',name:'Rate Card',desc:'Current Reliant plans and rate comparisons',tag:'Live',tagColor:'#00FF88'},
-  {id:2,icon:'💬',name:'Pitch Script',desc:'The winning door-opener script for Reliant',tag:'Updated',tagColor:'#FF6B00'},
-  {id:3,icon:'🛡️',name:'Objection Bible',desc:'Every objection, every response — memorize it',tag:'Hot',tagColor:'#FF0080'}
-];
-const DEFAULT_UNITED_TOOLS = [
-  {id:1,icon:'📋',name:'United Rate Sheet',desc:'Compare United plans against competitors',tag:'Live',tagColor:'#00FF88'},
-  {id:2,icon:'💬',name:'United Pitch',desc:'Talk tracks specific to United Energy Services',tag:'Updated',tagColor:'#0080FF'},
-  {id:3,icon:'🛡️',name:'Objection Toolkit',desc:'Handle every hesitation with confidence',tag:'Essential',tagColor:'#FF0080'}
-];
-const DEFAULT_RELIANT_DOCS = [
-  {id:1,name:'Reliant Agent Agreement',meta:'PDF · 12 pages',content:'This is the standard Reliant agent agreement. It covers commission structure, expectations, and compliance requirements.\n\n[Document content would be loaded here in production.]'},
-  {id:2,name:'Compliance Guidelines',meta:'PDF · 8 pages',content:'Reliant Energy compliance guidelines for D2D agents.\n\n[Full compliance document content here.]'},
-  {id:3,name:'Product FAQ',meta:'PDF · 5 pages',content:'Frequently asked questions about Reliant plans.\n\n[FAQ content here.]'}
-];
-const DEFAULT_UNITED_DOCS = [
-  {id:1,name:'United Agent Agreement',meta:'PDF · 10 pages',content:'Standard United Energy Services agent agreement.\n\n[Document content here.]'},
-  {id:2,name:'United Rate Disclosures',meta:'PDF · 6 pages',content:'Required rate disclosures for United enrollments.\n\n[Content here.]'}
-];
-const DEFAULT_OC_TOOLS = [
-  {id:1,icon:'📊',name:'Weekly Reports',desc:'Performance snapshot of the entire org'},
-  {id:2,icon:'💰',name:'Payroll Center',desc:'Commission calculations and payouts'}
-];
+// ═══════════════════════════════════════════════════════════════
+// CIRCLE SOLUTIONS — SUPABASE-POWERED BACK OFFICE
+// ═══════════════════════════════════════════════════════════════
 
-// ═══════════════════════════════════════════════════════════
-// STORAGE HELPERS
-// ═══════════════════════════════════════════════════════════
-function getStore(k,def){try{const v=localStorage.getItem('csi_'+k);return v?JSON.parse(v):def;}catch(e){return def;}}
-function setStore(k,v){try{localStorage.setItem('csi_'+k,JSON.stringify(v));}catch(e){}}
-function getAgents(){return getStore('agents',DEFAULT_AGENTS);}
-function saveAgents(a){setStore('agents',a);}
+// ─── Supabase client ───
+const sb = window.supabase.createClient(
+  window.CSI_SUPABASE_URL,
+  window.CSI_SUPABASE_ANON_KEY,
+  { auth: { persistSession: true, autoRefreshToken: true } }
+);
 
-// ═══════════════════════════════════════════════════════════
-// PAGE / LOGIN
-// ═══════════════════════════════════════════════════════════
-let currentAgent = null;
+// ─── Global state ───
+let currentUser = null;         // auth user
+let currentProfile = null;      // profiles row (role, programs, name)
+let allPrograms = [];           // all programs from DB
+let activeProgramId = null;     // which program the user is currently viewing
+let activeSubView = 'dashboard';// which sub-section within a program
+let activeAdminView = null;     // which admin view is active (agents, applications, etc.)
 
+
+// ═══════════════════════════════════════════════════════════════
+// PAGE ROUTING
+// ═══════════════════════════════════════════════════════════════
 function showPage(id){
-  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   const el = document.getElementById(id);
-  if(el){el.classList.add('active');window.scrollTo(0,0);}
-  // reset login error
-  const err = document.getElementById('login-error');
-  if(err) err.classList.remove('show');
-  // page-specific inits
-  if(id==='portal') renderPortal();
-  if(id==='admin') renderAdminPanel();
-  if(id==='reliant-portal') loadCampaignPortal('reliant');
-  if(id==='united-portal') loadCampaignPortal('united');
-  if(id==='owner-center') ocInit();
+  if(el) el.classList.add('active');
+  window.scrollTo({top:0, behavior:'instant'});
 }
 
-function doLogin(){
+function toggleSubNav(btn){
+  const links = btn.parentElement.querySelector('.subpage-nav-links');
+  if(links) links.classList.toggle('mobile-show');
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// AUTH FLOW
+// ═══════════════════════════════════════════════════════════════
+async function doLogin(e){
+  if(e) e.preventDefault();
   const email = document.getElementById('login-email').value.trim().toLowerCase();
-  const pass = document.getElementById('login-pass').value;
-  const err = document.getElementById('login-error');
-  const agents = getAgents();
-  const found = agents.find(a=>a.email.toLowerCase()===email && a.password===pass && a.active);
-  if(!found){err.classList.add('show');return;}
-  currentAgent = found;
-  setStore('current_agent',found);
-  // route by role
-  if(found.role==='owner'){showPage('owner-center');return;}
-  if(found.role==='admin'){showPage('admin');return;}
-  showPage('portal');
+  const password = document.getElementById('login-password').value;
+  const errBox = document.getElementById('login-error');
+  const loading = document.getElementById('login-loading');
+  errBox.style.display = 'none';
+  loading.style.display = 'block';
+
+  const { data, error } = await sb.auth.signInWithPassword({ email, password });
+  loading.style.display = 'none';
+
+  if(error){
+    errBox.textContent = error.message || 'Sign-in failed. Please check your email and password.';
+    errBox.style.display = 'block';
+    return;
+  }
+
+  await loadCurrentProfile();
+  enterBackOffice();
 }
 
-function doLogout(){
-  currentAgent = null;
-  try{localStorage.removeItem('csi_current_agent');}catch(e){}
-  document.getElementById('login-email').value='';
-  document.getElementById('login-pass').value='';
+async function doLogout(){
+  await sb.auth.signOut();
+  currentUser = null;
+  currentProfile = null;
+  activeProgramId = null;
+  activeSubView = 'dashboard';
+  activeAdminView = null;
+  document.getElementById('login-email').value = '';
+  document.getElementById('login-password').value = '';
   showPage('home');
 }
 
-// restore session
-(function(){
-  const saved = getStore('current_agent',null);
-  if(saved) currentAgent = saved;
+async function loadCurrentProfile(){
+  const { data: { user } } = await sb.auth.getUser();
+  if(!user){ currentUser = null; currentProfile = null; return false; }
+  currentUser = user;
+
+  const { data: profile, error } = await sb.from('profiles').select('*').eq('id', user.id).single();
+  if(error || !profile){
+    console.error('Profile load failed:', error);
+    return false;
+  }
+  currentProfile = profile;
+
+  // Load programs once
+  if(allPrograms.length === 0){
+    const { data: progs } = await sb.from('programs').select('*').order('name');
+    allPrograms = progs || [];
+  }
+  return true;
+}
+
+// On page load: check if already signed in
+(async function initAuth(){
+  const { data: { session } } = await sb.auth.getSession();
+  if(session){
+    const ok = await loadCurrentProfile();
+    if(ok){
+      // If they were on a portal page refresh, bring them back; otherwise stay on whatever page
+      if(window.location.hash === '#backoffice' || document.getElementById('backoffice')?.classList.contains('active')){
+        enterBackOffice();
+      }
+    }
+  }
 })();
 
-// ═══════════════════════════════════════════════════════════
-// PORTAL RENDERING
-// ═══════════════════════════════════════════════════════════
-function renderPortal(){
-  if(!currentAgent){showPage('login');return;}
-  document.getElementById('portal-agent-name').textContent = currentAgent.name;
-  document.getElementById('agent-badge-name').textContent = currentAgent.role.charAt(0).toUpperCase()+currentAgent.role.slice(1);
-  document.getElementById('pw-sub').textContent = getStore('welcome_msg',DEFAULT_WELCOME);
-  // announcements
-  const ann = getStore('announcements',DEFAULT_ANNOUNCEMENTS);
-  document.getElementById('portal-ann-list').innerHTML = ann.map(a=>`
-    <div class="ann ${a.color}">
-      <div class="ann-date">${a.date}</div>
-      <div class="ann-title">${a.title}</div>
-      <div class="ann-body">${a.body}</div>
-    </div>`).join('');
-  // links
-  const links = getStore('links',DEFAULT_LINKS);
-  document.getElementById('portal-links-list').innerHTML = links.map(l=>`
-    <div class="link-item" onclick="window.open('${l.url}','_blank')">
-      <div class="link-item-left">
-        <div class="link-dot" style="background:${l.color}"></div>
-        <div><div class="link-name">${l.name}</div><div class="link-desc">${l.desc}</div></div>
-      </div>
-      <div class="link-arrow">→</div>
-    </div>`).join('');
-  // training
-  const training = getStore('training',DEFAULT_TRAINING);
-  document.getElementById('portal-training-list').innerHTML = training.map(t=>`
-    <div class="training-item">
-      <div class="training-icon">${t.icon}</div>
-      <div style="flex:1;"><div class="training-title">${t.title}</div><div class="training-meta">${t.meta}</div></div>
-      <span class="tag tag-${t.tag}">${t.tag==='req'?'Required':(t.tag==='new'?'New':'Optional')}</span>
-    </div>`).join('');
-  // inject campaign workspace cards
-  addCampCards();
+
+// ═══════════════════════════════════════════════════════════════
+// BACK OFFICE ENTRY + RENDERING
+// ═══════════════════════════════════════════════════════════════
+function enterBackOffice(){
+  if(!currentProfile){ showPage('login'); return; }
+
+  // Update header
+  document.getElementById('bo-user-name').textContent = currentProfile.full_name || currentProfile.email;
+  const roleBadge = document.getElementById('bo-role-badge');
+  roleBadge.textContent = currentProfile.role.toUpperCase();
+  roleBadge.className = 'role-badge role-' + currentProfile.role;
+  // apply role color inline since role classes may not all exist
+  const roleColors = { owner:'#FFD700', admin:'#FF0080', manager:'#00C6FF', agent:'#00FF88' };
+  const c = roleColors[currentProfile.role] || '#888';
+  roleBadge.style.background = c + '22';
+  roleBadge.style.color = c;
+  roleBadge.style.border = '1px solid ' + c + '55';
+  roleBadge.style.borderRadius = '50px';
+  roleBadge.style.fontWeight = '700';
+  roleBadge.style.letterSpacing = '1.5px';
+
+  renderSidebar();
+  // Auto-select first program if any
+  const userPrograms = (currentProfile.role === 'owner' || currentProfile.role === 'admin')
+    ? allPrograms.map(p => p.id)
+    : (currentProfile.programs || []);
+
+  if(userPrograms.length > 0){
+    activeProgramId = userPrograms[0];
+    activeSubView = 'dashboard';
+    activeAdminView = null;
+    renderMainContent();
+  } else if(currentProfile.role === 'owner' || currentProfile.role === 'admin'){
+    // Show agents management by default
+    activeProgramId = null;
+    activeAdminView = 'agents';
+    renderMainContent();
+  } else {
+    // Agent with no programs assigned
+    activeProgramId = null;
+    activeAdminView = null;
+    renderMainContent();
+  }
+
+  showPage('backoffice');
 }
 
-function addCampCards(){
-  // only add once
-  if(document.getElementById('camp-workspaces-card')) return;
-  const body = document.querySelector('#portal-page .portal-body');
-  if(!body) return;
-  const card = document.createElement('div');
-  card.id = 'camp-workspaces-card';
-  card.className = 'portal-full';
-  card.innerHTML = `
-    <div class="portal-card">
-      <div class="portal-card-title">🎯 Campaign Workspaces</div>
-      <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:14px;">
-        <div onclick="showPage('reliant-portal')" style="cursor:pointer;background:linear-gradient(135deg,rgba(255,107,0,0.15),rgba(255,69,0,0.08));border:1px solid rgba(255,107,0,0.3);border-radius:14px;padding:22px;transition:all 0.2s;" onmouseover="this.style.transform='translateY(-3px)'" onmouseout="this.style.transform='translateY(0)'">
-          <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;"><div class="camp-logo reliant" style="height:32px;font-size:13px;">RELIANT</div></div>
-          <div style="font-size:14px;color:rgba(255,255,255,0.65);line-height:1.55;">Dashboard, leaderboard, toolkit, documents &amp; commission tracking for the Reliant campaign.</div>
-          <div style="margin-top:14px;font-size:12px;color:#FF6B00;font-weight:700;letter-spacing:1px;text-transform:uppercase;">Enter Workspace →</div>
-        </div>
-        <div onclick="showPage('united-portal')" style="cursor:pointer;background:linear-gradient(135deg,rgba(0,128,255,0.15),rgba(0,64,170,0.08));border:1px solid rgba(0,128,255,0.3);border-radius:14px;padding:22px;transition:all 0.2s;" onmouseover="this.style.transform='translateY(-3px)'" onmouseout="this.style.transform='translateY(0)'">
-          <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;"><div class="camp-logo united" style="height:32px;font-size:13px;">UNITED</div></div>
-          <div style="font-size:14px;color:rgba(255,255,255,0.65);line-height:1.55;">Dashboard, leaderboard, toolkit, documents &amp; commission tracking for United Energy Services.</div>
-          <div style="margin-top:14px;font-size:12px;color:#0080FF;font-weight:700;letter-spacing:1px;text-transform:uppercase;">Enter Workspace →</div>
-        </div>
+function renderSidebar(){
+  const listEl = document.getElementById('bo-program-list');
+  const role = currentProfile.role;
+  const isAdmin = role === 'owner' || role === 'admin';
+
+  // Programs the user can see
+  const userProgramIds = isAdmin ? allPrograms.map(p => p.id) : (currentProfile.programs || []);
+  const visiblePrograms = allPrograms.filter(p => userProgramIds.includes(p.id));
+
+  if(visiblePrograms.length === 0){
+    listEl.innerHTML = '<div style="padding:12px 24px;font-size:12.5px;color:rgba(255,255,255,0.4);line-height:1.6;">No programs assigned yet. Contact your manager or owner to gain access.</div>';
+  } else {
+    listEl.innerHTML = visiblePrograms.map(p => `
+      <button class="bo-program-tab ${activeProgramId === p.id && !activeAdminView ? 'active' : ''}"
+              style="--prog-color:${p.color};"
+              onclick="boSelectProgram('${p.id}')">
+        <span class="bo-prog-icon">${p.icon}</span>
+        <span>${p.name}</span>
+      </button>
+    `).join('');
+  }
+
+  // Admin nav section
+  const adminWrap = document.getElementById('bo-admin-nav-wrap');
+  const adminNav = document.getElementById('bo-admin-nav');
+  if(isAdmin || role === 'manager'){
+    adminWrap.style.display = 'block';
+    const navItems = [];
+    if(isAdmin || role === 'manager'){
+      navItems.push({ id:'agents', label:'👥 Agents', adminOnly:false });
+    }
+    if(isAdmin){
+      navItems.push({ id:'applications', label:'📝 Applications', adminOnly:true });
+      navItems.push({ id:'programs-admin', label:'🎯 Programs', adminOnly:true });
+    }
+    adminNav.innerHTML = navItems.map(it => `
+      <button class="bo-nav-item ${activeAdminView === it.id ? 'active' : ''}"
+              onclick="boShowAdmin('${it.id}')">${it.label}</button>
+    `).join('');
+  } else {
+    adminWrap.style.display = 'none';
+  }
+}
+
+function boSelectProgram(programId){
+  activeProgramId = programId;
+  activeAdminView = null;
+  activeSubView = 'dashboard';
+  renderSidebar();
+  renderMainContent();
+}
+
+function boShowAdmin(view){
+  activeAdminView = view;
+  activeProgramId = null;
+  renderSidebar();
+  renderMainContent();
+}
+
+function boShowView(view){
+  if(view === 'profile' || view === 'credentials'){
+    activeAdminView = view;
+    activeProgramId = null;
+    renderSidebar();
+    renderMainContent();
+  } else {
+    activeSubView = view;
+    renderMainContent();
+  }
+}
+
+function renderMainContent(){
+  const el = document.getElementById('bo-content');
+
+  if(activeAdminView === 'profile'){ el.innerHTML = renderMyProfile(); return; }
+  if(activeAdminView === 'credentials'){ el.innerHTML = renderChangePassword(); return; }
+  if(activeAdminView === 'agents'){ renderAgents(el); return; }
+  if(activeAdminView === 'applications'){ renderApplications(el); return; }
+  if(activeAdminView === 'programs-admin'){ renderProgramsAdmin(el); return; }
+
+  if(!activeProgramId){
+    el.innerHTML = `
+      <div class="bo-card" style="text-align:center;padding:60px 30px;">
+        <div style="font-size:48px;margin-bottom:16px;">👋</div>
+        <h2 style="font-family:'Bebas Neue',sans-serif;font-size:42px;color:#fff;margin-bottom:10px;">Welcome, ${currentProfile.full_name || currentProfile.email}</h2>
+        <p style="color:rgba(255,255,255,0.5);font-size:14px;">Select a program from the sidebar to get started.</p>
+      </div>`;
+    return;
+  }
+
+  renderProgramView(el);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PROGRAM VIEW (dashboard, training, contracts, codes, leaderboard, announcements)
+// ═══════════════════════════════════════════════════════════════
+function renderProgramView(el){
+  const prog = allPrograms.find(p => p.id === activeProgramId);
+  if(!prog){ el.innerHTML = '<div class="bo-card">Program not found.</div>'; return; }
+
+  const role = currentProfile.role;
+  const isAdmin = role === 'owner' || role === 'admin';
+  const isManager = role === 'manager' && (currentProfile.programs || []).includes(activeProgramId);
+  const canManage = isAdmin || isManager;
+
+  const subTabs = [
+    { id:'dashboard',     label:'📊 Dashboard' },
+    { id:'training',      label:'🎓 Training' },
+    { id:'contracts',     label:'📄 Contracts' },
+    { id:'codes',         label:'🔐 Codes & Credentials' },
+    { id:'leaderboard',   label:'🏆 Leaderboard' },
+    { id:'announcements', label:'📢 Announcements' }
+  ];
+
+  el.innerHTML = `
+    <div style="margin-bottom:28px;">
+      <div style="font-size:11px;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:${prog.color};margin-bottom:8px;">${prog.icon} Back Office</div>
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:56px;color:#fff;line-height:1;">${prog.name}</h1>
+      <p style="font-size:14px;color:rgba(255,255,255,0.5);margin-top:8px;">${prog.description || ''}</p>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:28px;">
+      ${subTabs.map(t => `<button class="bo-sub-tab ${activeSubView === t.id ? 'active' : ''}" style="--prog-color:${prog.color};" onclick="boShowView('${t.id}')">${t.label}</button>`).join('')}
+    </div>
+    <div id="bo-subcontent"></div>`;
+
+  const sub = document.getElementById('bo-subcontent');
+  if(activeSubView === 'dashboard')     renderDashboard(sub, prog, canManage);
+  else if(activeSubView === 'training')      renderTraining(sub, prog, canManage);
+  else if(activeSubView === 'contracts')     renderContracts(sub, prog, canManage);
+  else if(activeSubView === 'codes')         renderCodes(sub, prog, canManage);
+  else if(activeSubView === 'leaderboard')   renderLeaderboard(sub, prog);
+  else if(activeSubView === 'announcements') renderAnnouncements(sub, prog, canManage);
+}
+
+
+// ─── Dashboard ───
+async function renderDashboard(el, prog, canManage){
+  el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading…</div>';
+  try {
+    const { data: myEnrollments } = await sb.from('enrollments')
+      .select('*').eq('program_id', prog.id).eq('user_id', currentUser.id);
+    const myTotal = (myEnrollments || []).length;
+    const myActive = (myEnrollments || []).filter(e => e.status === 'active').length;
+
+    let teamTotal = null;
+    if(canManage){
+      const { count } = await sb.from('enrollments')
+        .select('*', { count:'exact', head:true }).eq('program_id', prog.id);
+      teamTotal = count;
+    }
+
+    const recent = (myEnrollments || []).slice(0, 5);
+
+    el.innerHTML = `
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:20px;">
+        <div class="stat-card"><div class="stat-num" style="color:${prog.color};">${myTotal}</div><div class="stat-lbl">My Enrollments</div></div>
+        <div class="stat-card"><div class="stat-num" style="color:#00FF88;">${myActive}</div><div class="stat-lbl">Active</div></div>
+        ${canManage ? `<div class="stat-card"><div class="stat-num" style="color:#FFD700;">${teamTotal ?? 0}</div><div class="stat-lbl">Team Total</div></div>` : ''}
       </div>
+      <div class="bo-card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;">My Recent Enrollments</div>
+          <button class="bo-btn bo-btn-primary" onclick="openEnrollmentModal('${prog.id}')">+ Log Enrollment</button>
+        </div>
+        ${recent.length === 0 ? '<div style="color:rgba(255,255,255,0.4);font-size:13.5px;padding:14px 0;">No enrollments logged yet.</div>' : `
+          <table class="bo-table">
+            <thead><tr><th>Date</th><th>Customer</th><th>Location</th><th>Status</th></tr></thead>
+            <tbody>${recent.map(e => `
+              <tr>
+                <td>${e.enrollment_date || ''}</td>
+                <td>${e.customer_name || '—'}</td>
+                <td>${e.customer_location || '—'}</td>
+                <td><span style="font-size:11px;padding:3px 10px;border-radius:50px;background:${e.status==='active'?'rgba(0,255,136,0.15)':'rgba(255,255,255,0.08)'};color:${e.status==='active'?'#00FF88':'rgba(255,255,255,0.6)'};text-transform:uppercase;letter-spacing:1px;">${e.status}</span></td>
+              </tr>`).join('')}</tbody>
+          </table>`}
+      </div>`;
+  } catch(err){
+    el.innerHTML = `<div class="bo-card" style="color:#F87171;">Failed to load dashboard: ${err.message}</div>`;
+  }
+}
+
+
+// ─── Enrollment Modal ───
+function openEnrollmentModal(programId){
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:32px;color:#fff;margin-bottom:18px;letter-spacing:1px;">Log New Enrollment</h2>
+    <div class="form-group"><label class="form-label">Customer Name</label><input id="enr-name" class="form-input" placeholder="John Doe"/></div>
+    <div class="form-group"><label class="form-label">Customer Location</label><input id="enr-loc" class="form-input" placeholder="City, State or address"/></div>
+    <div class="form-group"><label class="form-label">Notes (optional)</label><textarea id="enr-notes" class="form-input" rows="3"></textarea></div>
+    <div class="form-group"><label class="form-label">Status</label>
+      <select id="enr-status" class="form-input" style="background:#1a1a1a;">
+        <option value="active">Active</option>
+        <option value="pending">Pending</option>
+      </select>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:18px;">
+      <button class="bo-btn bo-btn-primary" onclick="saveEnrollment('${programId}')">Save</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="enr-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function saveEnrollment(programId){
+  const name = document.getElementById('enr-name').value.trim();
+  const loc = document.getElementById('enr-loc').value.trim();
+  const notes = document.getElementById('enr-notes').value.trim();
+  const status = document.getElementById('enr-status').value;
+  const msg = document.getElementById('enr-msg');
+  if(!name){ msg.style.color='#F87171'; msg.textContent='Customer name is required.'; return; }
+  const { error } = await sb.from('enrollments').insert({
+    user_id: currentUser.id, program_id: programId,
+    customer_name: name, customer_location: loc, notes, status
+  });
+  if(error){ msg.style.color='#F87171'; msg.textContent = error.message; return; }
+  closeAllModals();
+  renderMainContent();
+}
+
+
+// ─── Training ───
+async function renderTraining(el, prog, canManage){
+  const { data: docs } = await sb.from('training_docs')
+    .select('*').eq('program_id', prog.id).order('created_at', { ascending:false });
+  el.innerHTML = `
+    <div class="bo-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;">Training & Compliance Materials</div>
+        ${canManage ? `<button class="bo-btn bo-btn-primary" onclick="openTrainingModal('${prog.id}')">+ Add Material</button>` : ''}
+      </div>
+      ${(!docs || docs.length === 0) ? '<div style="color:rgba(255,255,255,0.4);font-size:13.5px;padding:14px 0;">No training materials posted yet.</div>' : `
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;">
+          ${docs.map(d => `
+            <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:12px;padding:18px;">
+              <div style="font-size:15px;font-weight:700;color:#fff;margin-bottom:6px;">${d.title}</div>
+              ${d.description ? `<div style="font-size:12.5px;color:rgba(255,255,255,0.5);margin-bottom:10px;line-height:1.55;">${d.description}</div>` : ''}
+              ${d.url ? `<a href="${d.url}" target="_blank" rel="noopener" style="font-size:12.5px;color:${prog.color};text-decoration:none;font-weight:600;">Open Document →</a>` : ''}
+              ${d.body ? `<div style="font-size:12.5px;color:rgba(255,255,255,0.6);line-height:1.55;margin-top:10px;white-space:pre-wrap;">${d.body}</div>` : ''}
+              ${canManage ? `<button class="bo-btn bo-btn-danger" style="margin-top:12px;padding:5px 12px;font-size:11.5px;" onclick="deleteTraining('${d.id}')">Delete</button>` : ''}
+            </div>`).join('')}
+        </div>`}
     </div>`;
-  body.appendChild(card);
 }
 
-// ═══════════════════════════════════════════════════════════
-// APPLICATION SUBMIT
-// ═══════════════════════════════════════════════════════════
-// Notification config — applications get emailed here on submit.
-// IMPORTANT: Formsubmit.co requires a ONE-TIME activation on first use.
-// On the very first submission, an activation email arrives at the address
-// below. Click the link in that email ONCE to activate forwarding.
-// Until that's done, all submissions will silently fail to reach the inbox.
-// As a safety net, we also build a mailto: link the user can click if the
-// automatic email fails — and we always save the application locally so
-// the owner can see it in the admin portal.
+function openTrainingModal(programId){
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:32px;color:#fff;margin-bottom:18px;letter-spacing:1px;">Add Training Material</h2>
+    <div class="form-group"><label class="form-label">Title *</label><input id="tr-title" class="form-input"/></div>
+    <div class="form-group"><label class="form-label">Short Description</label><input id="tr-desc" class="form-input"/></div>
+    <div class="form-group"><label class="form-label">Link URL (optional)</label><input id="tr-url" class="form-input" placeholder="https://…"/></div>
+    <div class="form-group"><label class="form-label">Body Text (optional)</label><textarea id="tr-body" class="form-input" rows="5"></textarea></div>
+    <div style="display:flex;gap:10px;margin-top:18px;">
+      <button class="bo-btn bo-btn-primary" onclick="saveTraining('${programId}')">Save</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="tr-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function saveTraining(programId){
+  const title = document.getElementById('tr-title').value.trim();
+  if(!title){ document.getElementById('tr-msg').innerHTML = '<span style="color:#F87171;">Title is required.</span>'; return; }
+  const { error } = await sb.from('training_docs').insert({
+    program_id: programId,
+    title,
+    description: document.getElementById('tr-desc').value.trim() || null,
+    url: document.getElementById('tr-url').value.trim() || null,
+    body: document.getElementById('tr-body').value.trim() || null
+  });
+  if(error){ document.getElementById('tr-msg').innerHTML = '<span style="color:#F87171;">'+error.message+'</span>'; return; }
+  closeAllModals();
+  renderMainContent();
+}
+
+async function deleteTraining(id){
+  if(!confirm('Delete this training material?')) return;
+  await sb.from('training_docs').delete().eq('id', id);
+  renderMainContent();
+}
+
+
+// ─── Contracts ───
+async function renderContracts(el, prog, canManage){
+  // Agents see their own; managers/owners see all for the program
+  let query = sb.from('contracts').select('*, profiles!contracts_user_id_fkey(full_name,email)').eq('program_id', prog.id);
+  if(!canManage) query = query.eq('user_id', currentUser.id);
+  const { data: contracts, error } = await query.order('created_at', { ascending:false });
+
+  el.innerHTML = `
+    <div class="bo-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;">${canManage ? 'All Contracts' : 'My Contracts'}</div>
+        ${canManage ? `<button class="bo-btn bo-btn-primary" onclick="openContractModal('${prog.id}')">+ Assign Contract</button>` : ''}
+      </div>
+      ${(!contracts || contracts.length === 0) ? '<div style="color:rgba(255,255,255,0.4);font-size:13.5px;padding:14px 0;">No contracts yet.</div>' : `
+        <table class="bo-table">
+          <thead><tr><th>${canManage ? 'Agent' : ''}</th><th>Title</th><th>Status</th><th>Link</th><th>${canManage ? 'Actions' : ''}</th></tr></thead>
+          <tbody>${contracts.map(c => `
+            <tr>
+              <td>${canManage ? (c.profiles?.full_name || c.profiles?.email || '—') : ''}</td>
+              <td>${c.title}</td>
+              <td><span style="font-size:11px;padding:3px 10px;border-radius:50px;background:${c.status==='signed'?'rgba(0,255,136,0.15)':'rgba(255,255,255,0.08)'};color:${c.status==='signed'?'#00FF88':'rgba(255,255,255,0.6)'};text-transform:uppercase;letter-spacing:1px;">${c.status}</span></td>
+              <td>${c.url ? `<a href="${c.url}" target="_blank" rel="noopener" style="color:${prog.color};">Open →</a>` : '—'}</td>
+              <td>${canManage ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="toggleContractStatus('${c.id}','${c.status}')">${c.status==='signed'?'Mark Pending':'Mark Signed'}</button> <button class="bo-btn bo-btn-danger" style="padding:5px 10px;font-size:11px;" onclick="deleteContract('${c.id}')">✕</button>` : ''}</td>
+            </tr>`).join('')}</tbody>
+        </table>`}
+    </div>`;
+}
+
+async function openContractModal(programId){
+  // load agents assigned to this program
+  const { data: agents } = await sb.from('profiles').select('id,full_name,email').contains('programs', [programId]).eq('active', true).order('full_name');
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:32px;color:#fff;margin-bottom:18px;letter-spacing:1px;">Assign Contract</h2>
+    <div class="form-group"><label class="form-label">Assign To Agent *</label>
+      <select id="ct-user" class="form-input" style="background:#1a1a1a;">
+        <option value="">Select agent…</option>
+        ${(agents || []).map(a => `<option value="${a.id}">${a.full_name || a.email}</option>`).join('')}
+      </select>
+    </div>
+    <div class="form-group"><label class="form-label">Contract Title *</label><input id="ct-title" class="form-input"/></div>
+    <div class="form-group"><label class="form-label">Document URL (Google Drive, Dropbox, etc.)</label><input id="ct-url" class="form-input" placeholder="https://…"/></div>
+    <div class="form-group"><label class="form-label">Status</label>
+      <select id="ct-status" class="form-input" style="background:#1a1a1a;">
+        <option value="pending">Pending</option>
+        <option value="signed">Signed</option>
+      </select>
+    </div>
+    <div class="form-group"><label class="form-label">Notes</label><textarea id="ct-notes" class="form-input" rows="2"></textarea></div>
+    <div style="display:flex;gap:10px;margin-top:18px;">
+      <button class="bo-btn bo-btn-primary" onclick="saveContract('${programId}')">Save</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="ct-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function saveContract(programId){
+  const user_id = document.getElementById('ct-user').value;
+  const title = document.getElementById('ct-title').value.trim();
+  const msg = document.getElementById('ct-msg');
+  if(!user_id || !title){ msg.innerHTML = '<span style="color:#F87171;">Agent and title are required.</span>'; return; }
+  const { error } = await sb.from('contracts').insert({
+    user_id, program_id: programId, title,
+    url: document.getElementById('ct-url').value.trim() || null,
+    status: document.getElementById('ct-status').value,
+    notes: document.getElementById('ct-notes').value.trim() || null
+  });
+  if(error){ msg.innerHTML = '<span style="color:#F87171;">'+error.message+'</span>'; return; }
+  closeAllModals();
+  renderMainContent();
+}
+
+async function toggleContractStatus(id, current){
+  const next = current === 'signed' ? 'pending' : 'signed';
+  await sb.from('contracts').update({ status: next }).eq('id', id);
+  renderMainContent();
+}
+
+async function deleteContract(id){
+  if(!confirm('Delete this contract?')) return;
+  await sb.from('contracts').delete().eq('id', id);
+  renderMainContent();
+}
+
+
+// ─── Codes & Credentials ───
+async function renderCodes(el, prog, canManage){
+  // Agents see only their own codes; managers/owners can see all codes for the program
+  let query = sb.from('agent_codes').select('*, profiles!agent_codes_user_id_fkey(full_name,email)').eq('program_id', prog.id);
+  if(!canManage) query = query.eq('user_id', currentUser.id);
+  const { data: codes, error } = await query.order('created_at', { ascending:false });
+
+  el.innerHTML = `
+    <div class="bo-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+        <div>
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;">${canManage ? 'All Agent Credentials' : 'My Credentials'}</div>
+          <div style="font-size:12px;color:rgba(255,255,255,0.4);margin-top:4px;">Unique per-agent portal logins, agent IDs, and API access keys for this program.</div>
+        </div>
+        ${canManage ? `<button class="bo-btn bo-btn-primary" onclick="openCodeModal('${prog.id}')">+ Add Credential</button>` : ''}
+      </div>
+      ${(!codes || codes.length === 0) ? '<div style="color:rgba(255,255,255,0.4);font-size:13.5px;padding:14px 0;">No credentials stored yet.</div>' : `
+        <table class="bo-table">
+          <thead><tr>${canManage ? '<th>Agent</th>' : ''}<th>Label</th><th>Value</th><th>Notes</th>${canManage ? '<th>Actions</th>' : ''}</tr></thead>
+          <tbody>${codes.map(c => `
+            <tr>
+              ${canManage ? `<td>${c.profiles?.full_name || c.profiles?.email || '—'}</td>` : ''}
+              <td style="font-weight:600;">${c.label}</td>
+              <td><code style="background:rgba(255,255,255,0.06);padding:3px 8px;border-radius:4px;font-family:monospace;font-size:12.5px;">${c.value}</code>
+                <button class="bo-btn bo-btn-ghost" style="padding:3px 10px;font-size:11px;margin-left:6px;" onclick="navigator.clipboard.writeText('${c.value.replace(/'/g,"\\'")}');this.textContent='✓'">Copy</button></td>
+              <td style="font-size:12.5px;color:rgba(255,255,255,0.5);">${c.notes || ''}</td>
+              ${canManage ? `<td><button class="bo-btn bo-btn-danger" style="padding:5px 10px;font-size:11px;" onclick="deleteCode('${c.id}')">✕</button></td>` : ''}
+            </tr>`).join('')}</tbody>
+        </table>`}
+    </div>`;
+}
+
+async function openCodeModal(programId){
+  const { data: agents } = await sb.from('profiles').select('id,full_name,email').contains('programs', [programId]).eq('active', true).order('full_name');
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:32px;color:#fff;margin-bottom:18px;letter-spacing:1px;">Add Credential</h2>
+    <div class="form-group"><label class="form-label">Agent *</label>
+      <select id="cd-user" class="form-input" style="background:#1a1a1a;">
+        <option value="">Select agent…</option>
+        ${(agents || []).map(a => `<option value="${a.id}">${a.full_name || a.email}</option>`).join('')}
+      </select>
+    </div>
+    <div class="form-group"><label class="form-label">Label * (e.g. "Portal Login", "Agent ID")</label><input id="cd-label" class="form-input"/></div>
+    <div class="form-group"><label class="form-label">Value * (the actual credential)</label><input id="cd-value" class="form-input"/></div>
+    <div class="form-group"><label class="form-label">Notes</label><textarea id="cd-notes" class="form-input" rows="2"></textarea></div>
+    <div style="display:flex;gap:10px;margin-top:18px;">
+      <button class="bo-btn bo-btn-primary" onclick="saveCode('${programId}')">Save</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="cd-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function saveCode(programId){
+  const user_id = document.getElementById('cd-user').value;
+  const label = document.getElementById('cd-label').value.trim();
+  const value = document.getElementById('cd-value').value.trim();
+  const msg = document.getElementById('cd-msg');
+  if(!user_id || !label || !value){ msg.innerHTML = '<span style="color:#F87171;">Agent, label and value are required.</span>'; return; }
+  const { error } = await sb.from('agent_codes').insert({
+    user_id, program_id: programId, label, value,
+    notes: document.getElementById('cd-notes').value.trim() || null
+  });
+  if(error){ msg.innerHTML = '<span style="color:#F87171;">'+error.message+'</span>'; return; }
+  closeAllModals();
+  renderMainContent();
+}
+
+async function deleteCode(id){
+  if(!confirm('Delete this credential?')) return;
+  await sb.from('agent_codes').delete().eq('id', id);
+  renderMainContent();
+}
+
+
+// ─── Leaderboard ───
+async function renderLeaderboard(el, prog){
+  // Aggregate enrollments by user for this program
+  const { data: enrollments } = await sb.from('enrollments').select('user_id,status,profiles!enrollments_user_id_fkey(full_name,email)').eq('program_id', prog.id);
+  const tally = {};
+  (enrollments || []).forEach(e => {
+    const uid = e.user_id;
+    if(!tally[uid]){
+      tally[uid] = {
+        name: e.profiles?.full_name || e.profiles?.email || 'Unknown',
+        total: 0, active: 0
+      };
+    }
+    tally[uid].total++;
+    if(e.status === 'active') tally[uid].active++;
+  });
+  const ranked = Object.values(tally).sort((a,b) => b.active - a.active || b.total - a.total);
+
+  el.innerHTML = `
+    <div class="bo-card">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;margin-bottom:16px;">🏆 Team Leaderboard</div>
+      ${ranked.length === 0 ? '<div style="color:rgba(255,255,255,0.4);font-size:13.5px;padding:14px 0;">No enrollments logged for this program yet.</div>' : `
+        <table class="bo-table">
+          <thead><tr><th style="width:60px;">Rank</th><th>Agent</th><th>Active</th><th>Total</th></tr></thead>
+          <tbody>${ranked.map((r,i) => `
+            <tr>
+              <td><span style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:${i===0?'#FFD700':i===1?'#C0C0C0':i===2?'#CD7F32':'rgba(255,255,255,0.4)'};">${i+1}</span></td>
+              <td style="font-weight:600;">${r.name}</td>
+              <td><span style="color:#00FF88;font-weight:700;">${r.active}</span></td>
+              <td>${r.total}</td>
+            </tr>`).join('')}</tbody>
+        </table>`}
+    </div>`;
+}
+
+
+// ─── Announcements ───
+async function renderAnnouncements(el, prog, canManage){
+  const { data: anns } = await sb.from('announcements')
+    .select('*, profiles!announcements_posted_by_fkey(full_name,email)')
+    .eq('program_id', prog.id)
+    .order('created_at', { ascending:false });
+
+  el.innerHTML = `
+    <div class="bo-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;">📢 Program Announcements</div>
+        ${canManage ? `<button class="bo-btn bo-btn-primary" onclick="openAnnModal('${prog.id}')">+ Post Announcement</button>` : ''}
+      </div>
+      ${(!anns || anns.length === 0) ? '<div style="color:rgba(255,255,255,0.4);font-size:13.5px;padding:14px 0;">No announcements yet.</div>' : `
+        ${anns.map(a => `
+          <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:12px;padding:18px;margin-bottom:12px;">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;">
+              <div style="flex:1;">
+                <div style="font-size:16px;font-weight:700;color:#fff;margin-bottom:4px;">${a.title}</div>
+                <div style="font-size:11.5px;color:rgba(255,255,255,0.35);margin-bottom:10px;">${a.profiles?.full_name || 'System'} · ${new Date(a.created_at).toLocaleString()}</div>
+                <div style="font-size:13.5px;color:rgba(255,255,255,0.7);line-height:1.65;white-space:pre-wrap;">${a.body}</div>
+              </div>
+              ${canManage ? `<button class="bo-btn bo-btn-danger" style="padding:5px 10px;font-size:11px;" onclick="deleteAnn('${a.id}')">✕</button>` : ''}
+            </div>
+          </div>`).join('')}`}
+    </div>`;
+}
+
+function openAnnModal(programId){
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:32px;color:#fff;margin-bottom:18px;letter-spacing:1px;">New Announcement</h2>
+    <div class="form-group"><label class="form-label">Title *</label><input id="ann-title" class="form-input"/></div>
+    <div class="form-group"><label class="form-label">Body *</label><textarea id="ann-body" class="form-input" rows="5"></textarea></div>
+    <div style="display:flex;gap:10px;margin-top:18px;">
+      <button class="bo-btn bo-btn-primary" onclick="saveAnn('${programId}')">Post</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="ann-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function saveAnn(programId){
+  const title = document.getElementById('ann-title').value.trim();
+  const body = document.getElementById('ann-body').value.trim();
+  const msg = document.getElementById('ann-msg');
+  if(!title || !body){ msg.innerHTML = '<span style="color:#F87171;">Title and body are required.</span>'; return; }
+  const { error } = await sb.from('announcements').insert({
+    program_id: programId, title, body, posted_by: currentUser.id
+  });
+  if(error){ msg.innerHTML = '<span style="color:#F87171;">'+error.message+'</span>'; return; }
+  closeAllModals();
+  renderMainContent();
+}
+
+async function deleteAnn(id){
+  if(!confirm('Delete this announcement?')) return;
+  await sb.from('announcements').delete().eq('id', id);
+  renderMainContent();
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// ADMIN VIEWS
+// ═══════════════════════════════════════════════════════════════
+
+// ─── Agents management ───
+async function renderAgents(el){
+  const role = currentProfile.role;
+  const isAdmin = role === 'owner' || role === 'admin';
+  const myPrograms = currentProfile.programs || [];
+
+  // Build query
+  let query = sb.from('profiles').select('*').order('full_name');
+  if(role === 'manager' && !isAdmin){
+    // Managers only see agents in their programs
+    query = query.overlaps('programs', myPrograms);
+  }
+  const { data: agents, error } = await query;
+
+  if(error){ el.innerHTML = `<div class="bo-card" style="color:#F87171;">Error loading agents: ${error.message}</div>`; return; }
+
+  el.innerHTML = `
+    <div style="margin-bottom:24px;">
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">👥 Agents</h1>
+      <p style="font-size:14px;color:rgba(255,255,255,0.5);">${isAdmin ? 'All agents across every program.' : 'Agents in your assigned programs.'}</p>
+    </div>
+    <div class="bo-card">
+      <div style="display:flex;justify-content:flex-end;margin-bottom:14px;">
+        <button class="bo-btn bo-btn-primary" onclick="openAgentModal()">+ Add Agent</button>
+      </div>
+      ${(!agents || agents.length === 0) ? '<div style="color:rgba(255,255,255,0.4);font-size:13.5px;padding:14px 0;">No agents yet.</div>' : `
+        <table class="bo-table">
+          <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Programs</th><th>Status</th><th>Actions</th></tr></thead>
+          <tbody>${agents.map(a => `
+            <tr>
+              <td style="font-weight:600;">${a.full_name || '—'}</td>
+              <td style="color:rgba(255,255,255,0.6);">${a.email}</td>
+              <td><span class="role-badge role-${a.role}" style="padding:3px 10px;border-radius:50px;font-size:10.5px;font-weight:700;letter-spacing:1.5px;background:${roleBadgeBg(a.role)};color:${roleBadgeColor(a.role)};">${a.role.toUpperCase()}</span></td>
+              <td style="font-size:11.5px;">${(a.programs || []).map(pid => { const p = allPrograms.find(x=>x.id===pid); return p ? `<span style="background:${p.color}22;color:${p.color};padding:2px 8px;border-radius:50px;margin-right:4px;font-weight:600;">${p.icon} ${p.name.split(' ')[0]}</span>` : ''; }).join('') || '<span style="color:rgba(255,255,255,0.3);">None</span>'}</td>
+              <td>${a.active ? '<span style="color:#00FF88;font-size:12px;">● Active</span>' : '<span style="color:rgba(255,255,255,0.4);font-size:12px;">○ Inactive</span>'}</td>
+              <td>
+                <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="openAgentModal('${a.id}')">Edit</button>
+                ${(isAdmin || (role === 'manager' && a.id !== currentProfile.id)) ? `<button class="bo-btn bo-btn-danger" style="padding:5px 10px;font-size:11px;" onclick="toggleAgentActive('${a.id}', ${a.active})">${a.active ? 'Deactivate' : 'Activate'}</button>` : ''}
+              </td>
+            </tr>`).join('')}</tbody>
+        </table>`}
+    </div>`;
+}
+
+function roleBadgeBg(r){ return {owner:'rgba(255,215,0,0.15)',admin:'rgba(255,0,128,0.15)',manager:'rgba(0,198,255,0.15)',agent:'rgba(0,255,136,0.12)'}[r] || 'rgba(255,255,255,0.1)'; }
+function roleBadgeColor(r){ return {owner:'#FFD700',admin:'#FF0080',manager:'#00C6FF',agent:'#00FF88'}[r] || '#fff'; }
+
+function openAgentModal(editId){
+  const isEdit = !!editId;
+  const role = currentProfile.role;
+  const isAdmin = role === 'owner' || role === 'admin';
+  const managerPrograms = currentProfile.programs || [];
+  // Managers can only toggle programs they themselves have
+  const availablePrograms = isAdmin ? allPrograms : allPrograms.filter(p => managerPrograms.includes(p.id));
+
+  let existing = null;
+  if(isEdit){
+    // Need to fetch the profile
+    sb.from('profiles').select('*').eq('id', editId).single().then(({data}) => {
+      existing = data;
+      renderAgentModalUI(existing, editId, availablePrograms, isAdmin);
+    });
+    return;
+  }
+  renderAgentModalUI(null, null, availablePrograms, isAdmin);
+}
+
+function renderAgentModalUI(existing, editId, availablePrograms, isAdmin){
+  const isEdit = !!editId;
+  const e = existing || {};
+  const programCheckboxes = availablePrograms.map(p => `
+    <label class="prog-checkbox-row">
+      <input type="checkbox" value="${p.id}" ${(e.programs || []).includes(p.id) ? 'checked' : ''}/>
+      <span style="font-size:18px;">${p.icon}</span>
+      <span style="flex:1;">${p.name}</span>
+    </label>`).join('');
+
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:32px;color:#fff;margin-bottom:18px;letter-spacing:1px;">${isEdit ? 'Edit Agent' : 'Add New Agent'}</h2>
+    <div class="form-group"><label class="form-label">Full Name *</label><input id="ag-name" class="form-input" value="${e.full_name || ''}"/></div>
+    <div class="form-group"><label class="form-label">Email *</label><input id="ag-email" type="email" class="form-input" value="${e.email || ''}" ${isEdit ? 'readonly style="opacity:0.6;cursor:not-allowed;"' : ''}/></div>
+    ${!isEdit ? `<div class="form-group"><label class="form-label">Initial Password *</label><input id="ag-password" type="text" class="form-input" placeholder="Pick a strong password — the agent can change it later"/></div>` : ''}
+    <div class="form-group"><label class="form-label">Phone</label><input id="ag-phone" class="form-input" value="${e.phone || ''}"/></div>
+    ${isAdmin ? `<div class="form-group"><label class="form-label">Role *</label>
+      <select id="ag-role" class="form-input" style="background:#1a1a1a;">
+        <option value="agent" ${e.role==='agent'?'selected':''}>Agent</option>
+        <option value="manager" ${e.role==='manager'?'selected':''}>Manager</option>
+        <option value="admin" ${e.role==='admin'?'selected':''}>Admin</option>
+        <option value="owner" ${e.role==='owner'?'selected':''}>Owner</option>
+      </select></div>` : '<input type="hidden" id="ag-role" value="agent"/>'}
+    <div class="form-group">
+      <label class="form-label">Programs — check all that this user should access</label>
+      <div>${programCheckboxes || '<div style="color:rgba(255,255,255,0.4);font-size:12.5px;">No programs available.</div>'}</div>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:18px;">
+      <button class="bo-btn bo-btn-primary" onclick="saveAgent('${editId || ''}')">${isEdit ? 'Save Changes' : 'Create Agent'}</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="ag-msg" style="margin-top:12px;font-size:13px;line-height:1.6;"></div>
+    ${!isEdit ? `<div style="margin-top:14px;padding:12px;background:rgba(0,198,255,0.05);border:1px solid rgba(0,198,255,0.15);border-radius:8px;font-size:12px;color:rgba(255,255,255,0.6);line-height:1.55;">💡 After creating the agent, email them their login details. They'll sign in at <strong style="color:#fff;">${window.location.host}</strong> with the email and password above.</div>` : ''}`;
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function saveAgent(editId){
+  const full_name = document.getElementById('ag-name').value.trim();
+  const email = document.getElementById('ag-email').value.trim().toLowerCase();
+  const phone = document.getElementById('ag-phone').value.trim();
+  const role = document.getElementById('ag-role').value;
+  const programs = Array.from(document.querySelectorAll('#modal-box input[type=checkbox]:checked')).map(c => c.value);
+  const msg = document.getElementById('ag-msg');
+
+  if(!full_name || !email){ msg.innerHTML = '<span style="color:#F87171;">Name and email are required.</span>'; return; }
+
+  if(editId){
+    // Update existing profile
+    const { error } = await sb.from('profiles').update({
+      full_name, phone: phone || null, role, programs, updated_at: new Date().toISOString()
+    }).eq('id', editId);
+    if(error){ msg.innerHTML = '<span style="color:#F87171;">'+error.message+'</span>'; return; }
+    closeAllModals();
+    renderMainContent();
+    return;
+  }
+
+  // Create new agent via Supabase Auth signup
+  const password = document.getElementById('ag-password').value;
+  if(!password || password.length < 6){ msg.innerHTML = '<span style="color:#F87171;">Password must be at least 6 characters.</span>'; return; }
+
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Creating account…</span>';
+  const { data, error } = await sb.auth.signUp({
+    email, password,
+    options: { data: { full_name, role, programs } }
+  });
+  if(error){ msg.innerHTML = '<span style="color:#F87171;">'+error.message+'</span>'; return; }
+
+  // After signup, the auth trigger creates a profile row. We update it with our full data.
+  // But the current session will be the NEW user, not us. We need to sign back in as ourselves.
+  // Workaround: use RPC or update via service role. For now, we refresh the auth state carefully.
+  // Actually signUp doesn't change the current session unless autoConfirm is on. If auto-confirm
+  // is enabled in Supabase settings, the new user IS signed in. We handle both cases:
+  const { data: sessionData } = await sb.auth.getSession();
+  const currentAuthId = sessionData?.session?.user?.id;
+
+  if(currentAuthId && currentAuthId !== currentUser.id){
+    // We got signed in as the new user. Sign out and tell admin to sign back in.
+    await sb.auth.signOut();
+    msg.innerHTML = `<div style="color:#FFD700;background:rgba(255,215,0,0.08);padding:12px;border-radius:8px;border:1px solid rgba(255,215,0,0.2);">⚠️ The new agent was created, but because of how Supabase signup works, you were briefly signed in as them and then signed out. <strong>Please sign back in with your own credentials</strong> to continue managing agents.<br><br>To avoid this in the future: ask your developer to enable a server-side "admin invite" function.</div>`;
+    setTimeout(() => { doLogout(); }, 4000);
+    return;
+  }
+
+  // Try to update the new profile to make sure programs/role stuck
+  if(data.user){
+    await sb.from('profiles').update({
+      full_name, phone: phone || null, role, programs
+    }).eq('id', data.user.id);
+  }
+
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Agent created. Email them their login details.</span>';
+  setTimeout(() => { closeAllModals(); renderMainContent(); }, 1500);
+}
+
+async function toggleAgentActive(id, currentlyActive){
+  await sb.from('profiles').update({ active: !currentlyActive }).eq('id', id);
+  renderMainContent();
+}
+
+
+// ─── Applications ───
+async function renderApplications(el){
+  const { data: apps, error } = await sb.from('applications').select('*').order('created_at', { ascending:false });
+  if(error){ el.innerHTML = `<div class="bo-card" style="color:#F87171;">Error: ${error.message}</div>`; return; }
+
+  el.innerHTML = `
+    <div style="margin-bottom:24px;">
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">📝 Applications</h1>
+      <p style="font-size:14px;color:rgba(255,255,255,0.5);">Agent applications submitted via the careers page.</p>
+    </div>
+    <div class="bo-card">
+      ${(!apps || apps.length === 0) ? '<div style="color:rgba(255,255,255,0.4);font-size:13.5px;padding:14px 0;">No applications yet.</div>' : `
+        ${apps.map(a => { const d = a.data || {}; return `
+          <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:12px;padding:20px;margin-bottom:12px;">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
+              <div>
+                <div style="font-size:16px;font-weight:700;color:#fff;">${d.fname || ''} ${d.lname || ''}</div>
+                <div style="font-size:12.5px;color:rgba(255,255,255,0.55);">${d.email || ''} · ${d.phone || ''}</div>
+                <div style="font-size:12px;color:rgba(255,255,255,0.35);margin-top:3px;">${d.city || ''}, ${d.state || ''} · ${new Date(a.created_at).toLocaleString()}</div>
+              </div>
+              <span style="background:rgba(255,107,0,0.15);color:#FF6B00;padding:4px 12px;border-radius:50px;font-size:11px;font-weight:700;">${d.program || 'Any'}</span>
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;font-size:12px;color:rgba(255,255,255,0.55);">
+              <div><strong style="color:#FFD700;">Type:</strong> ${d.type || '—'}</div>
+              <div><strong style="color:#FFD700;">Start:</strong> ${d.start || '—'}</div>
+              <div><strong style="color:#FFD700;">Hours:</strong> ${d.hours || '—'}</div>
+              <div><strong style="color:#FFD700;">Experience:</strong> ${d.exp || '—'}</div>
+              <div><strong style="color:#FFD700;">Field Sales:</strong> ${d.d2d || '—'}</div>
+              <div><strong style="color:#FFD700;">Income Goal:</strong> ${d.income || '—'}</div>
+            </div>
+            ${d.why ? `<div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.06);font-size:12.5px;color:rgba(255,255,255,0.6);line-height:1.55;"><strong style="color:#fff;">Why they fit:</strong> ${d.why}</div>` : ''}
+            <div style="margin-top:12px;display:flex;gap:8px;">
+              <button class="bo-btn bo-btn-primary" style="padding:6px 14px;font-size:12px;" onclick="createAgentFromApp('${a.id}', ${JSON.stringify(d).replace(/"/g,'&quot;')})">Convert to Agent</button>
+              <button class="bo-btn bo-btn-danger" style="padding:6px 12px;font-size:12px;" onclick="deleteApplication('${a.id}')">Delete</button>
+            </div>
+          </div>`; }).join('')}`}
+    </div>`;
+}
+
+function createAgentFromApp(appId, dataStr){
+  const d = typeof dataStr === 'string' ? JSON.parse(dataStr.replace(/&quot;/g,'"')) : dataStr;
+  openAgentModal();
+  setTimeout(() => {
+    document.getElementById('ag-name').value = (d.fname || '') + ' ' + (d.lname || '');
+    document.getElementById('ag-email').value = d.email || '';
+    document.getElementById('ag-phone').value = d.phone || '';
+  }, 200);
+}
+
+async function deleteApplication(id){
+  if(!confirm('Delete this application?')) return;
+  await sb.from('applications').delete().eq('id', id);
+  renderMainContent();
+}
+
+
+// ─── Programs Admin (view-only listing; programs are seeded via SQL) ───
+async function renderProgramsAdmin(el){
+  el.innerHTML = `
+    <div style="margin-bottom:24px;">
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">🎯 Programs</h1>
+      <p style="font-size:14px;color:rgba(255,255,255,0.5);">The 3 program back offices. To add or rename programs, edit the <code style="background:rgba(255,255,255,0.08);padding:2px 6px;border-radius:4px;">programs</code> table in Supabase directly.</p>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;">
+      ${allPrograms.map(p => `
+        <div style="background:linear-gradient(135deg,${p.color}15,${p.color}05);border:1px solid ${p.color}40;border-radius:14px;padding:24px;">
+          <div style="font-size:40px;margin-bottom:12px;">${p.icon}</div>
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:${p.color};margin-bottom:6px;letter-spacing:1px;">${p.name}</div>
+          <div style="font-size:13px;color:rgba(255,255,255,0.5);line-height:1.6;">${p.description || ''}</div>
+          <div style="margin-top:10px;font-size:11px;color:rgba(255,255,255,0.35);font-family:monospace;">id: ${p.id}</div>
+        </div>`).join('')}
+    </div>`;
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// ACCOUNT — My Profile + Change Password
+// ═══════════════════════════════════════════════════════════════
+function renderMyProfile(){
+  const p = currentProfile;
+  const progs = (p.programs || []).map(pid => { const x = allPrograms.find(y=>y.id===pid); return x ? `<span style="background:${x.color}22;color:${x.color};padding:4px 12px;border-radius:50px;margin-right:6px;font-weight:600;font-size:12px;">${x.icon} ${x.name}</span>` : ''; }).join('');
+  return `
+    <div style="margin-bottom:24px;">
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">👤 My Profile</h1>
+    </div>
+    <div class="bo-card" style="max-width:600px;">
+      <div style="margin-bottom:16px;"><strong style="color:rgba(255,255,255,0.5);font-size:11px;letter-spacing:2px;text-transform:uppercase;">Name</strong><div style="font-size:16px;color:#fff;margin-top:3px;">${p.full_name || '—'}</div></div>
+      <div style="margin-bottom:16px;"><strong style="color:rgba(255,255,255,0.5);font-size:11px;letter-spacing:2px;text-transform:uppercase;">Email</strong><div style="font-size:16px;color:#fff;margin-top:3px;">${p.email}</div></div>
+      <div style="margin-bottom:16px;"><strong style="color:rgba(255,255,255,0.5);font-size:11px;letter-spacing:2px;text-transform:uppercase;">Role</strong><div style="font-size:16px;color:${roleBadgeColor(p.role)};margin-top:3px;font-weight:700;">${p.role.toUpperCase()}</div></div>
+      <div style="margin-bottom:16px;"><strong style="color:rgba(255,255,255,0.5);font-size:11px;letter-spacing:2px;text-transform:uppercase;">Programs</strong><div style="margin-top:6px;">${progs || '<span style="color:rgba(255,255,255,0.4);">None assigned</span>'}</div></div>
+      <div><strong style="color:rgba(255,255,255,0.5);font-size:11px;letter-spacing:2px;text-transform:uppercase;">Phone</strong><div style="font-size:16px;color:#fff;margin-top:3px;">${p.phone || '—'}</div></div>
+    </div>`;
+}
+
+function renderChangePassword(){
+  return `
+    <div style="margin-bottom:24px;">
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">🔐 Change Password</h1>
+    </div>
+    <div class="bo-card" style="max-width:480px;">
+      <div class="form-group"><label class="form-label">New Password</label><input id="pw-new" type="password" class="form-input"/></div>
+      <div class="form-group"><label class="form-label">Confirm New Password</label><input id="pw-confirm" type="password" class="form-input"/></div>
+      <button class="bo-btn bo-btn-primary" onclick="changePassword()">Update Password</button>
+      <div id="pw-msg" style="margin-top:14px;font-size:13px;"></div>
+    </div>`;
+}
+
+async function changePassword(){
+  const nw = document.getElementById('pw-new').value;
+  const cf = document.getElementById('pw-confirm').value;
+  const msg = document.getElementById('pw-msg');
+  if(nw.length < 6){ msg.innerHTML = '<span style="color:#F87171;">Password must be at least 6 characters.</span>'; return; }
+  if(nw !== cf){ msg.innerHTML = '<span style="color:#F87171;">Passwords do not match.</span>'; return; }
+  const { error } = await sb.auth.updateUser({ password: nw });
+  if(error){ msg.innerHTML = '<span style="color:#F87171;">'+error.message+'</span>'; return; }
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Password updated.</span>';
+  document.getElementById('pw-new').value = '';
+  document.getElementById('pw-confirm').value = '';
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// MODALS
+// ═══════════════════════════════════════════════════════════════
+function closeAllModals(){ document.getElementById('modal-backdrop').style.display = 'none'; }
+
+
+// ═══════════════════════════════════════════════════════════════
+// APPLICATION SUBMIT (PUBLIC — writes to Supabase)
+// ═══════════════════════════════════════════════════════════════
 const CSI_NOTIFY_EMAIL = 'circlesolutionstx@gmail.com';
 const CSI_NOTIFY_PHONE = '4695006575';
 
-function submitApplication(){
-  const fname = document.getElementById('app-fname').value.trim();
-  const lname = document.getElementById('app-lname').value.trim();
-  const phone = document.getElementById('app-phone').value.trim();
-  const email = document.getElementById('app-email').value.trim();
-  const city = document.getElementById('app-city').value.trim();
-  const state = document.getElementById('app-state').value;
-  const program = document.getElementById('app-program').value;
-  const type = document.getElementById('app-type').value;
-  const start = document.getElementById('app-start').value;
-  const hours = document.getElementById('app-hours').value;
-  const exp = document.getElementById('app-exp').value;
-  const d2d = document.getElementById('app-d2d').value;
-  const income = document.getElementById('app-income').value;
-  const mgmt = document.getElementById('app-mgmt').value;
-  const rejection = document.getElementById('app-rejection').value;
-  const motivate = document.getElementById('app-motivate').value;
-  const source = document.getElementById('app-source').value;
-  const why = document.getElementById('app-why').value;
-  const days = Array.from(document.querySelectorAll('#days-wrap input:checked')).map(c=>c.value);
-  const industries = Array.from(document.querySelectorAll('#industries-wrap input:checked')).map(c=>c.value);
+async function submitApplication(){
+  const get = id => (document.getElementById(id)?.value || '').trim();
+  const fname = get('app-fname');
+  const lname = get('app-lname');
+  const phone = get('app-phone');
+  const email = get('app-email');
+  const city = get('app-city');
+  const state = get('app-state');
+  const program = get('app-program');
+  const type = get('app-type');
+  const start = get('app-start');
+  const hours = get('app-hours');
+  const exp = get('app-exp');
+  const d2d = get('app-d2d');
+  const income = get('app-income');
+  const mgmt = get('app-mgmt');
+  const rejection = get('app-rejection');
+  const motivate = get('app-motivate');
+  const source = get('app-source');
+  const why = get('app-why');
+  const days = Array.from(document.querySelectorAll('#days-wrap input:checked')).map(c => c.value);
+  const industries = Array.from(document.querySelectorAll('#industries-wrap input:checked')).map(c => c.value);
   const err = document.getElementById('app-error');
   if(!fname||!lname||!phone||!email||!city||!state||!program||!type||!start||!hours||!exp||!d2d||!income||!mgmt||!rejection||!motivate||!source||days.length===0){
-    err.style.display='block';window.scrollTo({top:0,behavior:'smooth'});return;
+    err.style.display='block'; window.scrollTo({top:0, behavior:'smooth'}); return;
   }
   err.style.display='none';
+
   const appData = {
-    id:Date.now(),submitted:new Date().toLocaleString(),
-    fname,lname,phone,email,city,state,program,type,start,hours,days,exp,industries,d2d,income,mgmt,rejection,motivate,source,why
+    submitted: new Date().toLocaleString(),
+    fname, lname, phone, email, city, state, program, type, start, hours, days, exp, industries, d2d, income, mgmt, rejection, motivate, source, why
   };
-  // Always save locally first — this is the source of truth in the admin portal.
-  const apps = getStore('applications',[]);
-  apps.unshift(appData);
-  setStore('applications',apps);
 
-  // Show success UI immediately — the applicant's record is safe regardless of email status.
-  document.getElementById('app-form-wrap').style.display='none';
-  document.getElementById('app-success').style.display='block';
-  window.scrollTo({top:0,behavior:'smooth'});
+  // Save to Supabase
+  const { error: saveErr } = await sb.from('applications').insert({ data: appData });
+  if(saveErr){ console.error('Application save error:', saveErr); }
 
-  // Fire-and-forget email notification (with fallback).
+  document.getElementById('app-form-wrap').style.display = 'none';
+  document.getElementById('app-success').style.display = 'block';
+  window.scrollTo({top:0, behavior:'smooth'});
+
   sendApplicationEmail(appData);
 }
 
 function buildApplicationEmailBody(data){
-  // Plain-text email body for mailto: fallback.
-  const L = (label,val) => label + ': ' + (val || '(none)');
+  const L = (label, val) => label + ': ' + (val || '(none)');
   return [
-    'New CSI Agent Application',
-    '─────────────────────────',
+    'New CSI Agent Application','─────────────────────────',
     L('Name', data.fname + ' ' + data.lname),
     L('Phone', data.phone),
     L('Email', data.email),
-    L('Location', data.city + ', ' + data.state),
-    '',
+    L('Location', data.city + ', ' + data.state),'',
     L('Program of Interest', data.program),
     L('Position Type', data.type),
     L('Can Start', data.start),
     L('Days Available', (data.days || []).join(', ')),
-    L('Hours/Week', data.hours),
-    '',
+    L('Hours/Week', data.hours),'',
     L('Sales Experience', data.exp),
     L('Industries', (data.industries || []).join(', ')),
     L('Field Sales Background', data.d2d),
@@ -2495,17 +2883,13 @@ function buildApplicationEmailBody(data){
     L('Management Interest', data.mgmt),
     L('Handles Rejection', data.rejection),
     L('Motivation', data.motivate),
-    L('Heard About Us Via', data.source),
-    '',
+    L('Heard About Us Via', data.source),'',
     L('Additional Notes', data.why),
     L('Submitted At', data.submitted)
   ].join('\n');
 }
 
 function showEmailFallback(data){
-  // If automatic email fails, give the applicant a one-click option to open
-  // their mail client with the application pre-filled. This guarantees the
-  // owner receives it even if formsubmit.co isn't activated yet.
   const success = document.getElementById('app-success');
   if(!success || document.getElementById('app-email-fallback')) return;
   const subject = encodeURIComponent('CSI Agent Application — ' + data.fname + ' ' + data.lname);
@@ -2521,24 +2905,15 @@ function showEmailFallback(data){
 }
 
 function sendApplicationEmail(data){
-  // Uses Formsubmit.co — free, no signup required.
-  // FIRST-TIME SETUP: The very first submission triggers an activation email
-  // at circlesolutionstx@gmail.com — the owner must click the confirmation
-  // link once. Until that happens, submissions return an "activation required"
-  // response and DO NOT reach the inbox. We detect that case and show a
-  // mailto: fallback button on the success screen.
   const endpoint = 'https://formsubmit.co/ajax/' + CSI_NOTIFY_EMAIL;
   const payload = {
     _subject: '🔔 CSI Agent Application — ' + data.fname + ' ' + data.lname,
-    _template: 'table',
-    _captcha: 'false',
+    _template: 'table', _captcha: 'false',
     'Applicant Name': data.fname + ' ' + data.lname,
-    'Phone': data.phone,
-    'Email': data.email,
+    'Phone': data.phone, 'Email': data.email,
     'Location': data.city + ', ' + data.state,
     'Program of Interest': data.program,
-    'Position Type': data.type,
-    'Can Start': data.start,
+    'Position Type': data.type, 'Can Start': data.start,
     'Days Available': (data.days || []).join(', '),
     'Hours/Week': data.hours,
     'Sales Experience': data.exp,
@@ -2553,807 +2928,57 @@ function sendApplicationEmail(data){
     'Submitted At': data.submitted,
     'Contact Phone On File': CSI_NOTIFY_PHONE
   };
-  const timeoutMs = 8000;
   const controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
-  const timer = controller ? setTimeout(()=>controller.abort(), timeoutMs) : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 8000) : null;
   try {
     fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      method:'POST',
+      headers:{ 'Content-Type':'application/json', 'Accept':'application/json' },
       body: JSON.stringify(payload),
       signal: controller ? controller.signal : undefined
     }).then(r => {
       if(timer) clearTimeout(timer);
-      if(!r.ok){
-        console.error('CSI notification HTTP error:', r.status, r.statusText);
-        showEmailFallback(data);
-        return null;
-      }
+      if(!r.ok){ showEmailFallback(data); return null; }
       return r.json();
     }).then(res => {
       if(!res) return;
-      // Formsubmit returns { success: "true" | "false", message: "..." }
-      const okFlag = res.success === true || res.success === 'true';
-      if(okFlag){
-        console.log('CSI application notification sent:', res);
-      } else {
-        console.error('CSI notification not delivered (likely needs activation):', res);
-        showEmailFallback(data);
-      }
-    }).catch(e => {
-      if(timer) clearTimeout(timer);
-      console.error('CSI notification failed:', e);
-      showEmailFallback(data);
-    });
-  } catch(e) {
-    if(timer) clearTimeout(timer);
-    console.error('CSI notification error:', e);
-    showEmailFallback(data);
-  }
+      if(res.success !== true && res.success !== 'true'){ showEmailFallback(data); }
+    }).catch(() => { if(timer) clearTimeout(timer); showEmailFallback(data); });
+  } catch(e){ if(timer) clearTimeout(timer); showEmailFallback(data); }
 }
 
-// ═══════════════════════════════════════════════════════════
-// ADMIN
-// ═══════════════════════════════════════════════════════════
-function renderAdminPanel(){
-  if(!currentAgent||(currentAgent.role!=='admin'&&currentAgent.role!=='owner')){showPage('login');return;}
-  document.getElementById('admin-badge-name').textContent = currentAgent.name;
-  showAdminTab('agents');
-}
-
-function showAdminTab(tab){
-  ['agents','applications','announcements','links','training','welcome','campaigns'].forEach(t=>{
-    const b = document.getElementById('tab-'+t);
-    const c = document.getElementById('admin-tab-'+t);
-    if(b){b.classList.remove('active-reliant');}
-    if(c) c.style.display='none';
-  });
-  document.getElementById('tab-'+tab).classList.add('active-reliant');
-  document.getElementById('admin-tab-'+tab).style.display='block';
-  if(tab==='agents') renderAgentsTable();
-  if(tab==='applications') renderApplications();
-  if(tab==='announcements') renderAnnouncementsAdmin();
-  if(tab==='links') renderLinksAdmin();
-  if(tab==='training') renderTrainingAdmin();
-  if(tab==='welcome') document.getElementById('welcome-msg-input').value = getStore('welcome_msg',DEFAULT_WELCOME);
-  if(tab==='campaigns') showCampAdminTab('reliant');
-}
-
-function renderAgentsTable(){
-  const agents = getAgents();
-  const body = document.getElementById('admin-agents-tbody');
-  body.innerHTML = agents.map(a=>`
-    <tr class="agent-row ${a.active?'':'inactive-row'}">
-      <td>
-        <div class="td-name">
-          <div class="agent-avatar">${a.name.split(' ').map(n=>n[0]).join('').toUpperCase().slice(0,2)}</div>
-          <div><div class="agent-name-text">${a.name}</div><div class="agent-email-text">${a.email}</div></div>
-        </div>
-      </td>
-      <td><span class="role-badge role-${a.role}">${a.role.toUpperCase()}</span></td>
-      <td><span class="pass-code">${a.password}</span></td>
-      <td><span class="status-badge ${a.active?'status-active':'status-inactive'}">${a.active?'Active':'Inactive'}</span></td>
-      <td class="td-joined">${a.joined}</td>
-      <td><div class="td-actions">
-        <button class="btn-toggle ${a.active?'btn-deactivate':'btn-activate'}" onclick="toggleAgent(${a.id})">${a.active?'Deactivate':'Activate'}</button>
-        <button class="btn-edit-agent" onclick="openAgentModal(${a.id})">Edit</button>
-        <button class="btn-delete-agent" onclick="deleteAgent(${a.id})">✕</button>
-      </div></td>
-    </tr>`).join('');
-}
-
-function toggleAgent(id){
-  const a = getAgents();
-  const ag = a.find(x=>x.id===id);
-  if(ag){ag.active=!ag.active;saveAgents(a);renderAgentsTable();}
-}
-
-function deleteAgent(id){
-  if(!confirm('Delete this agent?')) return;
-  let a = getAgents().filter(x=>x.id!==id);
-  saveAgents(a);renderAgentsTable();
-}
-
-function openAgentModal(id){
-  const agents = getAgents();
-  const a = id?agents.find(x=>x.id===id):null;
-  document.getElementById('modal-box').innerHTML = `
-    <h3 style="font-family:'Bebas Neue',sans-serif;font-size:32px;color:#fff;margin-bottom:22px;">${a?'EDIT AGENT':'ADD AGENT'}</h3>
-    <div class="form-group"><label class="form-label">Full Name</label><input id="mdl-name" class="form-input" value="${a?a.name:''}"/></div>
-    <div class="form-group"><label class="form-label">Email</label><input id="mdl-email" class="form-input" type="email" value="${a?a.email:''}"/></div>
-    <div class="form-group"><label class="form-label">Password</label><input id="mdl-pass" class="form-input" value="${a?a.password:''}"/></div>
-    <div class="form-group"><label class="form-label">Role</label>
-      <select id="mdl-role" class="form-input" style="background:#1a1a1a;">
-        <option value="agent"${a&&a.role==='agent'?' selected':''}>Agent</option>
-        <option value="trainer"${a&&a.role==='trainer'?' selected':''}>Trainer</option>
-        <option value="manager"${a&&a.role==='manager'?' selected':''}>Manager</option>
-        <option value="admin"${a&&a.role==='admin'?' selected':''}>Admin</option>
-      </select>
-    </div>
-    <div style="display:flex;gap:10px;margin-top:8px;">
-      <button onclick="saveAgent(${a?a.id:'null'})" class="btn-fire" style="padding:12px 28px;flex:1;">Save</button>
-      <button onclick="closeAllModals()" class="btn-ghost" style="padding:11px 24px;font-size:14px;">Cancel</button>
-    </div>`;
-  document.getElementById('modal-backdrop').style.display='flex';
-}
-function saveAgent(id){
-  const agents = getAgents();
-  const name = document.getElementById('mdl-name').value.trim();
-  const email = document.getElementById('mdl-email').value.trim();
-  const password = document.getElementById('mdl-pass').value;
-  const role = document.getElementById('mdl-role').value;
-  if(!name||!email||!password){alert('All fields required');return;}
-  if(id){
-    const a = agents.find(x=>x.id===id);
-    if(a){a.name=name;a.email=email;a.password=password;a.role=role;}
-  } else {
-    agents.push({id:Date.now(),name,email,password,role,active:true,joined:new Date().toISOString().slice(0,10)});
-  }
-  saveAgents(agents);closeAllModals();renderAgentsTable();
-}
-
-function renderApplications(){
-  const apps = getStore('applications',[]);
-  const el = document.getElementById('applications-list');
-  if(apps.length===0){el.innerHTML = '<p style="color:rgba(255,255,255,0.4);font-size:14px;">No applications received yet.</p>';return;}
-  el.innerHTML = apps.map(a=>`
-    <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:12px;padding:20px;margin-bottom:12px;">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;flex-wrap:wrap;gap:8px;">
-        <div>
-          <div style="font-size:17px;font-weight:700;color:#fff;">${a.fname} ${a.lname}</div>
-          <div style="font-size:13px;color:rgba(255,255,255,0.5);">${a.email} · ${a.phone}</div>
-          <div style="font-size:12.5px;color:rgba(255,255,255,0.35);margin-top:3px;">${a.city}, ${a.state} · Submitted ${a.submitted}</div>
-        </div>
-        <span class="tag tag-new">${a.program||'Any program'}</span>
-      </div>
-      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;font-size:12.5px;color:rgba(255,255,255,0.55);">
-        <div><strong style="color:#FF6B00;">Type:</strong> ${a.type}</div>
-        <div><strong style="color:#FF6B00;">Start:</strong> ${a.start}</div>
-        <div><strong style="color:#FF6B00;">Hours:</strong> ${a.hours}</div>
-        <div><strong style="color:#FF6B00;">Experience:</strong> ${a.exp}</div>
-        <div><strong style="color:#FF6B00;">Field Sales:</strong> ${a.d2d}</div>
-        <div><strong style="color:#FF6B00;">Income Goal:</strong> ${a.income}</div>
-      </div>
-      ${a.why?`<div style="margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,0.06);font-size:13px;color:rgba(255,255,255,0.6);line-height:1.6;"><strong style="color:#fff;">Why they're a fit:</strong> ${a.why}</div>`:''}
-      <button onclick="deleteApplication(${a.id})" style="margin-top:14px;background:rgba(239,68,68,0.12);color:#F87171;border:none;border-radius:50px;padding:6px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Outfit',sans-serif;">Delete</button>
-    </div>`).join('');
-}
-function deleteApplication(id){
-  if(!confirm('Delete this application?')) return;
-  const apps = getStore('applications',[]).filter(a=>a.id!==id);
-  setStore('applications',apps);renderApplications();
-}
-
-function renderAnnouncementsAdmin(){
-  const ann = getStore('announcements',DEFAULT_ANNOUNCEMENTS);
-  const el = document.getElementById('admin-announcements-list');
-  el.innerHTML = ann.map(a=>`
-    <div class="ann ${a.color}" style="margin-bottom:14px;position:relative;">
-      <div class="ann-date">${a.date}</div>
-      <div class="ann-title">${a.title}</div>
-      <div class="ann-body">${a.body}</div>
-      <div style="margin-top:10px;display:flex;gap:8px;">
-        <button class="btn-edit-agent" onclick="openAnnounceModal(${a.id})">Edit</button>
-        <button class="btn-delete-agent" onclick="deleteAnnouncement(${a.id})">Delete</button>
-      </div>
-    </div>`).join('');
-}
-function openAnnounceModal(id){
-  const ann = getStore('announcements',DEFAULT_ANNOUNCEMENTS);
-  const a = id?ann.find(x=>x.id===id):null;
-  document.getElementById('modal-box').innerHTML = `
-    <h3 style="font-family:'Bebas Neue',sans-serif;font-size:32px;color:#fff;margin-bottom:22px;">${a?'EDIT':'NEW'} ANNOUNCEMENT</h3>
-    <div class="form-group"><label class="form-label">Color</label>
-      <select id="mdl-color" class="form-input" style="background:#1a1a1a;">
-        <option value="orange"${a&&a.color==='orange'?' selected':''}>Orange</option>
-        <option value="cyan"${a&&a.color==='cyan'?' selected':''}>Cyan</option>
-        <option value="pink"${a&&a.color==='pink'?' selected':''}>Pink</option>
-        <option value="green"${a&&a.color==='green'?' selected':''}>Green</option>
-      </select>
-    </div>
-    <div class="form-group"><label class="form-label">Date/Timeframe</label><input id="mdl-date" class="form-input" value="${a?a.date:''}" placeholder="e.g. This Week"/></div>
-    <div class="form-group"><label class="form-label">Title</label><input id="mdl-title" class="form-input" value="${a?a.title:''}"/></div>
-    <div class="form-group"><label class="form-label">Body</label><textarea id="mdl-body" class="form-input" rows="4" style="resize:vertical;">${a?a.body:''}</textarea></div>
-    <div style="display:flex;gap:10px;margin-top:8px;">
-      <button onclick="saveAnnouncement(${a?a.id:'null'})" class="btn-fire" style="padding:12px 28px;flex:1;">Save</button>
-      <button onclick="closeAllModals()" class="btn-ghost" style="padding:11px 24px;font-size:14px;">Cancel</button>
-    </div>`;
-  document.getElementById('modal-backdrop').style.display='flex';
-}
-function saveAnnouncement(id){
-  const ann = getStore('announcements',DEFAULT_ANNOUNCEMENTS);
-  const color = document.getElementById('mdl-color').value;
-  const date = document.getElementById('mdl-date').value.trim();
-  const title = document.getElementById('mdl-title').value.trim();
-  const body = document.getElementById('mdl-body').value.trim();
-  if(!title||!body){alert('Title and body required');return;}
-  if(id){const a=ann.find(x=>x.id===id);if(a){a.color=color;a.date=date;a.title=title;a.body=body;}}
-  else ann.unshift({id:Date.now(),color,date,title,body});
-  setStore('announcements',ann);closeAllModals();renderAnnouncementsAdmin();
-}
-function deleteAnnouncement(id){
-  if(!confirm('Delete this announcement?')) return;
-  const ann = getStore('announcements',DEFAULT_ANNOUNCEMENTS).filter(a=>a.id!==id);
-  setStore('announcements',ann);renderAnnouncementsAdmin();
-}
-
-function renderLinksAdmin(){
-  const links = getStore('links',DEFAULT_LINKS);
-  const el = document.getElementById('admin-links-list');
-  el.innerHTML = links.map(l=>`
-    <div class="link-item" style="justify-content:space-between;">
-      <div class="link-item-left">
-        <div class="link-dot" style="background:${l.color}"></div>
-        <div><div class="link-name">${l.name}</div><div class="link-desc">${l.desc}</div></div>
-      </div>
-      <div style="display:flex;gap:8px;">
-        <button class="btn-edit-agent" onclick="openLinkModal(${l.id})">Edit</button>
-        <button class="btn-delete-agent" onclick="deleteLink(${l.id})">✕</button>
-      </div>
-    </div>`).join('');
-}
-function openLinkModal(id){
-  const links = getStore('links',DEFAULT_LINKS);
-  const l = id?links.find(x=>x.id===id):null;
-  document.getElementById('modal-box').innerHTML = `
-    <h3 style="font-family:'Bebas Neue',sans-serif;font-size:32px;color:#fff;margin-bottom:22px;">${l?'EDIT':'NEW'} LINK</h3>
-    <div class="form-group"><label class="form-label">Name</label><input id="mdl-name" class="form-input" value="${l?l.name:''}"/></div>
-    <div class="form-group"><label class="form-label">Description</label><input id="mdl-desc" class="form-input" value="${l?l.desc:''}"/></div>
-    <div class="form-group"><label class="form-label">URL</label><input id="mdl-url" class="form-input" value="${l?l.url:'#'}"/></div>
-    <div class="form-group"><label class="form-label">Dot Color (hex)</label><input id="mdl-color" class="form-input" value="${l?l.color:'#FF6B00'}"/></div>
-    <div style="display:flex;gap:10px;margin-top:8px;">
-      <button onclick="saveLink(${l?l.id:'null'})" class="btn-fire" style="padding:12px 28px;flex:1;">Save</button>
-      <button onclick="closeAllModals()" class="btn-ghost" style="padding:11px 24px;font-size:14px;">Cancel</button>
-    </div>`;
-  document.getElementById('modal-backdrop').style.display='flex';
-}
-function saveLink(id){
-  const links = getStore('links',DEFAULT_LINKS);
-  const name = document.getElementById('mdl-name').value.trim();
-  const desc = document.getElementById('mdl-desc').value.trim();
-  const url = document.getElementById('mdl-url').value.trim();
-  const color = document.getElementById('mdl-color').value.trim();
-  if(!name){alert('Name required');return;}
-  if(id){const l=links.find(x=>x.id===id);if(l){l.name=name;l.desc=desc;l.url=url;l.color=color;}}
-  else links.push({id:Date.now(),name,desc,url,color});
-  setStore('links',links);closeAllModals();renderLinksAdmin();
-}
-function deleteLink(id){
-  if(!confirm('Delete this link?'))return;
-  setStore('links',getStore('links',DEFAULT_LINKS).filter(l=>l.id!==id));renderLinksAdmin();
-}
-
-function renderTrainingAdmin(){
-  const training = getStore('training',DEFAULT_TRAINING);
-  const el = document.getElementById('admin-training-list');
-  el.innerHTML = training.map(t=>`
-    <div class="training-item" style="justify-content:space-between;">
-      <div style="display:flex;align-items:center;gap:16px;flex:1;">
-        <div class="training-icon">${t.icon}</div>
-        <div><div class="training-title">${t.title}</div><div class="training-meta">${t.meta}</div></div>
-      </div>
-      <div style="display:flex;gap:8px;align-items:center;">
-        <span class="tag tag-${t.tag}">${t.tag==='req'?'Required':(t.tag==='new'?'New':'Optional')}</span>
-        <button class="btn-edit-agent" onclick="openTrainingModal(${t.id})">Edit</button>
-        <button class="btn-delete-agent" onclick="deleteTraining(${t.id})">✕</button>
-      </div>
-    </div>`).join('');
-}
-function openTrainingModal(id){
-  const training = getStore('training',DEFAULT_TRAINING);
-  const t = id?training.find(x=>x.id===id):null;
-  document.getElementById('modal-box').innerHTML = `
-    <h3 style="font-family:'Bebas Neue',sans-serif;font-size:32px;color:#fff;margin-bottom:22px;">${t?'EDIT':'NEW'} TRAINING MODULE</h3>
-    <div class="form-group"><label class="form-label">Icon (emoji)</label><input id="mdl-icon" class="form-input" value="${t?t.icon:'🎓'}"/></div>
-    <div class="form-group"><label class="form-label">Title</label><input id="mdl-title" class="form-input" value="${t?t.title:''}"/></div>
-    <div class="form-group"><label class="form-label">Meta (e.g. 'Required · 4 modules · 45 min')</label><input id="mdl-meta" class="form-input" value="${t?t.meta:''}"/></div>
-    <div class="form-group"><label class="form-label">Tag</label>
-      <select id="mdl-tag" class="form-input" style="background:#1a1a1a;">
-        <option value="req"${t&&t.tag==='req'?' selected':''}>Required</option>
-        <option value="new"${t&&t.tag==='new'?' selected':''}>New</option>
-        <option value="opt"${t&&t.tag==='opt'?' selected':''}>Optional</option>
-      </select>
-    </div>
-    <div style="display:flex;gap:10px;margin-top:8px;">
-      <button onclick="saveTrainingModule(${t?t.id:'null'})" class="btn-fire" style="padding:12px 28px;flex:1;">Save</button>
-      <button onclick="closeAllModals()" class="btn-ghost" style="padding:11px 24px;font-size:14px;">Cancel</button>
-    </div>`;
-  document.getElementById('modal-backdrop').style.display='flex';
-}
-function saveTrainingModule(id){
-  const training = getStore('training',DEFAULT_TRAINING);
-  const icon = document.getElementById('mdl-icon').value.trim();
-  const title = document.getElementById('mdl-title').value.trim();
-  const meta = document.getElementById('mdl-meta').value.trim();
-  const tag = document.getElementById('mdl-tag').value;
-  if(!title){alert('Title required');return;}
-  if(id){const t=training.find(x=>x.id===id);if(t){t.icon=icon;t.title=title;t.meta=meta;t.tag=tag;}}
-  else training.push({id:Date.now(),icon,title,meta,tag});
-  setStore('training',training);closeAllModals();renderTrainingAdmin();
-}
-function deleteTraining(id){
-  if(!confirm('Delete this module?'))return;
-  setStore('training',getStore('training',DEFAULT_TRAINING).filter(t=>t.id!==id));renderTrainingAdmin();
-}
-
-function saveWelcomeMessage(){
-  setStore('welcome_msg',document.getElementById('welcome-msg-input').value);
-  const s = document.getElementById('welcome-saved');
-  s.style.display='block';
-  setTimeout(()=>{s.style.display='none';},2000);
-}
-
-function closeAllModals(){document.getElementById('modal-backdrop').style.display='none';}
-
-// ═══════════════════════════════════════════════════════════
-// CAMPAIGN PORTALS
-// ═══════════════════════════════════════════════════════════
-function loadCampaignPortal(camp){
-  if(!currentAgent){showPage('login');return;}
-  const nameEl = document.getElementById(camp==='reliant'?'rel-agent-name':'uni-agent-name');
-  nameEl.textContent = currentAgent.name;
-  showCampTab(camp,'dash');
-}
-
-function showCampTab(camp,tab){
-  const prefix = camp==='reliant'?'rel':'uni';
-  const activeClass = camp==='reliant'?'active-reliant':'active-united';
-  ['dash','lb','flow','tools','docs','comm'].forEach(t=>{
-    const btn = document.getElementById(`${prefix}-tab-${t}`);
-    const content = document.getElementById(`${prefix}-content-${t}`);
-    if(btn){btn.classList.remove('active-reliant','active-united');}
-    if(content) content.style.display='none';
-  });
-  document.getElementById(`${prefix}-tab-${tab}`).classList.add(activeClass);
-  document.getElementById(`${prefix}-content-${tab}`).style.display='block';
-  if(tab==='dash') renderCampDash(camp);
-  if(tab==='lb') renderLeaderboard(camp);
-  if(tab==='flow') renderFlowchart(camp);
-  if(tab==='tools') renderTools(camp);
-  if(tab==='docs') renderDocs(camp);
-  if(tab==='comm') renderCommission(camp);
-}
-
-function renderCampDash(camp){
-  const prefix = camp==='reliant'?'rel':'uni';
-  const color = camp==='reliant'?'#FF6B00':'#0080FF';
-  document.getElementById(`${prefix}-content-dash`).innerHTML = `
-    <div class="camp-stats">
-      <div class="camp-stat"><div class="camp-stat-num" style="color:${color};">24</div><div class="camp-stat-lbl">Your Enrollments</div><div class="camp-stat-delta">+18% WoW</div></div>
-      <div class="camp-stat"><div class="camp-stat-num" style="color:#00FF88;">98%</div><div class="camp-stat-lbl">Quality Score</div><div class="camp-stat-delta">Excellent</div></div>
-      <div class="camp-stat"><div class="camp-stat-num" style="color:#FFD700;">#4</div><div class="camp-stat-lbl">Team Rank</div><div class="camp-stat-delta">↑ 2 spots</div></div>
-      <div class="camp-stat"><div class="camp-stat-num" style="color:#FF0080;">$2,840</div><div class="camp-stat-lbl">Week Earnings</div><div class="camp-stat-delta">+12%</div></div>
-    </div>
-    <div class="camp-card">
-      <div class="camp-card-title">📢 ${camp==='reliant'?'Reliant':'United Energy Services'} Announcements</div>
-      <div style="font-size:14px;color:rgba(255,255,255,0.6);line-height:1.7;">
-        ${camp==='reliant'
-          ? 'Reliant is running a summer rate special — double commission on enrollments over 1000 kWh/month through end of month!'
-          : 'United Energy Services has launched new rate plans in IL, PA, and OH. Check the toolkit for updated pitch materials.'}
-      </div>
-    </div>`;
-}
-
-function renderLeaderboard(camp){
-  const prefix = camp==='reliant'?'rel':'uni';
-  const key = camp==='reliant'?'reliant_agents':'united_agents';
-  const defaults = camp==='reliant'?DEFAULT_RELIANT_AGENTS:DEFAULT_UNITED_AGENTS;
-  const agents = getStore(key,defaults).filter(a=>a.active).sort((a,b)=>b.enrollments-a.enrollments);
-  const max = agents.length>0?agents[0].enrollments:1;
-  const color = camp==='reliant'?'#FF6B00':'#0080FF';
-  document.getElementById(`${prefix}-content-lb`).innerHTML = `
-    <div class="lb-wrap">
-      <div class="lb-header">
-        <div class="lb-title">🏆 This Week's Leaderboard</div>
-        <div style="font-size:12px;color:rgba(255,255,255,0.4);">Week of ${new Date().toLocaleDateString()}</div>
-      </div>
-      ${agents.map((a,i)=>{
-        const rank = i+1;
-        const rankClass = rank===1?'gold':rank===2?'silver':rank===3?'bronze':'other';
-        return `
-          <div class="lb-row ${a.isYou?'lb-you':''}">
-            <div class="lb-rank ${rankClass}">${rank}</div>
-            <div class="lb-avatar" style="background:${a.isYou?'linear-gradient(135deg,'+color+',#FF0080)':'rgba(255,255,255,0.08)'}">${a.name.split(' ').map(n=>n[0]).join('').toUpperCase().slice(0,2)}</div>
-            <div class="lb-name">${a.name}${a.isYou?' <span style="font-size:11px;color:'+color+';">(you)</span>':''}</div>
-            <div class="lb-bar-wrap"><div class="lb-bar" style="width:${(a.enrollments/max*100).toFixed(0)}%;background:linear-gradient(90deg,${color},#FF0080);"></div></div>
-            <div class="lb-enrollments" style="color:${color};">${a.enrollments}</div>
-          </div>`;
-      }).join('')}
-    </div>`;
-}
-
-function renderFlowchart(camp){
-  const prefix = camp==='reliant'?'rel':'uni';
-  const stages = getStore('onboarding_stages',DEFAULT_ONBOARDING_STAGES);
-  document.getElementById(`${prefix}-content-flow`).innerHTML = `
-    <div class="flow-wrap">
-      <div class="flow-title">📈 Your Onboarding Progress</div>
-      <div class="flow-steps">
-        ${stages.map(s=>`
-          <div class="flow-step">
-            <div class="flow-dot ${s.state}">${s.state==='done'?'✓':(s.state==='active'?'●':'○')}</div>
-            <div class="flow-content">
-              <div class="flow-step-title">${s.title}</div>
-              <div class="flow-step-desc">${s.desc}</div>
-              <span class="flow-badge ${s.state}">${s.state==='done'?'Completed':(s.state==='active'?'In Progress':'Upcoming')}</span>
-            </div>
-          </div>`).join('')}
-      </div>
-    </div>`;
-}
-
-function renderTools(camp){
-  const prefix = camp==='reliant'?'rel':'uni';
-  const key = camp==='reliant'?'reliant_tools':'united_tools';
-  const defaults = camp==='reliant'?DEFAULT_RELIANT_TOOLS:DEFAULT_UNITED_TOOLS;
-  const tools = getStore(key,defaults);
-  document.getElementById(`${prefix}-content-tools`).innerHTML = `
-    <div class="camp-card">
-      <div class="camp-card-title">🛠️ Campaign Toolkit</div>
-      <div class="tool-grid">
-        ${tools.map(t=>`
-          <div class="tool-card ${camp}" onclick="alert('Opening ${t.name} — would launch in production.')">
-            <div class="tool-icon">${t.icon}</div>
-            <div class="tool-name">${t.name}</div>
-            <div class="tool-desc">${t.desc}</div>
-            <span class="tool-tag" style="background:rgba(255,255,255,0.06);color:${t.tagColor};">${t.tag}</span>
-          </div>`).join('')}
-      </div>
-    </div>`;
-}
-
-function renderDocs(camp){
-  const prefix = camp==='reliant'?'rel':'uni';
-  const key = camp==='reliant'?'reliant_docs':'united_docs';
-  const defaults = camp==='reliant'?DEFAULT_RELIANT_DOCS:DEFAULT_UNITED_DOCS;
-  const docs = getStore(key,defaults);
-  document.getElementById(`${prefix}-content-docs`).innerHTML = `
-    <div class="camp-card">
-      <div class="camp-card-title">📄 Campaign Documents</div>
-      <div style="background:rgba(255,107,0,0.06);border:1px solid rgba(255,107,0,0.2);border-radius:10px;padding:12px 16px;margin-bottom:16px;font-size:12.5px;color:rgba(255,255,255,0.5);">🔒 All documents are view-only. Printing, copying, and downloading are disabled.</div>
-      <div class="doc-list">
-        ${docs.map(d=>`
-          <div class="doc-item">
-            <div class="doc-icon">📄</div>
-            <div class="doc-name">${d.name}<div class="doc-meta">${d.meta}</div></div>
-            <button class="doc-view-btn" onclick="openDocViewer('${d.name.replace(/'/g,"\\'")}',\`${d.content.replace(/`/g,'\\`')}\`)">View →</button>
-          </div>`).join('')}
-      </div>
-    </div>`;
-}
-
-function openDocViewer(title,content){
-  document.getElementById('doc-viewer-title').textContent = title;
-  document.getElementById('doc-viewer-text').innerHTML = content.split('\n').map(p=>`<p style="font-size:14.5px;line-height:1.8;color:rgba(255,255,255,0.75);margin-bottom:14px;">${p}</p>`).join('');
-  document.getElementById('doc-viewer').classList.add('open');
-}
-function closeDocViewer(){document.getElementById('doc-viewer').classList.remove('open');}
-
-function renderCommission(camp){
-  const prefix = camp==='reliant'?'rel':'uni';
-  const color = camp==='reliant'?'#FF6B00':'#0080FF';
-  document.getElementById(`${prefix}-content-comm`).innerHTML = `
-    <div class="comm-card">
-      <div class="camp-card-title">💰 Commission Tracker</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:24px;">
-        <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:20px;text-align:center;"><div style="font-family:'Bebas Neue',sans-serif;font-size:40px;color:${color};line-height:1;">$2,840</div><div style="font-size:11px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px;margin-top:6px;">This Week</div></div>
-        <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:20px;text-align:center;"><div style="font-family:'Bebas Neue',sans-serif;font-size:40px;color:#00FF88;line-height:1;">$11,340</div><div style="font-size:11px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px;margin-top:6px;">This Month</div></div>
-        <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:20px;text-align:center;"><div style="font-family:'Bebas Neue',sans-serif;font-size:40px;color:#FFD700;line-height:1;">$68,420</div><div style="font-size:11px;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px;margin-top:6px;">Year to Date</div></div>
-      </div>
-      <div class="comm-placeholder">
-        Detailed payout history will display here once<br/>
-        payroll integration is connected.
-      </div>
-    </div>`;
-}
-
-// Campaign admin tab
-function showCampAdminTab(camp){
-  document.getElementById('ctab-reliant').classList.remove('active-reliant');
-  document.getElementById('ctab-united').classList.remove('active-united');
-  document.getElementById('ctab-'+camp).classList.add(camp==='reliant'?'active-reliant':'active-united');
-  renderCampAdmin(camp);
-}
-function renderCampAdmin(camp){
-  const key = camp==='reliant'?'reliant_agents':'united_agents';
-  const defaults = camp==='reliant'?DEFAULT_RELIANT_AGENTS:DEFAULT_UNITED_AGENTS;
-  const agents = getStore(key,defaults);
-  const label = camp==='reliant'?'Reliant':'United';
-  document.getElementById('camp-admin-content').innerHTML = `
-    <div class="portal-card">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px;flex-wrap:wrap;gap:12px;">
-        <div class="portal-card-title" style="margin-bottom:0;">🎯 ${label} Campaign Agents</div>
-        <button onclick="addCampAgent('${camp}')" class="btn-fire" style="padding:10px 22px;font-size:13px;">+ Add Agent</button>
-      </div>
-      <table style="width:100%;border-collapse:collapse;">
-        <thead><tr style="border-bottom:1px solid rgba(255,255,255,0.08);"><th class="th-cell">Name</th><th class="th-cell">Enrollments</th><th class="th-cell">Status</th><th class="th-cell">Actions</th></tr></thead>
-        <tbody>
-          ${agents.map(a=>`
-            <tr class="agent-row ${a.active?'':'inactive-row'}">
-              <td style="padding:14px 20px;"><div class="td-name"><div class="agent-avatar">${a.name.split(' ').map(n=>n[0]).join('').toUpperCase().slice(0,2)}</div><div class="agent-name-text">${a.name}${a.isYou?' <span style="font-size:10px;color:#FFD700;">(you)</span>':''}</div></div></td>
-              <td style="padding:14px 20px;"><span style="font-family:'Bebas Neue',sans-serif;font-size:22px;">${a.enrollments}</span></td>
-              <td style="padding:14px 20px;"><span class="status-badge ${a.active?'status-active':'status-inactive'}">${a.active?'Active':'Inactive'}</span></td>
-              <td style="padding:14px 20px;"><div class="td-actions">
-                <button class="btn-edit-agent" onclick="editCampAgent('${camp}',${a.id})">Edit</button>
-                <button class="btn-delete-agent" onclick="removeCampAgent('${camp}',${a.id})">✕</button>
-              </div></td>
-            </tr>`).join('')}
-        </tbody>
-      </table>
-    </div>`;
-}
-function addCampAgent(camp){editCampAgent(camp,null);}
-function editCampAgent(camp,id){
-  const key = camp==='reliant'?'reliant_agents':'united_agents';
-  const defaults = camp==='reliant'?DEFAULT_RELIANT_AGENTS:DEFAULT_UNITED_AGENTS;
-  const agents = getStore(key,defaults);
-  const a = id?agents.find(x=>x.id===id):null;
-  document.getElementById('modal-box').innerHTML = `
-    <h3 style="font-family:'Bebas Neue',sans-serif;font-size:32px;color:#fff;margin-bottom:22px;">${a?'EDIT':'ADD'} ${camp.toUpperCase()} AGENT</h3>
-    <div class="form-group"><label class="form-label">Name</label><input id="mdl-name" class="form-input" value="${a?a.name:''}"/></div>
-    <div class="form-group"><label class="form-label">Enrollments (this week)</label><input id="mdl-enr" type="number" class="form-input" value="${a?a.enrollments:0}"/></div>
-    <div style="display:flex;gap:10px;margin-top:8px;">
-      <button onclick="saveCampAgent('${camp}',${a?a.id:'null'})" class="btn-fire" style="padding:12px 28px;flex:1;">Save</button>
-      <button onclick="closeAllModals()" class="btn-ghost" style="padding:11px 24px;font-size:14px;">Cancel</button>
-    </div>`;
-  document.getElementById('modal-backdrop').style.display='flex';
-}
-function saveCampAgent(camp,id){
-  const key = camp==='reliant'?'reliant_agents':'united_agents';
-  const defaults = camp==='reliant'?DEFAULT_RELIANT_AGENTS:DEFAULT_UNITED_AGENTS;
-  const agents = getStore(key,defaults);
-  const name = document.getElementById('mdl-name').value.trim();
-  const enr = parseInt(document.getElementById('mdl-enr').value)||0;
-  if(!name){alert('Name required');return;}
-  if(id){const a=agents.find(x=>x.id===id);if(a){a.name=name;a.enrollments=enr;}}
-  else agents.push({id:Date.now(),name,enrollments:enr,active:true});
-  setStore(key,agents);closeAllModals();renderCampAdmin(camp);
-}
-function removeCampAgent(camp,id){
-  if(!confirm('Remove this agent?'))return;
-  const key = camp==='reliant'?'reliant_agents':'united_agents';
-  const defaults = camp==='reliant'?DEFAULT_RELIANT_AGENTS:DEFAULT_UNITED_AGENTS;
-  setStore(key,getStore(key,defaults).filter(a=>a.id!==id));renderCampAdmin(camp);
-}
-
-// ═══════════════════════════════════════════════════════════
-// OWNER CONTROL CENTER
-// ═══════════════════════════════════════════════════════════
-function ocInit(){
-  if(!currentAgent||currentAgent.role!=='owner'){showPage('login');return;}
-  ocShowSection('dash');
-}
-function ocShowSection(sec){
-  document.querySelectorAll('.oc-nav').forEach(b=>b.classList.remove('active'));
-  const btn = document.querySelector(`.oc-nav[data-sec="${sec}"]`);
-  if(btn) btn.classList.add('active');
-  const c = document.getElementById('oc-content');
-  if(sec==='dash') ocRenderDash(c);
-  if(sec==='activity') ocRenderActivity(c);
-  if(sec==='announcements') ocRenderContent(c,'announcements');
-  if(sec==='links') ocRenderContent(c,'links');
-  if(sec==='training') ocRenderContent(c,'training');
-  if(sec==='welcome') ocRenderWelcome(c);
-  if(sec==='agents') ocRenderAgents(c);
-  if(sec==='applications') ocRenderApps(c);
-  if(sec==='reliant') ocRenderCamp(c,'reliant');
-  if(sec==='united') ocRenderCamp(c,'united');
-  if(sec==='workspaces') ocRenderWorkspaces(c);
-  if(sec==='tools') ocRenderTools(c);
-  if(sec==='settings') ocRenderSettings(c);
-  if(sec==='credentials') ocRenderCredentials(c);
-}
-function ocRenderDash(c){
-  const agents = getAgents();
-  const apps = getStore('applications',[]);
-  const ann = getStore('announcements',DEFAULT_ANNOUNCEMENTS);
-  c.innerHTML = `
-    <h1 style="font-family:'Bebas Neue',sans-serif;font-size:54px;color:#fff;margin-bottom:8px;">👑 OWNER OVERVIEW</h1>
-    <p style="font-size:14px;color:rgba(255,255,255,0.5);margin-bottom:36px;">Welcome back, ${currentAgent.name}. Here's what's happening across your organization.</p>
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:32px;">
-      <div class="camp-stat"><div class="camp-stat-num" style="color:#FFD700;">${agents.length}</div><div class="camp-stat-lbl">Total Agents</div></div>
-      <div class="camp-stat"><div class="camp-stat-num" style="color:#00FF88;">${agents.filter(a=>a.active).length}</div><div class="camp-stat-lbl">Active</div></div>
-      <div class="camp-stat"><div class="camp-stat-num" style="color:#FF6B00;">${apps.length}</div><div class="camp-stat-lbl">Applications</div></div>
-      <div class="camp-stat"><div class="camp-stat-num" style="color:#FF0080;">${ann.length}</div><div class="camp-stat-lbl">Announcements</div></div>
-    </div>
-    <div class="portal-card"><div class="portal-card-title">🚀 Quick Actions</div>
-      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;">
-        <button onclick="ocShowSection('agents')" class="btn-ghost" style="padding:16px;font-size:13px;">Manage Agents</button>
-        <button onclick="ocShowSection('applications')" class="btn-ghost" style="padding:16px;font-size:13px;">Review Applications</button>
-        <button onclick="ocShowSection('announcements')" class="btn-ghost" style="padding:16px;font-size:13px;">Post Announcement</button>
-      </div>
-    </div>`;
-}
-function ocRenderActivity(c){
-  c.innerHTML = `<h1 style="font-family:'Bebas Neue',sans-serif;font-size:54px;color:#fff;margin-bottom:8px;">📈 ACTIVITY LOG</h1><p style="font-size:14px;color:rgba(255,255,255,0.5);margin-bottom:36px;">Recent changes across the system.</p><div class="portal-card"><p style="color:rgba(255,255,255,0.4);font-size:14px;">Activity logging will display here once backend integration is connected.</p></div>`;
-}
-function ocRenderContent(c,type){
-  const titles = {announcements:'📢 Announcements',links:'🔗 Links',training:'🎓 Training'};
-  c.innerHTML = `
-    <h1 style="font-family:'Bebas Neue',sans-serif;font-size:54px;color:#fff;margin-bottom:8px;">${titles[type]}</h1>
-    <p style="font-size:14px;color:rgba(255,255,255,0.5);margin-bottom:24px;">Manage ${type} shown in the agent portal.</p>
-    <div class="portal-card">
-      <div style="display:flex;justify-content:flex-end;margin-bottom:16px;">
-        <button class="btn-fire" style="padding:10px 22px;font-size:13px;" onclick="${type==='announcements'?'openAnnounceModal()':type==='links'?'openLinkModal()':'openTrainingModal()'}">+ Add New</button>
-      </div>
-      <div id="oc-${type}-list"></div>
-    </div>`;
-  // render directly
-  const targetId = `oc-${type}-list`;
-  if(type==='announcements'){document.getElementById(targetId).innerHTML = document.getElementById('admin-announcements-list')?.innerHTML || '';renderAnnouncementsAdmin();document.getElementById(targetId).innerHTML = renderAnnouncementsAdminString();}
-  else if(type==='links'){document.getElementById(targetId).innerHTML = renderLinksAdminString();}
-  else if(type==='training'){document.getElementById(targetId).innerHTML = renderTrainingAdminString();}
-}
-function renderAnnouncementsAdminString(){
-  const ann = getStore('announcements',DEFAULT_ANNOUNCEMENTS);
-  return ann.map(a=>`
-    <div class="ann ${a.color}" style="margin-bottom:14px;position:relative;">
-      <div class="ann-date">${a.date}</div>
-      <div class="ann-title">${a.title}</div>
-      <div class="ann-body">${a.body}</div>
-      <div style="margin-top:10px;display:flex;gap:8px;">
-        <button class="btn-edit-agent" onclick="openAnnounceModal(${a.id})">Edit</button>
-        <button class="btn-delete-agent" onclick="deleteAnnouncement(${a.id});ocShowSection('announcements');">Delete</button>
-      </div>
-    </div>`).join('');
-}
-function renderLinksAdminString(){
-  const links = getStore('links',DEFAULT_LINKS);
-  return links.map(l=>`
-    <div class="link-item" style="justify-content:space-between;">
-      <div class="link-item-left">
-        <div class="link-dot" style="background:${l.color}"></div>
-        <div><div class="link-name">${l.name}</div><div class="link-desc">${l.desc}</div></div>
-      </div>
-      <div style="display:flex;gap:8px;">
-        <button class="btn-edit-agent" onclick="openLinkModal(${l.id})">Edit</button>
-        <button class="btn-delete-agent" onclick="deleteLink(${l.id});ocShowSection('links');">✕</button>
-      </div>
-    </div>`).join('');
-}
-function renderTrainingAdminString(){
-  const training = getStore('training',DEFAULT_TRAINING);
-  return training.map(t=>`
-    <div class="training-item" style="justify-content:space-between;">
-      <div style="display:flex;align-items:center;gap:16px;flex:1;">
-        <div class="training-icon">${t.icon}</div>
-        <div><div class="training-title">${t.title}</div><div class="training-meta">${t.meta}</div></div>
-      </div>
-      <div style="display:flex;gap:8px;align-items:center;">
-        <span class="tag tag-${t.tag}">${t.tag==='req'?'Required':(t.tag==='new'?'New':'Optional')}</span>
-        <button class="btn-edit-agent" onclick="openTrainingModal(${t.id})">Edit</button>
-        <button class="btn-delete-agent" onclick="deleteTraining(${t.id});ocShowSection('training');">✕</button>
-      </div>
-    </div>`).join('');
-}
-function ocRenderWelcome(c){
-  c.innerHTML = `
-    <h1 style="font-family:'Bebas Neue',sans-serif;font-size:54px;color:#fff;margin-bottom:8px;">✨ WELCOME MESSAGE</h1>
-    <p style="font-size:14px;color:rgba(255,255,255,0.5);margin-bottom:24px;">The motivational message agents see when they log in.</p>
-    <div class="portal-card">
-      <textarea id="oc-welcome-input" class="form-input" rows="3" style="resize:vertical;font-size:14.5px;line-height:1.6;">${getStore('welcome_msg',DEFAULT_WELCOME)}</textarea>
-      <button class="btn-fire" style="margin-top:14px;padding:10px 22px;font-size:13px;" onclick="ocSaveWelcome()">Save</button>
-      <div id="oc-welcome-saved" style="display:none;color:#00FF88;font-size:13px;margin-top:10px;">✓ Saved.</div>
-    </div>`;
-}
-function ocSaveWelcome(){
-  setStore('welcome_msg',document.getElementById('oc-welcome-input').value);
-  const s = document.getElementById('oc-welcome-saved');s.style.display='block';
-  setTimeout(()=>s.style.display='none',2000);
-}
-function ocRenderAgents(c){
-  c.innerHTML = `
-    <h1 style="font-family:'Bebas Neue',sans-serif;font-size:54px;color:#fff;margin-bottom:8px;">👥 ALL AGENTS</h1>
-    <p style="font-size:14px;color:rgba(255,255,255,0.5);margin-bottom:24px;">Complete agent directory with role and status control.</p>
-    <div class="portal-card">
-      <div style="display:flex;justify-content:flex-end;margin-bottom:16px;"><button class="btn-fire" style="padding:10px 22px;font-size:13px;" onclick="openAgentModal()">+ Add Agent</button></div>
-      <div style="overflow-x:auto;">
-        <table style="width:100%;border-collapse:collapse;">
-          <thead><tr style="border-bottom:1px solid rgba(255,255,255,0.08);"><th class="th-cell">Name</th><th class="th-cell">Role</th><th class="th-cell">Password</th><th class="th-cell">Status</th><th class="th-cell">Joined</th><th class="th-cell">Actions</th></tr></thead>
-          <tbody>${getAgents().map(a=>`
-            <tr class="agent-row ${a.active?'':'inactive-row'}">
-              <td style="padding:14px 20px;"><div class="td-name"><div class="agent-avatar">${a.name.split(' ').map(n=>n[0]).join('').toUpperCase().slice(0,2)}</div><div><div class="agent-name-text">${a.name}</div><div class="agent-email-text">${a.email}</div></div></div></td>
-              <td style="padding:14px 20px;"><span class="role-badge role-${a.role}">${a.role.toUpperCase()}</span></td>
-              <td style="padding:14px 20px;"><span class="pass-code">${a.password}</span></td>
-              <td style="padding:14px 20px;"><span class="status-badge ${a.active?'status-active':'status-inactive'}">${a.active?'Active':'Inactive'}</span></td>
-              <td style="padding:14px 20px;" class="td-joined">${a.joined}</td>
-              <td style="padding:14px 20px;"><div class="td-actions">
-                <button class="btn-toggle ${a.active?'btn-deactivate':'btn-activate'}" onclick="toggleAgent(${a.id});ocShowSection('agents');">${a.active?'Deactivate':'Activate'}</button>
-                <button class="btn-edit-agent" onclick="openAgentModal(${a.id})">Edit</button>
-                <button class="btn-delete-agent" onclick="deleteAgent(${a.id});ocShowSection('agents');">✕</button>
-              </div></td>
-            </tr>`).join('')}</tbody>
-        </table>
-      </div>
-    </div>`;
-}
-function ocRenderApps(c){
-  const apps = getStore('applications',[]);
-  c.innerHTML = `<h1 style="font-family:'Bebas Neue',sans-serif;font-size:54px;color:#fff;margin-bottom:8px;">📝 APPLICATIONS</h1><p style="font-size:14px;color:rgba(255,255,255,0.5);margin-bottom:24px;">Review new job applications.</p><div class="portal-card"><div id="oc-app-list">${apps.length===0?'<p style="color:rgba(255,255,255,0.4);font-size:14px;">No applications yet.</p>':apps.map(a=>`
-    <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:12px;padding:20px;margin-bottom:12px;">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px;flex-wrap:wrap;gap:8px;">
-        <div><div style="font-size:17px;font-weight:700;color:#fff;">${a.fname} ${a.lname}</div><div style="font-size:13px;color:rgba(255,255,255,0.5);">${a.email} · ${a.phone}</div><div style="font-size:12.5px;color:rgba(255,255,255,0.35);margin-top:3px;">${a.city}, ${a.state} · ${a.submitted}</div></div>
-        <span class="tag tag-new">${a.program||'Any'}</span>
-      </div>
-      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;font-size:12.5px;color:rgba(255,255,255,0.55);">
-        <div><strong style="color:#FFD700;">Type:</strong> ${a.type}</div><div><strong style="color:#FFD700;">Start:</strong> ${a.start}</div><div><strong style="color:#FFD700;">Hours:</strong> ${a.hours}</div>
-        <div><strong style="color:#FFD700;">Experience:</strong> ${a.exp}</div><div><strong style="color:#FFD700;">Field Sales:</strong> ${a.d2d}</div><div><strong style="color:#FFD700;">Income Goal:</strong> ${a.income}</div>
-      </div>
-      ${a.why?`<div style="margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,0.06);font-size:13px;color:rgba(255,255,255,0.6);line-height:1.6;"><strong style="color:#fff;">Why they fit:</strong> ${a.why}</div>`:''}
-      <button onclick="deleteApplication(${a.id});ocShowSection('applications');" style="margin-top:14px;background:rgba(239,68,68,0.12);color:#F87171;border:none;border-radius:50px;padding:6px 14px;font-size:12px;font-weight:600;cursor:pointer;font-family:'Outfit',sans-serif;">Delete</button>
-    </div>`).join('')}</div></div>`;
-}
-function ocRenderCamp(c,camp){
-  const label = camp==='reliant'?'🟠 Reliant Campaign':'🔵 United Campaign';
-  c.innerHTML = `<h1 style="font-family:'Bebas Neue',sans-serif;font-size:54px;color:#fff;margin-bottom:8px;">${label}</h1><p style="font-size:14px;color:rgba(255,255,255,0.5);margin-bottom:24px;">Manage campaign agents and their enrollment totals.</p><div id="oc-camp-wrap"></div>`;
-  renderCampAdmin(camp);
-  document.getElementById('oc-camp-wrap').innerHTML = document.getElementById('camp-admin-content').innerHTML;
-}
-function ocRenderWorkspaces(c){
-  c.innerHTML = `<h1 style="font-family:'Bebas Neue',sans-serif;font-size:54px;color:#fff;margin-bottom:8px;">➕ WORKSPACES</h1><p style="font-size:14px;color:rgba(255,255,255,0.5);margin-bottom:24px;">All campaign workspaces.</p>
-    <div class="portal-card">
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
-        <div style="background:linear-gradient(135deg,rgba(255,107,0,0.15),rgba(255,69,0,0.08));border:1px solid rgba(255,107,0,0.3);border-radius:14px;padding:22px;"><div class="camp-logo reliant" style="display:inline-flex;">RELIANT</div><p style="font-size:13px;color:rgba(255,255,255,0.55);margin-top:10px;">Residential retail energy — Texas &amp; NE markets.</p></div>
-        <div style="background:linear-gradient(135deg,rgba(0,128,255,0.15),rgba(0,64,170,0.08));border:1px solid rgba(0,128,255,0.3);border-radius:14px;padding:22px;"><div class="camp-logo united" style="display:inline-flex;">UNITED</div><p style="font-size:13px;color:rgba(255,255,255,0.55);margin-top:10px;">Residential &amp; commercial energy — multi-state.</p></div>
-      </div>
-      <p style="margin-top:18px;font-size:13px;color:rgba(255,255,255,0.35);">Additional campaigns can be added in a future update.</p>
-    </div>`;
-}
-function ocRenderTools(c){
-  const tools = getStore('oc_tools',DEFAULT_OC_TOOLS);
-  c.innerHTML = `<h1 style="font-family:'Bebas Neue',sans-serif;font-size:54px;color:#fff;margin-bottom:8px;">🛠️ OWNER TOOLS</h1><p style="font-size:14px;color:rgba(255,255,255,0.5);margin-bottom:24px;">Executive tooling shortcuts.</p>
-    <div class="portal-card"><div class="tool-grid">${tools.map(t=>`<div class="tool-card reliant"><div class="tool-icon">${t.icon}</div><div class="tool-name">${t.name}</div><div class="tool-desc">${t.desc}</div></div>`).join('')}</div></div>`;
-}
-function ocRenderSettings(c){
-  c.innerHTML = `<h1 style="font-family:'Bebas Neue',sans-serif;font-size:54px;color:#fff;margin-bottom:8px;">⚙️ SETTINGS</h1><p style="font-size:14px;color:rgba(255,255,255,0.5);margin-bottom:24px;">System settings and data management.</p>
-    <div class="portal-card"><div style="font-size:14px;color:rgba(255,255,255,0.7);margin-bottom:16px;"><strong>Reset Data:</strong> Clear all portal data and restore defaults. This cannot be undone.</div><button onclick="ocResetData()" style="background:rgba(239,68,68,0.15);color:#F87171;border:1px solid rgba(239,68,68,0.3);border-radius:50px;padding:10px 22px;font-size:13px;font-weight:600;cursor:pointer;font-family:'Outfit',sans-serif;">Reset All Data</button></div>`;
-}
-function ocResetData(){
-  if(!confirm('This will erase all announcements, links, training, applications, and campaign data. Are you sure?'))return;
-  ['announcements','links','training','applications','welcome_msg','reliant_agents','united_agents','onboarding_stages','reliant_tools','united_tools','reliant_docs','united_docs','oc_tools'].forEach(k=>{try{localStorage.removeItem('csi_'+k);}catch(e){}});
-  alert('Data reset. Reloading…');location.reload();
-}
-function ocRenderCredentials(c){
-  const agents = getAgents();
-  c.innerHTML = `<h1 style="font-family:'Bebas Neue',sans-serif;font-size:54px;color:#fff;margin-bottom:8px;">🔐 CREDENTIALS</h1><p style="font-size:14px;color:rgba(255,255,255,0.5);margin-bottom:24px;">Change your password.</p>
-    <div class="portal-card" style="max-width:480px;">
-      <div class="form-group"><label class="form-label">Current Password</label><input id="oc-cur" type="password" class="form-input"/></div>
-      <div class="form-group"><label class="form-label">New Password</label><input id="oc-new" type="password" class="form-input"/></div>
-      <div class="form-group"><label class="form-label">Confirm New Password</label><input id="oc-cnf" type="password" class="form-input"/></div>
-      <button class="btn-fire" style="padding:12px 28px;" onclick="ocChangePassword()">Update Password</button>
-      <div id="oc-cred-msg" style="font-size:13px;margin-top:12px;"></div>
-    </div>`;
-}
-function ocChangePassword(){
-  const cur = document.getElementById('oc-cur').value;
-  const nw = document.getElementById('oc-new').value;
-  const cf = document.getElementById('oc-cnf').value;
-  const msg = document.getElementById('oc-cred-msg');
-  if(cur!==currentAgent.password){msg.style.color='#F87171';msg.textContent='Current password is incorrect.';return;}
-  if(nw.length<6){msg.style.color='#F87171';msg.textContent='Password must be at least 6 characters.';return;}
-  if(nw!==cf){msg.style.color='#F87171';msg.textContent='Passwords do not match.';return;}
-  const agents = getAgents();
-  const a = agents.find(x=>x.id===currentAgent.id);
-  if(a){a.password=nw;saveAgents(agents);currentAgent.password=nw;setStore('current_agent',currentAgent);}
-  msg.style.color='#00FF88';msg.textContent='✓ Password updated.';
-  document.getElementById('oc-cur').value='';document.getElementById('oc-new').value='';document.getElementById('oc-cnf').value='';
-}
-
-// Ensure an owner account exists
-(function(){
-  const agents = getAgents();
-  if(!agents.some(a=>a.role==='owner')){
-    agents.push({id:Date.now(),name:'Owner',email:'owner@circlesolutions.com',password:'CSIOwner2025!',role:'owner',active:true,joined:new Date().toISOString().slice(0,10)});
-    saveAgents(agents);
-  }
-})();
-
-
-function toggleSubNav(btn){
-  var links = btn.parentElement.querySelector('.subpage-nav-links');
-  if(links) links.classList.toggle('mobile-show');
-}
-
+// Expose functions that inline HTML onclicks reference
+window.showPage = showPage;
+window.toggleSubNav = toggleSubNav;
+window.doLogin = doLogin;
+window.doLogout = doLogout;
+window.submitApplication = submitApplication;
+window.closeAllModals = closeAllModals;
+window.boSelectProgram = boSelectProgram;
+window.boShowView = boShowView;
+window.boShowAdmin = boShowAdmin;
+window.openAgentModal = openAgentModal;
+window.saveAgent = saveAgent;
+window.toggleAgentActive = toggleAgentActive;
+window.openEnrollmentModal = openEnrollmentModal;
+window.saveEnrollment = saveEnrollment;
+window.openTrainingModal = openTrainingModal;
+window.saveTraining = saveTraining;
+window.deleteTraining = deleteTraining;
+window.openContractModal = openContractModal;
+window.saveContract = saveContract;
+window.toggleContractStatus = toggleContractStatus;
+window.deleteContract = deleteContract;
+window.openCodeModal = openCodeModal;
+window.saveCode = saveCode;
+window.deleteCode = deleteCode;
+window.openAnnModal = openAnnModal;
+window.saveAnn = saveAnn;
+window.deleteAnn = deleteAnn;
+window.createAgentFromApp = createAgentFromApp;
+window.deleteApplication = deleteApplication;
+window.changePassword = changePassword;
 </script>
+
 </body>
 </html>
