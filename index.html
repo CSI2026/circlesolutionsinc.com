@@ -3966,7 +3966,7 @@ function meetingCard(m, prog, state, canHost){
     <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
       <div style="flex:1;min-width:0;">
         <div style="font-size:15px;font-weight:700;color:#fff;">${escapeHtml(m.title)}</div>
-        <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-top:3px;">Hosted by ${escapeHtml(hostName)} · ${m.platform === 'jitsi' ? '🎥 Jitsi (built-in)' : '🔗 ' + m.platform}</div>
+        <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-top:3px;">Hosted by ${escapeHtml(hostName)} · ${m.platform === 'daily' || m.platform === 'jitsi' ? '🎥 Built-in video' : '🔗 ' + m.platform}</div>
         <div style="font-size:12.5px;color:rgba(255,255,255,0.65);margin-top:6px;">${whenStr}${m.duration_min ? ' · ' + m.duration_min + ' min' : ''}</div>
         ${m.description ? `<div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-top:8px;line-height:1.55;">${escapeHtml(m.description)}</div>` : ''}
       </div>
@@ -4002,7 +4002,7 @@ function openMeetingModal(programId){
     <div class="form-group">
       <label class="form-label">Platform</label>
       <select id="mt-platform" class="form-input" style="background:#1a1a1a;" onchange="togglePlatformUrl()">
-        <option value="jitsi">🎥 Jitsi (built-in, free, with waiting room)</option>
+        <option value="daily">🎥 Built-in video (with waiting room)</option>
         <option value="zoom">🔗 Zoom (external link)</option>
         <option value="meet">🔗 Google Meet (external link)</option>
         <option value="teams">🔗 MS Teams (external link)</option>
@@ -4041,7 +4041,7 @@ function openMeetingModal(programId){
 
 function togglePlatformUrl(){
   const plat = document.getElementById('mt-platform').value;
-  document.getElementById('mt-url-wrap').style.display = plat === 'jitsi' ? 'none' : 'block';
+  document.getElementById('mt-url-wrap').style.display = (plat === 'daily' || plat === 'jitsi') ? 'none' : 'block';
 }
 
 async function saveMeeting(programId){
@@ -4057,15 +4057,44 @@ async function saveMeeting(programId){
 
   if(!title){ msg.innerHTML = '<span style="color:#F87171;">Title required.</span>'; return; }
   if(!whenStr){ msg.innerHTML = '<span style="color:#F87171;">Date/time required.</span>'; return; }
-  if(platform !== 'jitsi' && !meeting_url){ msg.innerHTML = '<span style="color:#F87171;">Meeting link required for ' + platform + '.</span>'; return; }
+  const isBuiltIn = (platform === 'daily' || platform === 'jitsi');
+  if(!isBuiltIn && !meeting_url){ msg.innerHTML = '<span style="color:#F87171;">Meeting link required for ' + platform + '.</span>'; return; }
 
   const scheduled_at = new Date(whenStr).toISOString();
-  const jitsi_room = platform === 'jitsi' ? generateJitsiRoomName(programId) : null;
+
+  // For built-in video: create a Daily.co room via Edge Function
+  let jitsi_room = null;
+  let final_meeting_url = isBuiltIn ? null : meeting_url;
+
+  if(isBuiltIn){
+    msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Creating video room…</span>';
+    try {
+      // Daily room names must be URL-safe: letters, numbers, hyphens, underscores; max 128 chars
+      const ts = Date.now().toString(36);
+      const rand = Math.random().toString(36).substring(2, 10);
+      const roomName = `csi-${programId}-${ts}-${rand}`.substring(0, 60);
+
+      const { data, error } = await sb.functions.invoke('daily-room', {
+        body: { action: 'create_room', room_name: roomName }
+      });
+      if(error || !data?.room_url){
+        msg.innerHTML = '<span style="color:#F87171;">Could not create video room. Make sure the daily-room Edge Function is deployed with DAILY_API_KEY set.</span>';
+        console.error('Daily create_room error:', error, data);
+        return;
+      }
+      jitsi_room = data.room_name; // we'll reuse this column to store the Daily room name
+      final_meeting_url = data.room_url;
+    } catch(e){
+      msg.innerHTML = '<span style="color:#F87171;">Error creating room: '+e.message+'</span>';
+      return;
+    }
+  }
 
   const { data: meeting, error } = await sb.from('meetings').insert({
     program_id: programId, title, description: description || null,
-    host_id: currentProfile.id, platform,
-    meeting_url: platform === 'jitsi' ? null : meeting_url,
+    host_id: currentProfile.id,
+    platform: isBuiltIn ? 'daily' : platform,
+    meeting_url: final_meeting_url,
     jitsi_room, scheduled_at, duration_min, recording_enabled
   }).select().single();
 
@@ -4096,14 +4125,6 @@ async function saveMeeting(programId){
   setTimeout(() => { closeAllModals(); renderMainContent(); }, 900);
 }
 
-function generateJitsiRoomName(programId){
-  // meet.jit.si works best with simple alphanumeric names
-  // Long unique names also prevent anyone from guessing/crashing the room
-  const ts = Date.now().toString(36);
-  const rand = Math.random().toString(36).substring(2, 10) + Math.random().toString(36).substring(2, 10);
-  return `CSI${programId}${ts}${rand}`.replace(/[^a-zA-Z0-9]/g,'');
-}
-
 async function deleteMeeting(id){
   if(!confirm('Delete this training call?')) return;
   await sb.from('meetings').delete().eq('id', id);
@@ -4127,8 +4148,8 @@ async function joinMeeting(meetingId){
 
   const isHost = m.host_id === currentProfile.id;
 
-  // Handle external (non-Jitsi) meetings
-  if(m.platform !== 'jitsi'){
+  // Handle external (Zoom/Meet/Teams/other) meetings — open in new tab
+  if(m.platform !== 'daily' && m.platform !== 'jitsi'){
     if(m.meeting_url){
       window.open(m.meeting_url, '_blank');
     } else {
@@ -4137,19 +4158,16 @@ async function joinMeeting(meetingId){
     return;
   }
 
-  // Jitsi flow
+  // Daily.co flow
   if(isHost){
-    // Host joins directly
     await sb.from('meetings').update({ status: 'live', started_at: m.started_at || new Date().toISOString() }).eq('id', meetingId);
-    // Auto-admit anyone waiting
     await sb.from('meeting_participants').update({ status: 'admitted', admitted_at: new Date().toISOString() }).eq('meeting_id', meetingId).eq('status', 'waiting');
-    openJitsiRoom(m, true);
+    openDailyRoom(m, true);
     return;
   }
 
   // Non-host: check if meeting is live
   if(m.status !== 'live'){
-    // Add to waiting room
     await sb.from('meeting_participants').upsert({
       meeting_id: meetingId, user_id: currentProfile.id, status: 'waiting'
     }, { onConflict: 'meeting_id,user_id' });
@@ -4157,12 +4175,12 @@ async function joinMeeting(meetingId){
     return;
   }
 
-  // Meeting is live — add as admitted and join
+  // Meeting is live — join directly
   await sb.from('meeting_participants').upsert({
     meeting_id: meetingId, user_id: currentProfile.id, status: 'admitted',
     admitted_at: new Date().toISOString()
   }, { onConflict: 'meeting_id,user_id' });
-  openJitsiRoom(m, false);
+  openDailyRoom(m, false);
 }
 
 function openWaitingRoom(meeting){
@@ -4183,25 +4201,45 @@ function openWaitingRoom(meeting){
   window._waitingPoller = setInterval(async () => {
     const { data: m } = await sb.from('meetings').select('status').eq('id', meeting.id).single();
     if(m?.status === 'live'){
-      // Mark ourselves admitted
       await sb.from('meeting_participants').update({
         status: 'admitted', admitted_at: new Date().toISOString()
       }).eq('meeting_id', meeting.id).eq('user_id', currentProfile.id);
       clearInterval(window._waitingPoller);
       const { data: full } = await sb.from('meetings').select('*').eq('id', meeting.id).single();
-      openJitsiRoom(full, false);
+      openDailyRoom(full, false);
     }
   }, 3000);
 }
 
-function openJitsiRoom(meeting, isHost){
+async function openDailyRoom(meeting, isHost){
   if(window._waitingPoller){ clearInterval(window._waitingPoller); window._waitingPoller = null; }
 
-  const roomName = meeting.jitsi_room;
   const displayName = currentProfile.full_name || currentProfile.email;
-  const email = currentProfile.email;
 
-  // Build Jitsi IFrame
+  // Get a meeting token (host = owner, agent = regular)
+  let token = null;
+  try {
+    const { data, error } = await sb.functions.invoke('daily-room', {
+      body: {
+        action: 'create_token',
+        room_name: meeting.jitsi_room,
+        is_owner: isHost,
+        user_name: displayName,
+        user_id: currentProfile.id
+      }
+    });
+    if(error || !data?.token){
+      alert('Could not get meeting token. Check that daily-room Edge Function is deployed.');
+      console.error('Token error:', error, data);
+      return;
+    }
+    token = data.token;
+  } catch(e){
+    alert('Error: ' + e.message);
+    return;
+  }
+
+  // Build UI
   document.getElementById('modal-box').innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
       <div>
@@ -4213,98 +4251,103 @@ function openJitsiRoom(meeting, isHost){
         <button class="bo-btn bo-btn-ghost" style="padding:7px 14px;font-size:12px;" onclick="leaveMeeting('${meeting.id}')">Leave</button>
       </div>
     </div>
-    <div id="jitsi-container" style="width:100%;height:70vh;background:#000;border-radius:10px;overflow:hidden;"></div>`;
+    <div id="daily-container" style="width:100%;height:70vh;background:#000;border-radius:10px;overflow:hidden;"></div>`;
 
-  // Make the modal box wider for video
   const modalBox = document.getElementById('modal-box');
   modalBox.style.maxWidth = '1100px';
   modalBox.style.width = '100%';
-
   document.getElementById('modal-backdrop').style.display = 'flex';
 
-  // Load Jitsi external API if not already loaded
-  if(!window.JitsiMeetExternalAPI){
+  // Load Daily.co SDK if not already present
+  if(!window.DailyIframe){
     const script = document.createElement('script');
-    script.src = 'https://meet.jit.si/external_api.js';
-    script.onload = () => initJitsi(meeting, roomName, displayName, email, isHost);
+    script.src = 'https://unpkg.com/@daily-co/daily-js';
+    script.onload = () => initDaily(meeting, token, displayName, isHost);
     document.head.appendChild(script);
   } else {
-    initJitsi(meeting, roomName, displayName, email, isHost);
+    initDaily(meeting, token, displayName, isHost);
   }
 }
 
-function initJitsi(meeting, roomName, displayName, email, isHost){
-  const domain = 'meet.jit.si';
-  const options = {
-    roomName: roomName,
-    parentNode: document.getElementById('jitsi-container'),
-    width: '100%',
-    height: '100%',
-    userInfo: { displayName, email },
-    configOverwrite: {
-      prejoinPageEnabled: false,
-      startWithAudioMuted: !isHost,
-      startWithVideoMuted: !isHost,
-      disableDeepLinking: true,
-      // Disable Jitsi's built-in lobby/moderator auth — we control access via our back office
-      enableLobbyChat: false,
-      lobby: { enableChat: false, autoKnock: false },
-      enableWelcomePage: false,
-      enableClosePage: false,
-      requireDisplayName: false,
-      disableProfile: false,
-      // Critical: treat everyone as having moderator rights so no "waiting for moderator" screen
-      disableModeratorIndicator: false,
-      toolbarButtons: isHost
-        ? ['microphone','camera','desktop','chat','raisehand','tileview','settings','hangup','fullscreen','recording','participants-pane','mute-everyone','videoquality']
-        : ['microphone','camera','desktop','chat','raisehand','tileview','settings','hangup','fullscreen']
-    },
-    interfaceConfigOverwrite: {
-      SHOW_JITSI_WATERMARK: false,
-      SHOW_WATERMARK_FOR_GUESTS: false,
-      DEFAULT_BACKGROUND: '#0A0A0A',
-      DEFAULT_REMOTE_DISPLAY_NAME: 'Team Member',
-      MOBILE_APP_PROMO: false,
-      SHOW_CHROME_EXTENSION_BANNER: false,
-      DISABLE_JOIN_LEAVE_NOTIFICATIONS: false
-    }
-  };
-  const api = new window.JitsiMeetExternalAPI(domain, options);
-  window._jitsiAPI = api;
+function initDaily(meeting, token, displayName, isHost){
+  const url = meeting.meeting_url + '?t=' + token;
+  const container = document.getElementById('daily-container');
 
-  // When video conference is joined, if we're the host and someone created a lobby, disable it
-  api.addEventListener('videoConferenceJoined', () => {
-    if(isHost){
-      try { api.executeCommand('toggleLobby', false); } catch(e){ /* ignore */ }
+  const callFrame = window.DailyIframe.createFrame(container, {
+    iframeStyle: {
+      width: '100%',
+      height: '100%',
+      border: '0',
+      borderRadius: '10px'
+    },
+    showLeaveButton: true,
+    showFullscreenButton: true,
+    theme: {
+      colors: {
+        accent: '#FF6B00',
+        accentText: '#FFFFFF',
+        background: '#0A0A0A',
+        backgroundAccent: '#1a1a1a',
+        baseText: '#FFFFFF',
+        border: '#222',
+        mainAreaBg: '#0A0A0A',
+        mainAreaBgAccent: '#141414',
+        mainAreaText: '#FFFFFF',
+        supportiveText: '#9CA3AF'
+      }
     }
   });
 
-  // Auto-start recording if enabled and host
-  if(isHost && meeting.recording_enabled){
-    setTimeout(() => {
-      try { api.executeCommand('startRecording', { mode: 'file' }); } catch(e){ console.warn('Recording start failed:', e); }
-    }, 3000);
+  window._dailyCallFrame = callFrame;
+
+  // Auto-admit all knockers if host (per user spec: host joins → everyone in)
+  if(isHost){
+    callFrame.on('waiting-participant-added', async (ev) => {
+      try {
+        await callFrame.updateWaitingParticipant(ev.participant.id, { grantRequestedAccess: true });
+      } catch(e){ console.warn('Auto-admit failed:', e); }
+    });
+    // Also sweep any already-waiting participants when host joins
+    callFrame.on('joined-meeting', async () => {
+      try {
+        const waiting = callFrame.waitingParticipants();
+        for(const id in waiting){
+          try { await callFrame.updateWaitingParticipant(id, { grantRequestedAccess: true }); } catch(e){}
+        }
+      } catch(e){ /* ignore */ }
+    });
   }
 
-  api.addEventListener('readyToClose', () => {
+  callFrame.on('left-meeting', () => {
     if(isHost){ endMeetingAsHost(meeting.id); }
     else { leaveMeeting(meeting.id); }
+  });
+
+  callFrame.join({ url, token, userName: displayName }).catch(err => {
+    console.error('Daily join error:', err);
+    alert('Could not join call: ' + (err.errorMsg || err.message || 'unknown error'));
   });
 }
 
 async function endMeetingAsHost(meetingId){
   if(!confirm('End the meeting for everyone?')) return;
+  const { data: m } = await sb.from('meetings').select('jitsi_room').eq('id', meetingId).single();
   await sb.from('meetings').update({ status: 'ended', ended_at: new Date().toISOString() }).eq('id', meetingId);
-  if(window._jitsiAPI){ try { window._jitsiAPI.dispose(); } catch(e){} window._jitsiAPI = null; }
+  if(window._dailyCallFrame){ try { window._dailyCallFrame.destroy(); } catch(e){} window._dailyCallFrame = null; }
+  // Delete the Daily room to free resources (non-critical if fails)
+  if(m?.jitsi_room){
+    try {
+      await sb.functions.invoke('daily-room', { body: { action: 'delete_room', room_name: m.jitsi_room } });
+    } catch(e){ /* ignore */ }
+  }
   closeAllModals();
-  // Reset modal width
   document.getElementById('modal-box').style.maxWidth = '560px';
   renderMainContent();
 }
 
 async function leaveMeeting(meetingId){
   await sb.from('meeting_participants').update({ status: 'left' }).eq('meeting_id', meetingId).eq('user_id', currentProfile.id);
-  if(window._jitsiAPI){ try { window._jitsiAPI.dispose(); } catch(e){} window._jitsiAPI = null; }
+  if(window._dailyCallFrame){ try { window._dailyCallFrame.destroy(); } catch(e){} window._dailyCallFrame = null; }
   closeAllModals();
   document.getElementById('modal-box').style.maxWidth = '560px';
   renderMainContent();
