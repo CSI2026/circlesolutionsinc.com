@@ -3192,8 +3192,23 @@ async function generateAndSetPassword(userId){
     const { data, error } = await sb.functions.invoke('admin-set-password', {
       body: { user_id: userId, new_password: pw }
     });
-    if(error || data?.error){
-      msg.innerHTML = '<span style="color:#F87171;">'+(data?.error || error.message || 'Failed')+'</span>';
+    let errText = null;
+    if(error){
+      try {
+        if(error.context && typeof error.context.json === 'function'){
+          const errBody = await error.context.json();
+          errText = errBody?.error || errBody?.message;
+        }
+      } catch(e){}
+      if(!errText && error.context && error.context.body){
+        try { const j = JSON.parse(error.context.body); errText = j.error || j.message; } catch(e){}
+      }
+      errText = errText || error.message || 'Unknown error';
+    } else if(data?.error){
+      errText = data.error;
+    }
+    if(errText){
+      msg.innerHTML = '<span style="color:#F87171;">'+escapeHtml(errText)+'</span>';
       return;
     }
     genDisplay.innerHTML = `
@@ -3206,7 +3221,6 @@ async function generateAndSetPassword(userId){
         <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-top:8px;line-height:1.5;">Copy this now and send it to the user securely (text, private message, etc.). They'll be prompted to change it on next login.</div>
       </div>`;
     msg.innerHTML = '';
-    // Notify the user via SMS (if they have notify_password enabled + carrier set)
     notifyUserOfPasswordChange(userId);
   } catch(e){
     msg.innerHTML = '<span style="color:#F87171;">Error: '+e.message+'. Make sure the admin-set-password Edge Function is deployed.</span>';
@@ -3223,8 +3237,25 @@ async function setCustomPassword(userId){
     const { data, error } = await sb.functions.invoke('admin-set-password', {
       body: { user_id: userId, new_password: pw }
     });
-    if(error || data?.error){
-      msg.innerHTML = '<span style="color:#F87171;">'+(data?.error || error.message || 'Failed')+'</span>';
+    // Surface the real server error, not just "non-2xx status"
+    let errText = null;
+    if(error){
+      // Supabase FunctionsHttpError has .context.body that contains the JSON we returned
+      try {
+        if(error.context && typeof error.context.json === 'function'){
+          const errBody = await error.context.json();
+          errText = errBody?.error || errBody?.message;
+        }
+      } catch(e){ /* ignore */ }
+      if(!errText && error.context && error.context.body){
+        try { const j = JSON.parse(error.context.body); errText = j.error || j.message; } catch(e){}
+      }
+      errText = errText || error.message || 'Unknown error';
+    } else if(data?.error){
+      errText = data.error;
+    }
+    if(errText){
+      msg.innerHTML = '<span style="color:#F87171;">'+escapeHtml(errText)+'</span>';
       return;
     }
     msg.innerHTML = '<span style="color:#00FF88;">✓ Password set. Remember to share it with the user — we won\'t display it again. They will be prompted to change it on next login.</span>';
@@ -5464,8 +5495,8 @@ function renderWizardStepBody(step){
     case 'document':
       const sigMethod = step.config?.signature_method || 'click_to_sign';
       const docUrl = step.config?.document_url || '';
-      return `<p style="font-size:13px;color:rgba(255,255,255,0.55);line-height:1.6;margin-bottom:14px;">Review the document, then ${sigMethod === 'acknowledge' ? 'check the box to acknowledge' : 'type your full legal name to sign'}.</p>
-        ${docUrl ? `<div style="margin-bottom:14px;"><a href="${escapeHtml(docUrl)}" target="_blank" rel="noopener" class="bo-btn bo-btn-ghost" style="display:inline-block;text-decoration:none;">📄 Open Document</a></div>` : ''}
+      return `<p style="font-size:13px;color:rgba(255,255,255,0.55);line-height:1.6;margin-bottom:14px;">Review the document below, then ${sigMethod === 'acknowledge' ? 'check the box to acknowledge' : 'type your full legal name to sign'}.</p>
+        ${docUrl ? `<div style="margin-bottom:14px;background:#fff;border-radius:6px;overflow:hidden;border:1px solid rgba(255,255,255,0.1);"><iframe src="${escapeHtml(docUrl)}#toolbar=1&navpanes=0" style="width:100%;height:380px;border:0;display:block;"></iframe></div>` : ''}
         ${readonly ? '<div style="color:#00FF88;font-size:13px;">✓ Signed on ' + new Date(step.completed_at).toLocaleString() + ' as: ' + escapeHtml(data.signature_value||'') + '</div>' : (sigMethod === 'click_to_sign' ? `
           <div class="form-group"><label class="form-label">Type your full legal name *</label><input id="wz-doc-name" class="form-input" placeholder="First Middle Last" ${ro}/></div>
           <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:10px;background:rgba(255,107,0,0.05);border:1px solid rgba(255,107,0,0.2);border-radius:8px;">
@@ -6451,10 +6482,14 @@ function renderContractEditor(){
       <div class="form-group">
         <label class="form-label">Upload PDF or Word document *</label>
         <input id="cb-file" type="file" class="form-input" accept=".pdf,.doc,.docx" onchange="cbHandleUpload(this)"/>
-        ${e.upload_url ? `<div style="margin-top:8px;font-size:12.5px;color:#00FF88;">✓ File uploaded: <a href="${escapeHtml(e.upload_url)}" target="_blank" rel="noopener" style="color:#FF6B00;">view</a></div>` : ''}
+        ${e.upload_url ? `
+          <div style="margin-top:10px;font-size:12.5px;color:#00FF88;margin-bottom:6px;">✓ File uploaded — preview below</div>
+          <div style="background:#fff;border-radius:6px;overflow:hidden;border:1px solid rgba(255,255,255,0.1);">
+            <iframe src="${escapeHtml(e.upload_url)}#toolbar=1&navpanes=0" style="width:100%;height:340px;border:0;display:block;"></iframe>
+          </div>` : ''}
       </div>
       <div style="background:rgba(255,193,7,0.05);border:1px solid rgba(255,193,7,0.2);border-radius:8px;padding:10px;font-size:12px;color:rgba(255,255,255,0.7);line-height:1.55;margin-bottom:14px;">
-        <strong style="color:#FFD700;">How signing works:</strong> The agent reviews your uploaded document, then types their full legal name and checks the agreement box. We generate a separate signature certificate page (with their name, IP, timestamp) and bundle it with your original PDF when they sign.
+        <strong style="color:#FFD700;">How signing works:</strong> The agent reviews your uploaded document inside the back office, then types their full legal name and checks the agreement box. We generate a separate signature certificate page (with their name, IP, timestamp) and bundle it with your original PDF when they sign.
       </div>
     ` : `
       <div class="form-group">
@@ -6519,13 +6554,37 @@ async function cbHandleUpload(input){
   const file = input.files[0];
   if(!file) return;
   if(file.size > 15*1024*1024){ alert('File must be under 15MB'); return; }
+
+  // ─── CRITICAL: save current form values before re-render so they're not lost ───
+  const e = window._cbEditor;
+  const titleEl = document.getElementById('cb-title');
+  const descEl = document.getElementById('cb-desc');
+  const progEl = document.getElementById('cb-program');
+  const activeEl = document.getElementById('cb-active');
+  const autoEl = document.getElementById('cb-auto');
+  if(titleEl)  e.title = titleEl.value;
+  if(descEl)   e.description = descEl.value;
+  if(progEl)   e.program_id = progEl.value;
+  if(activeEl) e.active = activeEl.checked;
+  if(autoEl)   e.auto_assign = autoEl.checked;
+
+  // Show uploading state (disable input, show spinner text)
+  const label = input.closest('.form-group')?.querySelector('label');
+  const origLabelText = label ? label.textContent : '';
+  if(label) label.textContent = 'Uploading…';
+  input.disabled = true;
+
   const ts = Date.now();
   const path = `${currentProfile.id}/${ts}-${file.name.replace(/[^a-zA-Z0-9.]/g,'_')}`;
   const { error } = await sb.storage.from('contract-templates').upload(path, file);
-  if(error){ alert('Upload failed: ' + error.message); return; }
+  if(error){
+    input.disabled = false;
+    if(label) label.textContent = origLabelText;
+    alert('Upload failed: ' + error.message); return;
+  }
   const { data: signed } = await sb.storage.from('contract-templates').createSignedUrl(path, 60*60*24*365*5);
-  window._cbEditor.upload_url = signed?.signedUrl || '';
-  window._cbEditor.upload_path = path;
+  e.upload_url = signed?.signedUrl || '';
+  e.upload_path = path;
   renderContractEditor();
 }
 
@@ -6589,18 +6648,18 @@ async function previewContractTemplate(id){
   document.getElementById('modal-box').innerHTML = `
     <h2 style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:#fff;margin-bottom:14px;letter-spacing:1px;">📄 Preview: ${escapeHtml(t.title)}</h2>
     ${t.source_type === 'upload' ? `
-      <div style="background:rgba(255,255,255,0.04);padding:14px;border-radius:8px;text-align:center;">
-        <div style="font-size:13px;color:rgba(255,255,255,0.65);margin-bottom:10px;">This is an uploaded PDF/Word document.</div>
-        <a href="${escapeHtml(t.upload_url)}" target="_blank" rel="noopener" class="bo-btn bo-btn-primary" style="display:inline-block;text-decoration:none;">Open in new tab →</a>
-      </div>` : `
-      <div style="background:#fff;color:#000;padding:30px;border-radius:8px;max-height:60vh;overflow-y:auto;font-family:Georgia,serif;font-size:14px;line-height:1.7;">
+      <div style="background:#fff;border-radius:8px;overflow:hidden;">
+        <iframe src="${escapeHtml(t.upload_url)}#toolbar=1&navpanes=0" style="width:100%;height:70vh;border:0;display:block;"></iframe>
+      </div>
+      <div style="font-size:11.5px;color:rgba(255,255,255,0.4);margin-top:8px;text-align:center;">If the document doesn't display, your browser may be blocking inline PDFs. The contract is rendered above using the browser's built-in PDF viewer.</div>` : `
+      <div style="background:#fff;color:#000;padding:30px;border-radius:8px;max-height:70vh;overflow-y:auto;font-family:Georgia,serif;font-size:14px;line-height:1.7;">
         ${(t.body_html || '').replace(/{{agent_name}}/g, '<strong style="background:#fff3cd;padding:2px 4px;">[Agent Name]</strong>')
                               .replace(/{{today_date}}/g, '<strong style="background:#fff3cd;padding:2px 4px;">' + new Date().toLocaleDateString() + '</strong>')
                               .replace(/{{signature}}/g, '<span style="border-bottom:2px solid #000;padding:0 60px;">&nbsp;</span>')
                               .replace(/{{signature_date}}/g, '<span style="border-bottom:2px solid #000;padding:0 30px;">&nbsp;</span>')}
       </div>`}
     <div style="margin-top:14px;text-align:right;"><button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Close</button></div>`;
-  document.getElementById('modal-box').style.maxWidth = '800px';
+  document.getElementById('modal-box').style.maxWidth = '900px';
   document.getElementById('modal-backdrop').style.display = 'flex';
 }
 
@@ -6715,7 +6774,8 @@ function contractAssignmentRow(a, isSigned){
       </div>
       <div style="display:flex;gap:6px;">
         ${isSigned
-          ? `<button class="bo-btn bo-btn-ghost" style="padding:6px 14px;font-size:12px;" onclick="downloadSignedContract('${a.id}')">📥 Download PDF</button>`
+          ? `<button class="bo-btn bo-btn-primary" style="padding:6px 14px;font-size:12px;" onclick="viewSignedContract('${a.id}')">👁 View</button>
+             <button class="bo-btn bo-btn-ghost" style="padding:6px 14px;font-size:12px;" onclick="downloadSignedContract('${a.id}')">📥 Download</button>`
           : `<button class="bo-btn bo-btn-primary" style="padding:6px 14px;font-size:12px;" onclick="openSignContractModal('${a.id}')">Review & Sign →</button>`
         }
       </div>
@@ -6740,15 +6800,14 @@ async function openSignContractModal(assignmentId){
   let bodyHtml = '';
   if(isUpload){
     bodyHtml = `
-      <div style="background:#fff;color:#000;padding:20px;border-radius:8px;text-align:center;">
-        <div style="font-size:13px;color:#444;margin-bottom:10px;">📄 ${escapeHtml(t.title)}</div>
-        <div style="font-size:12px;color:#666;margin-bottom:14px;">Click below to open the contract in a new tab. Read it fully before signing.</div>
-        <a href="${escapeHtml(t.upload_url)}" target="_blank" rel="noopener" class="bo-btn bo-btn-primary" style="display:inline-block;text-decoration:none;">Open Contract →</a>
-        <div style="margin-top:14px;font-size:11.5px;color:#888;">Your signature will be added on a separate certificate page bundled with this PDF.</div>
-      </div>`;
+      <div style="background:#fff;border-radius:8px;overflow:hidden;border:2px solid rgba(255,107,0,0.3);">
+        <div style="background:#0d0d0d;color:#FF6B00;padding:8px 14px;font-size:11px;font-weight:700;letter-spacing:1.5px;">📄 ${escapeHtml(t.title).toUpperCase()}</div>
+        <iframe src="${escapeHtml(t.upload_url)}#toolbar=1&navpanes=0" style="width:100%;height:55vh;border:0;display:block;"></iframe>
+      </div>
+      <div style="font-size:11.5px;color:rgba(255,255,255,0.45);margin-top:6px;text-align:center;">Read the full contract above before signing. If it doesn't display, your browser may be blocking inline PDFs — try a different browser.</div>`;
   } else {
     bodyHtml = `
-      <div style="background:#fff;color:#000;padding:30px;border-radius:8px;max-height:50vh;overflow-y:auto;font-family:Georgia,serif;font-size:14px;line-height:1.7;">
+      <div style="background:#fff;color:#000;padding:30px;border-radius:8px;max-height:55vh;overflow-y:auto;font-family:Georgia,serif;font-size:14px;line-height:1.7;border:2px solid rgba(255,107,0,0.3);">
         ${(t.body_html || '').replace(/{{agent_name}}/g, escapeHtml(agentName) || '<em style="color:#cc0000;">[Your Name]</em>')
                               .replace(/{{today_date}}/g, today)
                               .replace(/{{signature}}/g, '<span style="border-bottom:2px solid #000;padding:0 60px;color:#cc0000;font-style:italic;">[Your Signature]</span>')
@@ -6779,7 +6838,7 @@ async function openSignContractModal(assignmentId){
       <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Close (do not sign)</button>
     </div>
     <div id="sign-msg" style="margin-top:12px;font-size:13px;"></div>`;
-  document.getElementById('modal-box').style.maxWidth = '780px';
+  document.getElementById('modal-box').style.maxWidth = '900px';
   document.getElementById('modal-backdrop').style.display = 'flex';
 }
 
@@ -7045,11 +7104,40 @@ async function downloadSignedContract(assignmentId){
   if(!path){ alert('Signed PDF not found'); return; }
   const { data, error } = await sb.storage.from('signed-contracts').createSignedUrl(path, 60);
   if(error || !data?.signedUrl){ alert('Could not generate download link'); return; }
-  const link = document.createElement('a');
-  link.href = data.signedUrl;
-  link.download = ((a.template_snapshot?.title || 'contract').replace(/[^a-zA-Z0-9]/g,'_')) + '_signed.pdf';
-  link.target = '_blank';
-  document.body.appendChild(link); link.click(); link.remove();
+  // Fetch as blob and trigger download (no new tab)
+  try {
+    const resp = await fetch(data.signedUrl);
+    const blob = await resp.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = blobUrl;
+    link.download = ((a.template_snapshot?.title || 'contract').replace(/[^a-zA-Z0-9]/g,'_')) + '_signed.pdf';
+    document.body.appendChild(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+  } catch(e){
+    alert('Download failed: ' + e.message);
+  }
+}
+
+async function viewSignedContract(assignmentId){
+  const { data: a } = await sb.from('contract_assignments').select('signed_pdf_path,template_snapshot,signed_at').eq('id', assignmentId).single();
+  if(!a){ alert('Contract not found'); return; }
+  if(!a.signed_pdf_path){ alert('Signed PDF not found'); return; }
+  const { data, error } = await sb.storage.from('signed-contracts').createSignedUrl(a.signed_pdf_path, 60*5);
+  if(error || !data?.signedUrl){ alert('Could not load PDF'); return; }
+  const title = a.template_snapshot?.title || 'Signed Contract';
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#fff;margin-bottom:6px;letter-spacing:1px;">📄 ${escapeHtml(title)}</h2>
+    <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-bottom:12px;">Signed ${new Date(a.signed_at).toLocaleString()}</div>
+    <div style="background:#fff;border-radius:8px;overflow:hidden;border:1px solid rgba(255,255,255,0.1);">
+      <iframe src="${escapeHtml(data.signedUrl)}#toolbar=1&navpanes=0" style="width:100%;height:70vh;border:0;display:block;"></iframe>
+    </div>
+    <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end;">
+      <button class="bo-btn bo-btn-ghost" onclick="downloadSignedContract('${assignmentId}')">📥 Download Copy</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Close</button>
+    </div>`;
+  document.getElementById('modal-box').style.maxWidth = '900px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
 }
 
 
@@ -7186,6 +7274,7 @@ window.renderMyContracts = renderMyContracts;
 window.openSignContractModal = openSignContractModal;
 window.finalizeContractSignature = finalizeContractSignature;
 window.downloadSignedContract = downloadSignedContract;
+window.viewSignedContract = viewSignedContract;
 </script>
 
 </body>
