@@ -3136,13 +3136,15 @@ async function saveAgent(editId){
         full_name, email, password, role_label: roleLabel(role),
         programs: programs.map(pid => (allPrograms.find(p=>p.id===pid)||{}).name).filter(Boolean)
       });
-      emailStatus = emailResult?.success !== false ? ' Welcome email sent to ' + email + '.' : ' (Email send failed — click 📧 Email Login in team list to retry.)';
+      emailStatus = emailResult?.success !== false
+        ? '<div style="margin-top:8px;font-size:12.5px;color:rgba(255,255,255,0.7);line-height:1.55;">📧 Welcome email sent to <strong>' + escapeHtml(email) + '</strong>.<br/>💡 <strong style="color:#FFD700;">Heads up:</strong> First-time emails from new domains often land in spam. Tell them to check their junk/spam folder and mark it "Not Spam" so future emails reach their inbox.</div>'
+        : '<div style="margin-top:8px;font-size:12.5px;color:#F87171;">⚠️ Email send failed — click 📧 Email Login in the team list to retry.</div>';
     } catch(e){
-      emailStatus = ' (Email send failed — click 📧 Email Login in team list to retry.)';
+      emailStatus = '<div style="margin-top:8px;font-size:12.5px;color:#F87171;">⚠️ Email send failed — click 📧 Email Login in the team list to retry.</div>';
     }
 
-    msg.innerHTML = '<span style="color:#00FF88;">✓ Team member created.' + emailStatus + '</span>';
-    setTimeout(() => { closeAllModals(); renderMainContent(); }, 1800);
+    msg.innerHTML = '<div style="color:#00FF88;font-weight:600;">✓ Team member created.</div>' + emailStatus;
+    setTimeout(() => { closeAllModals(); renderMainContent(); }, 5500);
   } catch(e){
     msg.innerHTML = '<span style="color:#F87171;">Error: '+e.message+'. Make sure the admin-create-user Edge Function is deployed.</span>';
   }
