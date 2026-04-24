@@ -3087,69 +3087,65 @@ async function saveAgent(editId){
     return;
   }
 
-  // Create new user via signUp
+  // Create new user via Edge Function (keeps owner signed in — no more signup quirk)
   const password = document.getElementById('ag-password').value;
   if(!password || password.length < 6){ msg.innerHTML = '<span style="color:#F87171;">Password must be at least 6 characters.</span>'; return; }
 
   msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Creating account…</span>';
-  const { data, error } = await sb.auth.signUp({
-    email, password,
-    options: { data: { full_name, role, programs } }
-  });
-  if(error){ msg.innerHTML = '<span style="color:#F87171;">'+error.message+'</span>'; return; }
 
-  const { data: sessionData } = await sb.auth.getSession();
-  const currentAuthId = sessionData?.session?.user?.id;
-  const newUserId = data.user?.id;
+  try {
+    const { data, error } = await sb.functions.invoke('admin-create-user', {
+      body: {
+        email, password, full_name, phone: phone || null,
+        role, programs, market_id, reports_to,
+        phone_carrier, sms_opt_in,
+        can_host_meetings: currentProfile.role === 'owner' ? can_host_meetings : false
+      }
+    });
 
-  // Build profile update
-  const profileUpdate = {
-    full_name, phone: phone || null, role, programs, market_id, reports_to,
-    phone_carrier, sms_opt_in
-  };
-  if(currentProfile.role === 'owner'){ profileUpdate.can_host_meetings = can_host_meetings; }
-
-  if(currentAuthId && currentAuthId !== currentUser.id){
-    // We got signed in as the new user. Update their profile first while we have access.
-    if(newUserId){
-      await sb.from('profiles').update(profileUpdate).eq('id', newUserId);
-      // Auto-assign contract templates for each program
-      await autoAssignContracts(newUserId, programs);
+    // Parse server error the right way (don't just say "non-2xx status code")
+    let errText = null;
+    if(error){
+      try {
+        if(error.context && typeof error.context.json === 'function'){
+          const errBody = await error.context.json();
+          errText = errBody?.error || errBody?.message;
+        }
+      } catch(_){}
+      if(!errText && error.context && error.context.body){
+        try { const j = JSON.parse(error.context.body); errText = j.error || j.message; } catch(_){}
+      }
+      errText = errText || error.message || 'Unknown error';
+    } else if(data?.error){
+      errText = data.error;
     }
-    await sb.auth.signOut();
-    // Queue welcome email — we'll send it after owner signs back in? Actually we can try now but it may fail due to auth
-    // Best effort: try sending from the new user's session (they have limited perms but the edge function only checks auth)
+    if(errText){
+      msg.innerHTML = '<span style="color:#F87171;">'+escapeHtml(errText)+'</span>';
+      return;
+    }
+
+    const newUserId = data?.user_id;
+
+    // Auto-assign contracts for this agent's programs
+    if(newUserId) await autoAssignContracts(newUserId, programs);
+
+    // Send welcome email — best-effort
+    let emailStatus = '';
     try {
-      await sendEmailViaFunction('welcome', email, {
+      const emailResult = await sendEmailViaFunction('welcome', email, {
         full_name, email, password, role_label: roleLabel(role),
         programs: programs.map(pid => (allPrograms.find(p=>p.id===pid)||{}).name).filter(Boolean)
       });
-    } catch(e){ console.warn('Welcome email send attempted but may need retry:', e); }
-    msg.innerHTML = `<div style="color:#FFD700;background:rgba(255,215,0,0.08);padding:12px;border-radius:8px;border:1px solid rgba(255,215,0,0.2);line-height:1.6;">⚠️ <strong>${full_name}</strong> was created successfully. A welcome email with login details has been sent to <strong>${email}</strong>.<br><br>You've been signed out due to a Supabase signup quirk — <strong>sign back in</strong> to continue.</div>`;
-    setTimeout(() => { doLogout(); }, 5000);
-    return;
-  }
+      emailStatus = emailResult?.success !== false ? ' Welcome email sent to ' + email + '.' : ' (Email send failed — click 📧 Email Login in team list to retry.)';
+    } catch(e){
+      emailStatus = ' (Email send failed — click 📧 Email Login in team list to retry.)';
+    }
 
-  // Update the new profile with complete data
-  if(newUserId){
-    await sb.from('profiles').update(profileUpdate).eq('id', newUserId);
-    await autoAssignContracts(newUserId, programs);
-  }
-
-  // Send welcome email via Edge Function
-  let emailStatus = '';
-  try {
-    const emailResult = await sendEmailViaFunction('welcome', email, {
-      full_name, email, password, role_label: roleLabel(role),
-      programs: programs.map(pid => (allPrograms.find(p=>p.id===pid)||{}).name).filter(Boolean)
-    });
-    emailStatus = emailResult?.success ? ' Welcome email sent to ' + email + '.' : ' (Email send failed — click 📧 Email Login in team list to retry.)';
+    msg.innerHTML = '<span style="color:#00FF88;">✓ Team member created.' + emailStatus + '</span>';
+    setTimeout(() => { closeAllModals(); renderMainContent(); }, 1800);
   } catch(e){
-    emailStatus = ' (Email send failed — click 📧 Email Login in team list to retry.)';
+    msg.innerHTML = '<span style="color:#F87171;">Error: '+e.message+'. Make sure the admin-create-user Edge Function is deployed.</span>';
   }
-
-  msg.innerHTML = '<span style="color:#00FF88;">✓ Team member created.' + emailStatus + '</span>';
-  setTimeout(() => { closeAllModals(); renderMainContent(); }, 2000);
 }
 
 // Auto-assign contract templates when a new agent is added to a program
