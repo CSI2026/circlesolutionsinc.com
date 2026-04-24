@@ -2114,6 +2114,27 @@ function boShowAdmin(view){
   renderMainContent();
 }
 
+// ─── Feature gating: agent must have codes_unlocked=true to access training calls ───
+// Returns true if the current user is gated (i.e. they should be blocked from the feature).
+function isCodesGated(){
+  // Admins + above never gated
+  if(['owner','admin','manager','team_lead'].includes(currentProfile?.role)) return false;
+  // Completed onboarding but codes not yet unlocked by admin
+  if(currentProfile?.onboarding_status === 'complete' && !currentProfile?.codes_unlocked) return true;
+  return false;
+}
+
+function renderCodesGatedScreen(featureName){
+  return `
+    <div style="max-width:560px;margin:40px auto;text-align:center;padding:40px;background:#0d0d0d;border:1px solid rgba(255,193,7,0.25);border-radius:18px;">
+      <div style="font-size:60px;margin-bottom:18px;">⏳</div>
+      <div style="font-size:11px;color:#FFD700;font-weight:700;letter-spacing:3px;text-transform:uppercase;margin-bottom:8px;">Pending Codes</div>
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:36px;color:#fff;margin-bottom:10px;letter-spacing:1px;">${escapeHtml(featureName)} IS LOCKED</h1>
+      <p style="color:rgba(255,255,255,0.65);font-size:14px;line-height:1.6;margin-bottom:16px;">You've completed onboarding — nice work. Before you can access ${escapeHtml(featureName.toLowerCase())} and receive your codes, an admin needs to review your onboarding and unlock you.</p>
+      <p style="color:rgba(255,255,255,0.45);font-size:12.5px;line-height:1.55;">You'll see the rest of the back office open up automatically once they do. Sit tight.</p>
+    </div>`;
+}
+
 function boShowView(view){
   if(view === 'profile' || view === 'credentials'){
     activeAdminView = view;
@@ -2194,6 +2215,27 @@ function renderProgramView(el){
     <div id="bo-subcontent"></div>`;
 
   const sub = document.getElementById('bo-subcontent');
+
+  // Persistent gated-user banner (shows above everything in program views)
+  if(isCodesGated()){
+    const existing = document.getElementById('codes-gated-banner');
+    if(!existing){
+      const banner = document.createElement('div');
+      banner.id = 'codes-gated-banner';
+      banner.style.cssText = 'margin:-10px -10px 16px -10px;padding:12px 16px;background:linear-gradient(90deg,rgba(255,193,7,0.12),rgba(255,107,0,0.08));border:1px solid rgba(255,193,7,0.3);border-radius:10px;display:flex;align-items:center;gap:10px;';
+      banner.innerHTML = '<span style="font-size:20px;">⏳</span><div style="flex:1;"><div style="font-size:12.5px;font-weight:700;color:#FFD700;letter-spacing:1px;">PENDING CODES</div><div style="font-size:12px;color:rgba(255,255,255,0.7);margin-top:2px;">You\'ve completed onboarding. An admin will unlock your codes shortly — then Training Calls, Meetings, and Codes will be available.</div></div>';
+      sub.parentElement.insertBefore(banner, sub);
+    }
+  }
+
+  // Gate training calls + codes behind the admin-issued "codes_unlocked" flag
+  if(isCodesGated() && (activeSubView === 'training' || activeSubView === 'codes' || activeSubView === 'meetings')){
+    sub.innerHTML = renderCodesGatedScreen(
+      activeSubView === 'training' ? 'Training Calls' :
+      activeSubView === 'codes' ? 'Codes' : 'Meetings'
+    );
+    return;
+  }
   if(activeSubView === 'dashboard')          renderDashboard(sub, prog, canManage);
   else if(activeSubView === 'meetings')      renderMeetings(sub, prog, canManage);
   else if(activeSubView === 'training')      renderTraining(sub, prog, canManage);
@@ -2808,6 +2850,7 @@ async function renderAgents(el){
                 ${canEdit ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" onclick="openAgentModal('${a.id}')">Edit</button>` : ''}
                 ${(isOwner || isAdmin) && !isSelf ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" title="Email login details" onclick="emailLoginToAgent('${a.id}')">📧</button>` : ''}
                 ${canResetPw ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" onclick="openResetPasswordModal('${a.id}')">🔑</button>` : ''}
+                ${(isOwner || isAdmin) ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" title="View signed contracts" onclick="openAgentContractsModal('${a.id}')">📄</button>` : ''}
                 ${canToggleActive ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" onclick="toggleAgentActive('${a.id}', ${a.active})">${a.active ? 'Deactivate' : 'Activate'}</button>` : ''}
                 ${canDelete ? `<button class="bo-btn bo-btn-danger" style="padding:5px 10px;font-size:11px;margin-left:4px;" onclick="deleteAgent('${a.id}', '${(a.full_name || a.email).replace(/'/g,"\\'")}')">🗑️</button>` : ''}
               </td>
@@ -3112,13 +3155,37 @@ async function saveAgent(editId){
 // Auto-assign contract templates when a new agent is added to a program
 async function autoAssignContracts(userId, programs){
   if(!programs || programs.length === 0) return;
-  const { data: templates } = await sb.from('contract_templates').select('*').in('program_id', programs).eq('auto_assign', true);
-  if(!templates || templates.length === 0) return;
-  const rows = templates.map(t => ({
-    user_id: userId, program_id: t.program_id, title: t.title,
-    url: t.url || null, status: 'pending', notes: t.description || null
-  }));
-  await sb.from('contracts').insert(rows);
+
+  // Legacy external-link templates (if any still exist)
+  try {
+    const { data: legacyTemplates } = await sb.from('contract_templates').select('*').in('program_id', programs).eq('auto_assign', true);
+    if(legacyTemplates && legacyTemplates.length > 0){
+      const rows = legacyTemplates.map(t => ({
+        user_id: userId, program_id: t.program_id, title: t.title,
+        url: t.url || null, status: 'pending', notes: t.description || null
+      }));
+      await sb.from('contracts').insert(rows);
+    }
+  } catch(e){ /* legacy table may not exist for new installs */ }
+
+  // NEW in-house contract templates (v2) — creates contract_assignments rows
+  try {
+    const { data: v2Templates } = await sb.from('contract_templates_v2')
+      .select('*')
+      .in('program_id', programs)
+      .eq('auto_assign', true)
+      .eq('active', true);
+    if(v2Templates && v2Templates.length > 0){
+      const rows = v2Templates.map(t => ({
+        template_id: t.id,
+        template_snapshot: t,
+        user_id: userId,
+        assigned_by: currentProfile.id,
+        status: 'pending'
+      }));
+      await sb.from('contract_assignments').insert(rows);
+    }
+  } catch(e){ console.warn('Auto-assign v2 contracts failed:', e); }
 }
 
 async function toggleAgentActive(id, currentlyActive){
@@ -4835,104 +4902,6 @@ async function leaveMeeting(meetingId){
 
 
 // ═══════════════════════════════════════════════════════════════
-// PHASE 2 — CONTRACT TEMPLATES (owner only)
-// ═══════════════════════════════════════════════════════════════
-
-async function renderContractTemplates(el){
-  if(currentProfile.role !== 'owner'){
-    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied — owner only.</div>';
-    return;
-  }
-  const { data: templates } = await sb.from('contract_templates').select('*').order('program_id').order('title');
-  el.innerHTML = `
-    <div style="margin-bottom:24px;">
-      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">📄 Contract Templates</h1>
-      <p style="font-size:14px;color:rgba(255,255,255,0.5);">Default contracts assigned automatically when a new team member joins a program.</p>
-    </div>
-    ${allPrograms.map(prog => {
-      const progTemplates = (templates || []).filter(t => t.program_id === prog.id);
-      return `
-      <div class="bo-card" style="border-left:3px solid ${prog.color};">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:10px;">
-          <div>
-            <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:${prog.color};letter-spacing:1px;">${prog.icon} ${prog.name}</div>
-            <div style="font-size:12px;color:rgba(255,255,255,0.4);margin-top:2px;">${progTemplates.length} template${progTemplates.length===1?'':'s'}</div>
-          </div>
-          <button class="bo-btn bo-btn-primary" onclick="openContractTemplateModal('${prog.id}')">+ Add Template</button>
-        </div>
-        ${progTemplates.length === 0 ? '<div style="color:rgba(255,255,255,0.4);font-size:13px;padding:10px 0;">No templates. New agents in this program will not get any contracts auto-assigned.</div>' : `
-          <div>${progTemplates.map(t => `
-            <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:14px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
-              <div style="flex:1;min-width:0;">
-                <div style="font-size:14px;font-weight:700;color:#fff;">${escapeHtml(t.title)}</div>
-                ${t.description ? `<div style="font-size:12px;color:rgba(255,255,255,0.5);margin-top:2px;line-height:1.5;">${escapeHtml(t.description)}</div>` : ''}
-                <div style="display:flex;gap:8px;margin-top:6px;font-size:11px;">
-                  ${t.auto_assign ? '<span style="background:rgba(0,255,136,0.12);color:#00FF88;padding:2px 8px;border-radius:50px;">Auto-assigned</span>' : '<span style="color:rgba(255,255,255,0.35);">Manual only</span>'}
-                  ${t.url ? `<a href="${escapeHtml(t.url)}" target="_blank" rel="noopener" style="color:${prog.color};text-decoration:none;">Open doc →</a>` : ''}
-                </div>
-              </div>
-              <div style="display:flex;gap:6px;">
-                <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="openContractTemplateModal('${prog.id}','${t.id}')">Edit</button>
-                <button class="bo-btn bo-btn-danger" style="padding:5px 10px;font-size:11px;" onclick="deleteContractTemplate('${t.id}')">✕</button>
-              </div>
-            </div>`).join('')}</div>`}
-      </div>`;
-    }).join('')}
-  `;
-}
-
-async function openContractTemplateModal(programId, editId){
-  let existing = null;
-  if(editId){
-    const { data } = await sb.from('contract_templates').select('*').eq('id', editId).single();
-    existing = data;
-  }
-  const e = existing || {};
-  const prog = allPrograms.find(p => p.id === programId);
-  document.getElementById('modal-box').innerHTML = `
-    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:28px;color:#fff;margin-bottom:6px;letter-spacing:1px;">${editId ? 'Edit' : 'New'} Contract Template</h2>
-    <div style="font-size:13px;color:${prog?prog.color:'#888'};margin-bottom:18px;">${prog ? prog.icon + ' ' + prog.name : ''}</div>
-    <div class="form-group"><label class="form-label">Title *</label><input id="ct-title" class="form-input" value="${escapeHtml(e.title || '')}" placeholder="e.g. Independent Contractor Agreement"/></div>
-    <div class="form-group"><label class="form-label">Description (optional)</label><textarea id="ct-desc" class="form-input" rows="2">${escapeHtml(e.description || '')}</textarea></div>
-    <div class="form-group"><label class="form-label">Document Link (Google Drive, Dropbox, DocuSign, etc.)</label><input id="ct-url" class="form-input" value="${escapeHtml(e.url || '')}" placeholder="https://…"/></div>
-    <div class="form-group">
-      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
-        <input type="checkbox" id="ct-auto" ${e.auto_assign !== false ? 'checked' : ''} style="width:18px;height:18px;accent-color:#FF6B00;"/>
-        <div style="font-size:13.5px;color:#fff;">Auto-assign to new agents in this program</div>
-      </label>
-    </div>
-    <div style="display:flex;gap:10px;">
-      <button class="bo-btn bo-btn-primary" onclick="saveContractTemplate('${programId}','${editId || ''}')">${editId ? 'Save' : 'Create Template'}</button>
-      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
-    </div>
-    <div id="ct-msg" style="margin-top:12px;font-size:13px;"></div>`;
-  document.getElementById('modal-backdrop').style.display = 'flex';
-}
-
-async function saveContractTemplate(programId, editId){
-  const title = document.getElementById('ct-title').value.trim();
-  const description = document.getElementById('ct-desc').value.trim();
-  const url = document.getElementById('ct-url').value.trim();
-  const auto_assign = document.getElementById('ct-auto').checked;
-  const msg = document.getElementById('ct-msg');
-  if(!title){ msg.innerHTML = '<span style="color:#F87171;">Title required.</span>'; return; }
-  const payload = { program_id: programId, title, description: description || null, url: url || null, auto_assign };
-  let error;
-  if(editId){ ({ error } = await sb.from('contract_templates').update(payload).eq('id', editId)); }
-  else { ({ error } = await sb.from('contract_templates').insert(payload)); }
-  if(error){ msg.innerHTML = '<span style="color:#F87171;">'+error.message+'</span>'; return; }
-  closeAllModals();
-  renderMainContent();
-}
-
-async function deleteContractTemplate(id){
-  if(!confirm('Delete this template? Existing assigned contracts are not affected.')) return;
-  await sb.from('contract_templates').delete().eq('id', id);
-  renderMainContent();
-}
-
-
-// ═══════════════════════════════════════════════════════════════
 // PHASE 2 — FORMS (builder + submissions)
 // ═══════════════════════════════════════════════════════════════
 
@@ -5726,6 +5695,8 @@ async function wizardSubmit(stepId, stepType){
           onboarding_completed_at: new Date().toISOString()
         }).eq('id', currentProfile.id);
         currentProfile.onboarding_status = 'complete';
+        // Notify owner + admins so they can unlock codes
+        try { notifyAdminsOnboardingComplete(); } catch(e){ /* best-effort */ }
         showOnboardingCompleteScreen();
         return;
       }
@@ -5770,6 +5741,30 @@ function closeWizard(){
   closeAllModals();
   document.getElementById('modal-box').style.maxWidth = '560px';
   checkAndShowOnboardingLockout();
+}
+
+// When an agent completes all their onboarding, email owner + admins so they can unlock codes.
+async function notifyAdminsOnboardingComplete(){
+  try {
+    const { data: admins } = await sb.from('profiles')
+      .select('email,full_name')
+      .in('role', ['owner','admin'])
+      .eq('active', true);
+    if(!admins || admins.length === 0) return;
+    const agentName = currentProfile.full_name || currentProfile.email;
+    const agentPrograms = (currentProfile.programs || [])
+      .map(pid => { const p = allPrograms.find(x => x.id === pid); return p ? p.name : pid; })
+      .join(', ') || 'No programs assigned';
+    for(const admin of admins){
+      try {
+        await sendEmailViaFunction('announcement', admin.email, {
+          title: '✅ Agent ready for codes: ' + agentName,
+          body: agentName + ' has completed all onboarding steps and is ready for codes + training.\n\nPrograms: ' + agentPrograms + '\n\nLog in to the back office and go to 📋 Pending Onboarding → "Ready for Codes & Training" section to unlock them.',
+          posted_by: 'Circle Solutions System'
+        });
+      } catch(e){ console.warn('Admin notify email failed for', admin.email, e); }
+    }
+  } catch(e){ console.warn('notifyAdminsOnboardingComplete error:', e); }
 }
 
 function showOnboardingCompleteScreen(){
@@ -7260,6 +7255,73 @@ async function downloadSignedContract(assignmentId){
   }
 }
 
+// Owner/admin — view all contracts (pending + signed) for a specific agent
+async function openAgentContractsModal(userId){
+  if(!['owner','admin'].includes(currentProfile.role)){ alert('Access denied'); return; }
+  const { data: profile } = await sb.from('profiles').select('full_name,email').eq('id', userId).single();
+  const { data: assignments } = await sb.from('contract_assignments')
+    .select('*')
+    .eq('user_id', userId)
+    .order('assigned_at', { ascending: false });
+
+  const pending = (assignments || []).filter(a => a.status === 'pending');
+  const signed = (assignments || []).filter(a => a.status === 'signed');
+  const other = (assignments || []).filter(a => !['pending','signed'].includes(a.status));
+
+  const renderRow = (a) => {
+    const t = a.template_snapshot || {};
+    const isSigned = a.status === 'signed';
+    return `
+      <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:12px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:13.5px;font-weight:600;color:#fff;">${escapeHtml(t.title || 'Contract')}</div>
+          <div style="font-size:11px;color:rgba(255,255,255,0.45);margin-top:3px;">
+            Sent ${new Date(a.assigned_at).toLocaleDateString()}
+            ${isSigned ? ' · Signed ' + new Date(a.signed_at).toLocaleDateString() : ''}
+            ${a.ip_address ? ' · IP ' + escapeHtml(a.ip_address) : ''}
+          </div>
+        </div>
+        <div style="display:flex;gap:4px;flex-wrap:wrap;">
+          ${isSigned
+            ? `<button class="bo-btn bo-btn-primary" style="padding:5px 12px;font-size:11px;" onclick="viewSignedContract('${a.id}')">👁 View</button>
+               <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="downloadSignedContract('${a.id}')">📥 Download</button>`
+            : a.status === 'pending'
+            ? '<span style="font-size:11px;color:#FFD700;padding:5px 10px;">⏳ Awaiting Signature</span>'
+            : '<span style="font-size:11px;color:rgba(255,255,255,0.45);padding:5px 10px;">' + escapeHtml(a.status) + '</span>'
+          }
+        </div>
+      </div>`;
+  };
+
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:#fff;margin-bottom:4px;letter-spacing:1px;">📄 Contracts for ${escapeHtml(profile?.full_name || profile?.email || 'Agent')}</h2>
+    <div style="font-size:12.5px;color:rgba(255,255,255,0.5);margin-bottom:18px;">${escapeHtml(profile?.email || '')}</div>
+
+    ${(assignments || []).length === 0 ? `
+      <div style="text-align:center;padding:40px;color:rgba(255,255,255,0.4);">No contracts have been sent to this agent yet.</div>
+    ` : `
+      ${pending.length > 0 ? `
+        <div style="margin-bottom:18px;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FF6B00;letter-spacing:1px;margin-bottom:8px;">⏳ Pending (${pending.length})</div>
+          ${pending.map(renderRow).join('')}
+        </div>` : ''}
+      ${signed.length > 0 ? `
+        <div style="margin-bottom:18px;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#00FF88;letter-spacing:1px;margin-bottom:8px;">✓ Signed (${signed.length})</div>
+          ${signed.map(renderRow).join('')}
+        </div>` : ''}
+      ${other.length > 0 ? `
+        <div>
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:rgba(255,255,255,0.5);letter-spacing:1px;margin-bottom:8px;">Other (${other.length})</div>
+          ${other.map(renderRow).join('')}
+        </div>` : ''}
+    `}
+
+    <div style="margin-top:14px;text-align:right;"><button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Close</button></div>`;
+  document.getElementById('modal-box').style.maxWidth = '720px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
 async function viewSignedContract(assignmentId){
   const { data: a } = await sb.from('contract_assignments').select('signed_pdf_path,template_snapshot,signed_at').eq('id', assignmentId).single();
   if(!a){ alert('Contract not found'); return; }
@@ -7347,10 +7409,6 @@ window.startMeeting = startMeeting;
 window.joinMeeting = joinMeeting;
 window.endMeetingAsHost = endMeetingAsHost;
 window.leaveMeeting = leaveMeeting;
-window.renderContractTemplates = renderContractTemplates;
-window.openContractTemplateModal = openContractTemplateModal;
-window.saveContractTemplate = saveContractTemplate;
-window.deleteContractTemplate = deleteContractTemplate;
 window.renderFormsAdmin = renderFormsAdmin;
 window.renderMyForms = renderMyForms;
 window.openFormBuilderModal = openFormBuilderModal;
@@ -7419,6 +7477,7 @@ window.openSignContractModal = openSignContractModal;
 window.finalizeContractSignature = finalizeContractSignature;
 window.downloadSignedContract = downloadSignedContract;
 window.viewSignedContract = viewSignedContract;
+window.openAgentContractsModal = openAgentContractsModal;
 </script>
 
 </body>
