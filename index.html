@@ -8,6 +8,13 @@
 <!-- Supabase JS SDK (loaded before page scripts) -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+  // Configure PDF.js worker (required)
+  if(window.pdfjsLib){
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  }
+</script>
 <script>
   // ─── Supabase Config ─────────────────────────────────────────
   // These values are safe to expose in client code — the anon key
@@ -5415,6 +5422,13 @@ function renderWizardStep(){
   const modalBox = document.getElementById('modal-box');
   modalBox.style.maxWidth = '640px';
   document.getElementById('modal-backdrop').style.display = 'flex';
+
+  // Render PDF document inline if this step is a document with a URL
+  const docPreview = document.getElementById('wz-doc-preview');
+  if(docPreview){
+    const url = docPreview.getAttribute('data-doc-url');
+    if(url) renderPdfInline(docPreview, url, { maxWidth: 580 });
+  }
 }
 
 function renderWizardStepBody(step){
@@ -5496,7 +5510,7 @@ function renderWizardStepBody(step){
       const sigMethod = step.config?.signature_method || 'click_to_sign';
       const docUrl = step.config?.document_url || '';
       return `<p style="font-size:13px;color:rgba(255,255,255,0.55);line-height:1.6;margin-bottom:14px;">Review the document below, then ${sigMethod === 'acknowledge' ? 'check the box to acknowledge' : 'type your full legal name to sign'}.</p>
-        ${docUrl ? `<div style="margin-bottom:14px;background:#fff;border-radius:6px;overflow:hidden;border:1px solid rgba(255,255,255,0.1);"><iframe src="${escapeHtml(docUrl)}#toolbar=1&navpanes=0" style="width:100%;height:380px;border:0;display:block;"></iframe></div>` : ''}
+        ${docUrl ? `<div id="wz-doc-preview" data-doc-url="${escapeHtml(docUrl)}" style="margin-bottom:14px;border-radius:6px;overflow:hidden;border:1px solid rgba(255,255,255,0.1);height:380px;"></div>` : ''}
         ${readonly ? '<div style="color:#00FF88;font-size:13px;">✓ Signed on ' + new Date(step.completed_at).toLocaleString() + ' as: ' + escapeHtml(data.signature_value||'') + '</div>' : (sigMethod === 'click_to_sign' ? `
           <div class="form-group"><label class="form-label">Type your full legal name *</label><input id="wz-doc-name" class="form-input" placeholder="First Middle Last" ${ro}/></div>
           <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;padding:10px;background:rgba(255,107,0,0.05);border:1px solid rgba(255,107,0,0.2);border-radius:8px;">
@@ -6353,6 +6367,75 @@ async function unlockCodesForAgent(userId){
 // ═══════════════════════════════════════════════════════════════════════
 
 // ─────────────────────────────────────────────────────────────────────
+// PDF.js-based inline renderer — no iframes, no external viewers
+// Renders every page as a canvas image inside a scrollable container.
+// ─────────────────────────────────────────────────────────────────────
+async function renderPdfInline(containerEl, pdfSource, opts){
+  // pdfSource can be a Blob, a File, an ArrayBuffer, or a URL string
+  opts = opts || {};
+  const maxWidth = opts.maxWidth || 820;  // target pixel width
+  const pageGap = 8;
+
+  if(!window.pdfjsLib){
+    containerEl.innerHTML = '<div style="padding:20px;text-align:center;color:#F87171;font-size:13px;">PDF viewer not loaded. Please refresh the page.</div>';
+    return;
+  }
+
+  containerEl.innerHTML = '<div style="padding:40px;text-align:center;color:#666;font-size:13px;">Loading document…</div>';
+
+  try {
+    let data;
+    if(typeof pdfSource === 'string'){
+      // URL — fetch first
+      const resp = await fetch(pdfSource);
+      if(!resp.ok) throw new Error('Fetch failed: '+resp.status);
+      data = await resp.arrayBuffer();
+    } else if(pdfSource instanceof Blob || pdfSource instanceof File){
+      data = await pdfSource.arrayBuffer();
+    } else if(pdfSource instanceof ArrayBuffer){
+      data = pdfSource;
+    } else {
+      throw new Error('Unsupported PDF source');
+    }
+
+    const pdf = await window.pdfjsLib.getDocument({ data }).promise;
+    const totalPages = pdf.numPages;
+
+    // Clear loading state and set up container
+    containerEl.innerHTML = '';
+    containerEl.style.background = '#525659';
+    containerEl.style.padding = pageGap + 'px';
+    containerEl.style.display = 'flex';
+    containerEl.style.flexDirection = 'column';
+    containerEl.style.alignItems = 'center';
+    containerEl.style.gap = pageGap + 'px';
+    containerEl.style.overflowY = 'auto';
+
+    // Render each page
+    for(let n = 1; n <= totalPages; n++){
+      const page = await pdf.getPage(n);
+      const origViewport = page.getViewport({ scale: 1 });
+      const scale = Math.min(maxWidth / origViewport.width, 2.5);
+      const viewport = page.getViewport({ scale });
+
+      const canvas = document.createElement('canvas');
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      canvas.style.maxWidth = '100%';
+      canvas.style.boxShadow = '0 2px 8px rgba(0,0,0,0.4)';
+      canvas.style.display = 'block';
+      containerEl.appendChild(canvas);
+
+      await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+    }
+  } catch(err){
+    console.error('PDF render error:', err);
+    containerEl.innerHTML = '<div style="padding:20px;text-align:center;color:#F87171;font-size:13px;">Could not render PDF: '+escapeHtml(err.message)+'</div>';
+  }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
 // MAIN VIEW: Contract Builder (owner only)
 // ─────────────────────────────────────────────────────────────────────
 async function renderContractBuilder(el){
@@ -6483,10 +6566,15 @@ function renderContractEditor(){
         <label class="form-label">Upload PDF or Word document *</label>
         <input id="cb-file" type="file" class="form-input" accept=".pdf,.doc,.docx" onchange="cbHandleUpload(this)"/>
         ${e.upload_url ? `
-          <div style="margin-top:10px;font-size:12.5px;color:#00FF88;margin-bottom:6px;">✓ File uploaded — preview below</div>
-          <div style="background:#fff;border-radius:6px;overflow:hidden;border:1px solid rgba(255,255,255,0.1);">
-            <iframe src="${escapeHtml(e.upload_url)}#toolbar=1&navpanes=0" style="width:100%;height:340px;border:0;display:block;"></iframe>
-          </div>` : ''}
+          <div style="margin-top:10px;font-size:12.5px;color:#00FF88;margin-bottom:6px;">✓ File uploaded${e.upload_filename ? ': ' + escapeHtml(e.upload_filename) : ''} — preview below</div>
+          ${(e.upload_ext === 'pdf' || (!e.upload_ext && (e.upload_path || '').toLowerCase().includes('.pdf'))) ? `
+            <div id="cb-pdf-preview" style="border-radius:6px;overflow:hidden;border:1px solid rgba(255,255,255,0.1);max-height:380px;"></div>
+          ` : `
+            <div style="background:rgba(255,193,7,0.08);border:1px solid rgba(255,193,7,0.3);border-radius:8px;padding:14px;text-align:center;">
+              <div style="font-size:13px;color:#FFD700;font-weight:600;margin-bottom:6px;">📄 Word document uploaded</div>
+              <div style="font-size:12px;color:rgba(255,255,255,0.65);line-height:1.5;">Browsers can't preview Word files natively. The file is saved and will be downloadable when agents sign. For inline preview with agents, re-upload as PDF (Word → File → Save As → PDF).</div>
+            </div>
+          `}` : ''}
       </div>
       <div style="background:rgba(255,193,7,0.05);border:1px solid rgba(255,193,7,0.2);border-radius:8px;padding:10px;font-size:12px;color:rgba(255,255,255,0.7);line-height:1.55;margin-bottom:14px;">
         <strong style="color:#FFD700;">How signing works:</strong> The agent reviews your uploaded document inside the back office, then types their full legal name and checks the agreement box. We generate a separate signature certificate page (with their name, IP, timestamp) and bundle it with your original PDF when they sign.
@@ -6534,6 +6622,14 @@ function renderContractEditor(){
     <div id="cb-msg" style="margin-top:12px;font-size:13px;"></div>`;
   document.getElementById('modal-box').style.maxWidth = '800px';
   document.getElementById('modal-backdrop').style.display = 'flex';
+
+  // After the modal is in the DOM, render the PDF preview into the container (if we have a file)
+  const pdfContainer = document.getElementById('cb-pdf-preview');
+  if(pdfContainer){
+    // Prefer the raw File object (instant, no network); fallback to fetch the upload_url
+    const source = e._rawFile || e.upload_url;
+    if(source) renderPdfInline(pdfContainer, source, { maxWidth: 780 });
+  }
 }
 
 function closeCbEditor(){
@@ -6568,10 +6664,16 @@ async function cbHandleUpload(input){
   if(activeEl) e.active = activeEl.checked;
   if(autoEl)   e.auto_assign = autoEl.checked;
 
-  // Show uploading state (disable input, show spinner text)
+  // Track file type so preview can handle PDF vs Word differently
+  const ext = (file.name.split('.').pop() || '').toLowerCase();
+  e.upload_ext = ext;
+  e.upload_filename = file.name;
+  e._rawFile = file;  // keep raw file for instant inline render (no network round-trip)
+
+  // Show uploading state
   const label = input.closest('.form-group')?.querySelector('label');
   const origLabelText = label ? label.textContent : '';
-  if(label) label.textContent = 'Uploading…';
+  if(label) label.textContent = 'Uploading to storage…';
   input.disabled = true;
 
   const ts = Date.now();
@@ -6645,13 +6747,23 @@ async function deleteTemplate(id){
 async function previewContractTemplate(id){
   const { data: t } = await sb.from('contract_templates_v2').select('*').eq('id', id).single();
   if(!t){ alert('Template not found'); return; }
+
+  // Determine if it's a PDF (for uploads)
+  const isUploaded = t.source_type === 'upload';
+  const isPdf = isUploaded && t.upload_path && t.upload_path.toLowerCase().endsWith('.pdf');
+
   document.getElementById('modal-box').innerHTML = `
     <h2 style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:#fff;margin-bottom:14px;letter-spacing:1px;">📄 Preview: ${escapeHtml(t.title)}</h2>
-    ${t.source_type === 'upload' ? `
-      <div style="background:#fff;border-radius:8px;overflow:hidden;">
-        <iframe src="${escapeHtml(t.upload_url)}#toolbar=1&navpanes=0" style="width:100%;height:70vh;border:0;display:block;"></iframe>
-      </div>
-      <div style="font-size:11.5px;color:rgba(255,255,255,0.4);margin-top:8px;text-align:center;">If the document doesn't display, your browser may be blocking inline PDFs. The contract is rendered above using the browser's built-in PDF viewer.</div>` : `
+    ${isUploaded ? (
+      isPdf ? `
+        <div id="cb-preview-pdf" style="border-radius:8px;overflow:hidden;height:70vh;"></div>
+      ` : `
+        <div style="background:rgba(255,193,7,0.08);border:1px solid rgba(255,193,7,0.3);border-radius:8px;padding:20px;text-align:center;">
+          <div style="font-size:14px;color:#FFD700;font-weight:600;margin-bottom:8px;">📄 Word document</div>
+          <div style="font-size:12.5px;color:rgba(255,255,255,0.7);line-height:1.55;">Browsers can't preview Word files in the back office. Agents will see this same message when they receive it. Re-upload as PDF for full inline preview.</div>
+        </div>
+      `
+    ) : `
       <div style="background:#fff;color:#000;padding:30px;border-radius:8px;max-height:70vh;overflow-y:auto;font-family:Georgia,serif;font-size:14px;line-height:1.7;">
         ${(t.body_html || '').replace(/{{agent_name}}/g, '<strong style="background:#fff3cd;padding:2px 4px;">[Agent Name]</strong>')
                               .replace(/{{today_date}}/g, '<strong style="background:#fff3cd;padding:2px 4px;">' + new Date().toLocaleDateString() + '</strong>')
@@ -6661,6 +6773,15 @@ async function previewContractTemplate(id){
     <div style="margin-top:14px;text-align:right;"><button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Close</button></div>`;
   document.getElementById('modal-box').style.maxWidth = '900px';
   document.getElementById('modal-backdrop').style.display = 'flex';
+
+  // Render PDF via PDF.js if applicable
+  if(isPdf){
+    const container = document.getElementById('cb-preview-pdf');
+    try {
+      const { data: sig } = await sb.storage.from('contract-templates').createSignedUrl(t.upload_path, 300);
+      if(sig?.signedUrl) renderPdfInline(container, sig.signedUrl, { maxWidth: 850 });
+    } catch(e){ console.warn('Preview signed url failed:', e); }
+  }
 }
 
 
@@ -6795,16 +6916,25 @@ async function openSignContractModal(assignmentId){
   const isUpload = t.source_type === 'upload';
   const today = new Date().toLocaleDateString();
   const agentName = currentProfile.full_name || '';
+  const isPdf = isUpload && t.upload_path && t.upload_path.toLowerCase().endsWith('.pdf');
 
   // Render contract body with tokens replaced by visual placeholders
   let bodyHtml = '';
   if(isUpload){
-    bodyHtml = `
-      <div style="background:#fff;border-radius:8px;overflow:hidden;border:2px solid rgba(255,107,0,0.3);">
-        <div style="background:#0d0d0d;color:#FF6B00;padding:8px 14px;font-size:11px;font-weight:700;letter-spacing:1.5px;">📄 ${escapeHtml(t.title).toUpperCase()}</div>
-        <iframe src="${escapeHtml(t.upload_url)}#toolbar=1&navpanes=0" style="width:100%;height:55vh;border:0;display:block;"></iframe>
-      </div>
-      <div style="font-size:11.5px;color:rgba(255,255,255,0.45);margin-top:6px;text-align:center;">Read the full contract above before signing. If it doesn't display, your browser may be blocking inline PDFs — try a different browser.</div>`;
+    if(isPdf){
+      bodyHtml = `
+        <div style="border-radius:8px;overflow:hidden;border:2px solid rgba(255,107,0,0.3);">
+          <div style="background:#0d0d0d;color:#FF6B00;padding:8px 14px;font-size:11px;font-weight:700;letter-spacing:1.5px;">📄 ${escapeHtml(t.title).toUpperCase()}</div>
+          <div id="sign-pdf-preview" style="height:55vh;"></div>
+        </div>
+        <div style="font-size:11.5px;color:rgba(255,255,255,0.45);margin-top:6px;text-align:center;">Read the full contract above before signing.</div>`;
+    } else {
+      bodyHtml = `
+        <div style="background:rgba(255,193,7,0.08);border:1px solid rgba(255,193,7,0.3);border-radius:8px;padding:20px;">
+          <div style="font-size:14px;color:#FFD700;font-weight:600;margin-bottom:8px;">📄 ${escapeHtml(t.title)}</div>
+          <div style="font-size:12.5px;color:rgba(255,255,255,0.7);line-height:1.55;">This contract is in Word format which can't be previewed in the browser. Contact your owner/admin for a PDF copy before signing.</div>
+        </div>`;
+    }
   } else {
     bodyHtml = `
       <div style="background:#fff;color:#000;padding:30px;border-radius:8px;max-height:55vh;overflow-y:auto;font-family:Georgia,serif;font-size:14px;line-height:1.7;border:2px solid rgba(255,107,0,0.3);">
@@ -6840,6 +6970,17 @@ async function openSignContractModal(assignmentId){
     <div id="sign-msg" style="margin-top:12px;font-size:13px;"></div>`;
   document.getElementById('modal-box').style.maxWidth = '900px';
   document.getElementById('modal-backdrop').style.display = 'flex';
+
+  // Render PDF via PDF.js (after modal in DOM)
+  if(isPdf && t.upload_path){
+    const container = document.getElementById('sign-pdf-preview');
+    if(container){
+      try {
+        const { data: sig } = await sb.storage.from('contract-templates').createSignedUrl(t.upload_path, 300);
+        if(sig?.signedUrl) renderPdfInline(container, sig.signedUrl, { maxWidth: 830 });
+      } catch(e){ console.warn('Sign modal pdf fetch failed:', e); }
+    }
+  }
 }
 
 async function finalizeContractSignature(assignmentId){
@@ -7123,21 +7264,24 @@ async function viewSignedContract(assignmentId){
   const { data: a } = await sb.from('contract_assignments').select('signed_pdf_path,template_snapshot,signed_at').eq('id', assignmentId).single();
   if(!a){ alert('Contract not found'); return; }
   if(!a.signed_pdf_path){ alert('Signed PDF not found'); return; }
-  const { data, error } = await sb.storage.from('signed-contracts').createSignedUrl(a.signed_pdf_path, 60*5);
-  if(error || !data?.signedUrl){ alert('Could not load PDF'); return; }
   const title = a.template_snapshot?.title || 'Signed Contract';
   document.getElementById('modal-box').innerHTML = `
     <h2 style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#fff;margin-bottom:6px;letter-spacing:1px;">📄 ${escapeHtml(title)}</h2>
     <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-bottom:12px;">Signed ${new Date(a.signed_at).toLocaleString()}</div>
-    <div style="background:#fff;border-radius:8px;overflow:hidden;border:1px solid rgba(255,255,255,0.1);">
-      <iframe src="${escapeHtml(data.signedUrl)}#toolbar=1&navpanes=0" style="width:100%;height:70vh;border:0;display:block;"></iframe>
-    </div>
+    <div id="signed-pdf-view" style="border-radius:8px;overflow:hidden;height:70vh;"></div>
     <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end;">
       <button class="bo-btn bo-btn-ghost" onclick="downloadSignedContract('${assignmentId}')">📥 Download Copy</button>
       <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Close</button>
     </div>`;
   document.getElementById('modal-box').style.maxWidth = '900px';
   document.getElementById('modal-backdrop').style.display = 'flex';
+
+  // Render PDF inline
+  const container = document.getElementById('signed-pdf-view');
+  try {
+    const { data: sig } = await sb.storage.from('signed-contracts').createSignedUrl(a.signed_pdf_path, 300);
+    if(sig?.signedUrl) renderPdfInline(container, sig.signedUrl, { maxWidth: 850 });
+  } catch(e){ console.warn('Signed PDF fetch failed:', e); }
 }
 
 
