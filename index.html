@@ -2165,6 +2165,11 @@ function renderMainContent(){
   if(activeAdminView === 'my-contracts'){ renderMyContracts(el); return; }
   if(activeAdminView === 'onboarding-master'){ renderOnboardingMaster(el); return; }
   if(activeAdminView === 'onboarding-pending'){ renderOnboardingPending(el); return; }
+  if(activeAdminView === 'agent-profile'){
+    if(window._currentAgentProfileId) openAgentProfile(window._currentAgentProfileId);
+    else { activeAdminView = 'agents'; renderAgents(el); }
+    return;
+  }
 
   if(!activeProgramId){
     el.innerHTML = `
@@ -2893,13 +2898,14 @@ async function renderAgents(el){
               onboardingBadge = '<span style="background:rgba(248,113,113,0.12);color:#F87171;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;white-space:nowrap;">⏳ NOT STARTED</span>';
             }
 
+            const canViewProfile = isOwner || isAdmin;
             return `
             <tr data-agent-id="${a.id}" data-search="${(a.full_name + ' ' + a.email).toLowerCase()}">
               <td>
-                <div style="display:flex;align-items:center;gap:10px;">
+                <div style="display:flex;align-items:center;gap:10px;${canViewProfile ? 'cursor:pointer;' : ''}" ${canViewProfile ? `onclick="openAgentProfile('${a.id}')"` : ''} ${canViewProfile ? 'title="View full profile"' : ''}>
                   ${avatarHtml}
                   <div>
-                    <div style="font-weight:600;color:#fff;">${a.full_name || '—'}${isSelf ? ' <span style="color:rgba(255,255,255,0.35);font-weight:400;font-size:11px;">(you)</span>' : ''}</div>
+                    <div style="font-weight:600;color:#fff;${canViewProfile ? 'text-decoration:underline;text-decoration-color:rgba(255,255,255,0.15);text-underline-offset:3px;' : ''}">${a.full_name || '—'}${isSelf ? ' <span style="color:rgba(255,255,255,0.35);font-weight:400;font-size:11px;">(you)</span>' : ''}</div>
                     <div style="font-size:11.5px;color:rgba(255,255,255,0.5);">${a.email}</div>
                   </div>
                 </div>
@@ -2911,11 +2917,11 @@ async function renderAgents(el){
               <td>${onboardingBadge}</td>
               <td>${a.active ? '<span style="color:#00FF88;font-size:12px;">● Active</span>' : '<span style="color:rgba(255,255,255,0.4);font-size:12px;">○ Inactive</span>'}</td>
               <td style="text-align:right;white-space:nowrap;">
+                ${canViewProfile ? `<button class="bo-btn bo-btn-primary" style="padding:5px 10px;font-size:11px;margin-left:4px;" title="View full profile" onclick="openAgentProfile('${a.id}')">👤 Profile</button>` : ''}
                 ${canEdit ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" onclick="openAgentModal('${a.id}')">Edit</button>` : ''}
                 ${(isOwner || isAdmin) && !isSelf ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" title="Resend welcome email" onclick="emailLoginToAgent('${a.id}')">📧</button>` : ''}
                 ${(isOwner || isAdmin) && !isSelf ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" title="Copy login link" onclick="copyLoginLink('${a.id}')">🔗</button>` : ''}
                 ${canResetPw ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" title="Manage password" onclick="openResetPasswordModal('${a.id}')">🔑</button>` : ''}
-                ${(isOwner || isAdmin) ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" title="View signed contracts" onclick="openAgentContractsModal('${a.id}')">📄</button>` : ''}
                 ${canToggleActive ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" onclick="toggleAgentActive('${a.id}', ${a.active})">${a.active ? 'Deactivate' : 'Activate'}</button>` : ''}
                 ${canDelete ? `<button class="bo-btn bo-btn-danger" style="padding:5px 10px;font-size:11px;margin-left:4px;" onclick="deleteAgent('${a.id}', '${(a.full_name || a.email).replace(/'/g,"\\'")}')">🗑️</button>` : ''}
               </td>
@@ -2937,6 +2943,279 @@ function roleLabel(r){ return {owner:'OWNER',admin:'ADMIN',manager:'MANAGER',tea
 
 function roleBadgeBg(r){ return {owner:'rgba(255,215,0,0.15)',admin:'rgba(255,0,128,0.15)',manager:'rgba(0,198,255,0.15)',team_lead:'rgba(168,85,247,0.15)',agent:'rgba(0,255,136,0.12)'}[r] || 'rgba(255,255,255,0.1)'; }
 function roleBadgeColor(r){ return {owner:'#FFD700',admin:'#FF0080',manager:'#00C6FF',team_lead:'#A855F7',agent:'#00FF88'}[r] || '#fff'; }
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// AGENT PROFILE PAGE — unified view for owners/admins to manage an agent
+// Shows: avatar, name, email, phone, role, programs, market, reports-to,
+// onboarding status, contracts list, onboarding progress.
+// Action buttons: Send Packet, Send Contract, Edit, Manage Password, Resend Welcome.
+// ═══════════════════════════════════════════════════════════════════════
+async function openAgentProfile(userId){
+  const canManage = ['owner','admin'].includes(currentProfile.role);
+
+  const el = document.getElementById('bo-content');
+  el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading agent profile…</div>';
+  window._currentAgentProfileId = userId;  // for back button / refresh
+  activeAdminView = 'agent-profile';
+  renderSidebar();
+
+  // Fetch agent + related data in parallel
+  const [
+    { data: agent },
+    { data: packets },
+    { data: contracts },
+  ] = await Promise.all([
+    sb.from('profiles').select('*').eq('id', userId).single(),
+    sb.from('agent_onboarding').select('*').eq('user_id', userId).order('assigned_at', { ascending: false }),
+    sb.from('contract_assignments').select('*').eq('user_id', userId).order('assigned_at', { ascending: false }),
+  ]);
+
+  if(!agent){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Agent not found or access denied.</div>';
+    return;
+  }
+
+  // Resolve lookup names
+  const market = agent.market_id ? allMarkets.find(m => m.id === agent.market_id) : null;
+  let reportsTo = null;
+  if(agent.reports_to){
+    const { data: rt } = await sb.from('profiles').select('id,full_name,email').eq('id', agent.reports_to).single();
+    reportsTo = rt;
+  }
+
+  const avatarHtml = agent.avatar_url
+    ? `<img src="${agent.avatar_url}" style="width:110px;height:110px;border-radius:50%;object-fit:cover;border:3px solid ${roleBadgeColor(agent.role)};"/>`
+    : `<div style="width:110px;height:110px;border-radius:50%;background:${roleBadgeBg(agent.role)};color:${roleBadgeColor(agent.role)};display:flex;align-items:center;justify-content:center;font-weight:700;font-size:44px;border:3px solid ${roleBadgeColor(agent.role)};">${(agent.full_name || agent.email || '?').substring(0,1).toUpperCase()}</div>`;
+
+  // Onboarding badge
+  let onboardBadge = '';
+  if(agent.onboarding_status === 'exempt'){
+    onboardBadge = '<span style="background:rgba(255,255,255,0.08);color:rgba(255,255,255,0.5);padding:4px 12px;border-radius:50px;font-size:11px;font-weight:700;letter-spacing:1.5px;">EXEMPT</span>';
+  } else if(agent.onboarding_status === 'complete'){
+    if(agent.codes_unlocked){
+      onboardBadge = '<span style="background:rgba(0,255,136,0.15);color:#00FF88;padding:4px 12px;border-radius:50px;font-size:11px;font-weight:700;letter-spacing:1.5px;">✓ UNLOCKED</span>';
+    } else {
+      onboardBadge = '<span style="background:rgba(0,198,255,0.15);color:#00C6FF;padding:4px 12px;border-radius:50px;font-size:11px;font-weight:700;letter-spacing:1.5px;">⚡ READY FOR CODES</span>';
+    }
+  } else if(agent.onboarding_status === 'in_progress'){
+    onboardBadge = '<span style="background:rgba(255,107,0,0.15);color:#FF6B00;padding:4px 12px;border-radius:50px;font-size:11px;font-weight:700;letter-spacing:1.5px;">🔄 IN PROGRESS</span>';
+  } else {
+    onboardBadge = '<span style="background:rgba(248,113,113,0.15);color:#F87171;padding:4px 12px;border-radius:50px;font-size:11px;font-weight:700;letter-spacing:1.5px;">⏳ NOT STARTED</span>';
+  }
+
+  // Build contracts section
+  const pendingContracts = (contracts || []).filter(c => c.status === 'pending');
+  const signedContracts = (contracts || []).filter(c => c.status === 'signed');
+
+  // Build packets section
+  const activePackets = (packets || []).filter(p => p.status !== 'complete');
+  const completedPackets = (packets || []).filter(p => p.status === 'complete');
+
+  el.innerHTML = `
+    <div style="margin-bottom:16px;">
+      <button class="bo-btn bo-btn-ghost" style="padding:6px 14px;font-size:12px;" onclick="boShowAdmin('agents')">← Back to Team</button>
+    </div>
+
+    <!-- HEADER CARD: avatar, name, key info, actions -->
+    <div class="bo-card" style="margin-bottom:18px;">
+      <div style="display:flex;gap:22px;align-items:flex-start;flex-wrap:wrap;">
+        ${avatarHtml}
+        <div style="flex:1;min-width:260px;">
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:4px;">
+            <h1 style="font-family:'Bebas Neue',sans-serif;font-size:42px;color:#fff;letter-spacing:1px;margin:0;">${escapeHtml(agent.full_name || '—')}</h1>
+            <span style="padding:4px 12px;border-radius:50px;font-size:11px;font-weight:700;letter-spacing:1.5px;background:${roleBadgeBg(agent.role)};color:${roleBadgeColor(agent.role)};">${roleLabel(agent.role)}</span>
+            ${agent.active ? '<span style="color:#00FF88;font-size:12.5px;">● Active</span>' : '<span style="color:rgba(255,255,255,0.4);font-size:12.5px;">○ Inactive</span>'}
+            ${onboardBadge}
+          </div>
+          <div style="font-size:13.5px;color:rgba(255,255,255,0.6);margin-bottom:2px;">📧 ${escapeHtml(agent.email)}</div>
+          ${agent.phone ? `<div style="font-size:13.5px;color:rgba(255,255,255,0.6);margin-bottom:2px;">📱 ${escapeHtml(agent.phone)}${agent.phone_carrier ? ' <span style="color:rgba(255,255,255,0.35);">('+escapeHtml(agent.phone_carrier)+')</span>' : ''}</div>` : ''}
+          <div style="margin-top:12px;display:flex;gap:14px;flex-wrap:wrap;font-size:12.5px;color:rgba(255,255,255,0.55);">
+            <div><strong style="color:rgba(255,255,255,0.75);">Programs:</strong> ${(agent.programs || []).map(pid => { const p = allPrograms.find(x=>x.id===pid); return p ? `<span style="background:${p.color}22;color:${p.color};padding:2px 8px;border-radius:50px;margin-left:4px;font-weight:600;">${p.icon} ${p.name.split(' ')[0]}</span>` : ''; }).join('') || '<span style="color:rgba(255,255,255,0.3);">None</span>'}</div>
+            <div><strong style="color:rgba(255,255,255,0.75);">Market:</strong> ${market ? escapeHtml(market.name) : '<span style="color:rgba(255,255,255,0.3);">—</span>'}</div>
+            <div><strong style="color:rgba(255,255,255,0.75);">Reports to:</strong> ${reportsTo ? escapeHtml(reportsTo.full_name || reportsTo.email) : '<span style="color:rgba(255,255,255,0.3);">—</span>'}</div>
+          </div>
+        </div>
+      </div>
+
+      ${canManage ? `
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:18px;padding-top:18px;border-top:1px solid rgba(255,255,255,0.07);">
+          <button class="bo-btn bo-btn-primary" onclick="openSendPacketModal('${agent.id}')">📨 Send Onboarding Packet</button>
+          <button class="bo-btn bo-btn-primary" onclick="openSendContractToAgentModal('${agent.id}')">📄 Send Contract</button>
+          <button class="bo-btn bo-btn-ghost" onclick="openAgentModal('${agent.id}')">✏️ Edit Profile</button>
+          <button class="bo-btn bo-btn-ghost" onclick="openResetPasswordModal('${agent.id}')">🔑 Manage Password</button>
+          <button class="bo-btn bo-btn-ghost" onclick="emailLoginToAgent('${agent.id}')">📧 Resend Welcome</button>
+          <button class="bo-btn bo-btn-ghost" onclick="copyLoginLink('${agent.id}')">🔗 Copy Login Link</button>
+        </div>
+      ` : ''}
+    </div>
+
+    <!-- TWO-COLUMN LAYOUT: Onboarding | Contracts -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+
+      <!-- ONBOARDING COLUMN -->
+      <div class="bo-card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;">🎯 ONBOARDING</div>
+          ${canManage ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="openSendPacketModal('${agent.id}')">+ Send Packet</button>` : ''}
+        </div>
+        ${(packets || []).length === 0 ? `
+          <div style="color:rgba(255,255,255,0.4);font-size:13px;padding:20px;text-align:center;background:rgba(255,255,255,0.02);border-radius:8px;">No onboarding packets assigned yet.${canManage ? ' Click "+ Send Packet" above.' : ''}</div>
+        ` : `
+          ${activePackets.length > 0 ? `
+            <div style="font-size:11px;color:rgba(255,255,255,0.4);letter-spacing:1.5px;font-weight:700;margin-bottom:6px;">⏳ ACTIVE (${activePackets.length})</div>
+            ${activePackets.map(p => {
+              const snap = p.packet_snapshot || {};
+              const prog = allPrograms.find(x => x.id === snap.program_id);
+              return `
+                <div style="background:rgba(255,107,0,0.05);border:1px solid rgba(255,107,0,0.2);border-radius:8px;padding:10px 12px;margin-bottom:6px;cursor:pointer;" onclick="viewAgentOnboardingDetail('${agent.id}')">
+                  <div style="font-size:13px;font-weight:600;color:#fff;">${escapeHtml(snap.name || 'Packet')}</div>
+                  <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:2px;">${prog ? prog.icon + ' ' + prog.name : ''} · Assigned ${new Date(p.assigned_at).toLocaleDateString()} · <span style="color:#FF6B00;">${(p.status || 'in_progress').toUpperCase()}</span></div>
+                </div>`;
+            }).join('')}
+          ` : ''}
+          ${completedPackets.length > 0 ? `
+            <div style="font-size:11px;color:rgba(255,255,255,0.4);letter-spacing:1.5px;font-weight:700;margin-top:12px;margin-bottom:6px;">✓ COMPLETED (${completedPackets.length})</div>
+            ${completedPackets.map(p => {
+              const snap = p.packet_snapshot || {};
+              const prog = allPrograms.find(x => x.id === snap.program_id);
+              return `
+                <div style="background:rgba(0,255,136,0.04);border:1px solid rgba(0,255,136,0.18);border-radius:8px;padding:10px 12px;margin-bottom:6px;cursor:pointer;" onclick="viewAgentOnboardingDetail('${agent.id}')">
+                  <div style="font-size:13px;font-weight:600;color:#fff;">${escapeHtml(snap.name || 'Packet')}</div>
+                  <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:2px;">${prog ? prog.icon + ' ' + prog.name : ''} · Completed ${p.completed_at ? new Date(p.completed_at).toLocaleDateString() : '—'}</div>
+                </div>`;
+            }).join('')}
+          ` : ''}
+          ${canManage && agent.onboarding_status === 'complete' && !agent.codes_unlocked ? `
+            <div style="margin-top:12px;padding:12px;background:linear-gradient(90deg,rgba(0,198,255,0.1),rgba(0,255,136,0.06));border:1px solid rgba(0,198,255,0.3);border-radius:8px;">
+              <div style="font-size:12px;color:#00C6FF;font-weight:700;margin-bottom:6px;">⚡ READY FOR CODES</div>
+              <div style="font-size:12px;color:rgba(255,255,255,0.7);margin-bottom:8px;">This agent finished onboarding. Unlock their access to Training Calls, Meetings, and Codes.</div>
+              <button class="bo-btn bo-btn-primary" style="padding:6px 14px;font-size:12px;" onclick="unlockCodesForAgent('${agent.id}')">✓ Unlock Codes</button>
+            </div>
+          ` : ''}
+        `}
+      </div>
+
+      <!-- CONTRACTS COLUMN -->
+      <div class="bo-card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;">📄 CONTRACTS</div>
+          ${canManage ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="openSendContractToAgentModal('${agent.id}')">+ Send Contract</button>` : ''}
+        </div>
+        ${(contracts || []).length === 0 ? `
+          <div style="color:rgba(255,255,255,0.4);font-size:13px;padding:20px;text-align:center;background:rgba(255,255,255,0.02);border-radius:8px;">No contracts sent yet.${canManage ? ' Click "+ Send Contract" above.' : ''}</div>
+        ` : `
+          ${pendingContracts.length > 0 ? `
+            <div style="font-size:11px;color:rgba(255,255,255,0.4);letter-spacing:1.5px;font-weight:700;margin-bottom:6px;">⏳ PENDING (${pendingContracts.length})</div>
+            ${pendingContracts.map(c => {
+              const snap = c.template_snapshot || {};
+              return `
+                <div style="background:rgba(255,215,0,0.04);border:1px solid rgba(255,215,0,0.2);border-radius:8px;padding:10px 12px;margin-bottom:6px;">
+                  <div style="font-size:13px;font-weight:600;color:#fff;">${escapeHtml(snap.title || 'Contract')}</div>
+                  <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:2px;">Sent ${new Date(c.assigned_at).toLocaleDateString()} · <span style="color:#FFD700;">AWAITING SIGNATURE</span></div>
+                </div>`;
+            }).join('')}
+          ` : ''}
+          ${signedContracts.length > 0 ? `
+            <div style="font-size:11px;color:rgba(255,255,255,0.4);letter-spacing:1.5px;font-weight:700;margin-top:12px;margin-bottom:6px;">✓ SIGNED (${signedContracts.length})</div>
+            ${signedContracts.map(c => {
+              const snap = c.template_snapshot || {};
+              return `
+                <div style="background:rgba(0,255,136,0.04);border:1px solid rgba(0,255,136,0.2);border-radius:8px;padding:10px 12px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+                  <div style="flex:1;min-width:0;">
+                    <div style="font-size:13px;font-weight:600;color:#fff;">${escapeHtml(snap.title || 'Contract')}</div>
+                    <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:2px;">Signed ${new Date(c.signed_at).toLocaleDateString()}${c.ip_address ? ' · IP ' + escapeHtml(c.ip_address) : ''}</div>
+                  </div>
+                  <div style="display:flex;gap:4px;">
+                    <button class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:11px;" onclick="viewSignedContract('${c.id}')">👁</button>
+                    <button class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:11px;" onclick="downloadSignedContract('${c.id}')">📥</button>
+                  </div>
+                </div>`;
+            }).join('')}
+          ` : ''}
+        `}
+      </div>
+
+    </div>`;
+}
+
+
+// Reverse direction of openSendContractModal: pick agent first, show templates to send.
+async function openSendContractToAgentModal(userId){
+  if(!['owner','admin'].includes(currentProfile.role)){ alert('Access denied'); return; }
+  const { data: agent } = await sb.from('profiles').select('full_name,email,programs').eq('id', userId).single();
+  if(!agent){ alert('Agent not found'); return; }
+
+  // Find contract templates matching their programs (or with no program = any)
+  const { data: templates } = await sb.from('contract_templates_v2')
+    .select('*').eq('active', true)
+    .or('program_id.is.null,program_id.in.(' + (agent.programs || []).join(',') + ')');
+
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:#fff;margin-bottom:6px;letter-spacing:1px;">📄 Send Contract</h2>
+    <div style="font-size:13px;color:rgba(255,255,255,0.55);margin-bottom:14px;">To: <strong style="color:#fff;">${escapeHtml(agent.full_name || agent.email)}</strong></div>
+
+    ${(templates || []).length === 0 ? `
+      <div style="background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.3);border-radius:10px;padding:14px;color:#F87171;font-size:13px;line-height:1.55;">
+        No active contract templates exist for this agent's programs.
+        ${currentProfile.role === 'owner' ? 'Go to <strong>📄 Contract Builder</strong> to create one first.' : 'Ask the owner to create one.'}
+      </div>
+    ` : `
+      <div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-bottom:10px;">Pick which contract(s) to send. The agent will see them in their <strong>📄 My Contracts</strong> tab to review and sign.</div>
+      <div style="max-height:300px;overflow-y:auto;">
+        ${templates.map(t => {
+          const prog = t.program_id ? allPrograms.find(x => x.id === t.program_id) : null;
+          return `
+            <label style="display:flex;align-items:flex-start;gap:10px;padding:12px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;margin-bottom:6px;cursor:pointer;">
+              <input type="checkbox" class="sc-template" value="${t.id}" style="width:18px;height:18px;accent-color:#FF6B00;flex-shrink:0;margin-top:2px;"/>
+              <div style="flex:1;min-width:0;">
+                <div style="font-size:13.5px;font-weight:600;color:#fff;">${escapeHtml(t.title)}</div>
+                <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-top:2px;">${prog ? prog.icon + ' ' + prog.name : 'Any program'} · ${t.source_type === 'upload' ? '📎 Uploaded PDF' : '✍️ Editor contract'}</div>
+                ${t.description ? `<div style="font-size:11.5px;color:rgba(255,255,255,0.4);margin-top:4px;">${escapeHtml(t.description)}</div>` : ''}
+              </div>
+            </label>`;
+        }).join('')}
+      </div>
+      <div style="display:flex;gap:10px;margin-top:14px;">
+        <button class="bo-btn bo-btn-primary" onclick="sendContractsToAgent('${userId}')">Send Selected Contracts</button>
+        <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+      </div>
+    `}
+    <div id="sc-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-box').style.maxWidth = '560px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function sendContractsToAgent(userId){
+  const checked = Array.from(document.querySelectorAll('.sc-template:checked')).map(c => c.value);
+  const msg = document.getElementById('sc-msg');
+  if(checked.length === 0){ msg.innerHTML='<span style="color:#F87171;">Select at least one contract.</span>'; return; }
+
+  msg.innerHTML='<span style="color:rgba(255,255,255,0.6);">Sending…</span>';
+  try {
+    for(const templateId of checked){
+      const { data: t } = await sb.from('contract_templates_v2').select('*').eq('id', templateId).single();
+      if(!t) continue;
+      await sb.from('contract_assignments').insert({
+        template_id: t.id,
+        template_snapshot: t,
+        user_id: userId,
+        assigned_by: currentProfile.id,
+        status: 'pending'
+      });
+    }
+    msg.innerHTML='<span style="color:#00FF88;">✓ Contract(s) sent. Agent will see them in their My Contracts tab.</span>';
+    setTimeout(() => {
+      closeAllModals();
+      // Refresh profile if we're on it
+      if(window._currentAgentProfileId){ openAgentProfile(window._currentAgentProfileId); }
+      else renderMainContent();
+    }, 1200);
+  } catch(e){
+    msg.innerHTML='<span style="color:#F87171;">'+e.message+'</span>';
+  }
+}
+
 
 function openAgentModal(editId){
   const isEdit = !!editId;
@@ -6338,11 +6617,11 @@ function onbAgentRow(a, isAdmin){
   return `
     <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:12px;margin-bottom:8px;">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
-        <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;">
+        <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:0;cursor:pointer;" onclick="openAgentProfile('${a.id}')" title="View full profile">
           ${avatarHtml}
           <div style="flex:1;min-width:0;">
             <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-              <div style="font-size:13.5px;font-weight:600;color:#fff;">${escapeHtml(a.full_name || a.email)}</div>
+              <div style="font-size:13.5px;font-weight:600;color:#fff;text-decoration:underline;text-decoration-color:rgba(255,255,255,0.15);text-underline-offset:3px;">${escapeHtml(a.full_name || a.email)}</div>
               ${statusBadge}
               ${progPills}
             </div>
@@ -6351,7 +6630,8 @@ function onbAgentRow(a, isAdmin){
           </div>
         </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;">
-          ${a.packets.length === 0 ? `<button class="bo-btn bo-btn-primary" style="padding:6px 14px;font-size:12px;" onclick="openSendPacketModal('${a.id}')">📨 Send Packet</button>` : `<button class="bo-btn bo-btn-ghost" style="padding:6px 14px;font-size:12px;" onclick="viewAgentOnboardingDetail('${a.id}')">View Detail</button>`}
+          <button class="bo-btn bo-btn-primary" style="padding:6px 14px;font-size:12px;" onclick="openAgentProfile('${a.id}')">👤 Profile</button>
+          ${a.packets.length === 0 ? `<button class="bo-btn bo-btn-ghost" style="padding:6px 14px;font-size:12px;" onclick="openSendPacketModal('${a.id}')">📨 Send Packet</button>` : `<button class="bo-btn bo-btn-ghost" style="padding:6px 14px;font-size:12px;" onclick="viewAgentOnboardingDetail('${a.id}')">View Steps</button>`}
           ${a.onboarding_status === 'complete' && !a.codes_unlocked ? `<button class="bo-btn bo-btn-primary" style="padding:6px 14px;font-size:12px;background:linear-gradient(135deg,#00FF88,#00C6FF);" onclick="unlockCodesForAgent('${a.id}')">🔓 Unlock Codes</button>` : ''}
         </div>
       </div>
@@ -7656,6 +7936,9 @@ window.finalizeContractSignature = finalizeContractSignature;
 window.downloadSignedContract = downloadSignedContract;
 window.viewSignedContract = viewSignedContract;
 window.openAgentContractsModal = openAgentContractsModal;
+window.openAgentProfile = openAgentProfile;
+window.openSendContractToAgentModal = openSendContractToAgentModal;
+window.sendContractsToAgent = sendContractsToAgent;
 </script>
 
 </body>
