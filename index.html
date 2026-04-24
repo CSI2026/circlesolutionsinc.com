@@ -1999,6 +1999,9 @@ function enterBackOffice(){
 
   renderSidebar();
 
+  // Background: run reminder nudges (silent) if owner/admin and not in last 24h
+  try { maybeAutoRunReminders(); } catch(_){}
+
   // Auto-select: owner lands on owner panel; others on first program
   const userPrograms = (p.role === 'owner' || p.role === 'admin')
     ? allPrograms.map(x => x.id)
@@ -3046,6 +3049,7 @@ async function openAgentProfile(userId){
           <button class="bo-btn bo-btn-ghost" onclick="openResetPasswordModal('${agent.id}')">🔑 Manage Password</button>
           <button class="bo-btn bo-btn-ghost" onclick="emailLoginToAgent('${agent.id}')">📧 Resend Welcome</button>
           <button class="bo-btn bo-btn-ghost" onclick="copyLoginLink('${agent.id}')">🔗 Copy Login Link</button>
+          <button class="bo-btn bo-btn-ghost" style="border-color:rgba(198,40,40,0.4);color:#F87171;" onclick="openUrgentMessageModal('${agent.id}')">🚨 Send Urgent</button>
         </div>
       ` : ''}
     </div>
@@ -3193,6 +3197,7 @@ async function sendContractsToAgent(userId){
 
   msg.innerHTML='<span style="color:rgba(255,255,255,0.6);">Sending…</span>';
   try {
+    const contractNames = [];
     for(const templateId of checked){
       const { data: t } = await sb.from('contract_templates_v2').select('*').eq('id', templateId).single();
       if(!t) continue;
@@ -3203,7 +3208,21 @@ async function sendContractsToAgent(userId){
         assigned_by: currentProfile.id,
         status: 'pending'
       });
+      contractNames.push(t.title);
     }
+
+    // Email the agent
+    try {
+      const { data: profile } = await sb.from('profiles').select('email,full_name').eq('id', userId).single();
+      if(profile){
+        await sendEmailViaFunction('contract_sent_to_agent', profile.email, {
+          full_name: profile.full_name,
+          contract_count: contractNames.length,
+          contract_names: contractNames
+        });
+      }
+    } catch(e){ console.warn('contract_sent_to_agent email failed:', e); }
+
     msg.innerHTML='<span style="color:#00FF88;">✓ Contract(s) sent. Agent will see them in their My Contracts tab.</span>';
     setTimeout(() => {
       closeAllModals();
@@ -3214,6 +3233,127 @@ async function sendContractsToAgent(userId){
   } catch(e){
     msg.innerHTML='<span style="color:#F87171;">'+e.message+'</span>';
   }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// URGENT MESSAGE — owner/admin can send a custom urgent alert to specific agents
+// ═══════════════════════════════════════════════════════════════════════
+async function openUrgentMessageModal(presetUserId){
+  if(!['owner','admin'].includes(currentProfile.role)){ alert('Access denied'); return; }
+
+  // Load active agents to pick from
+  const { data: everyone } = await sb.from('profiles')
+    .select('id,full_name,email,role')
+    .eq('active', true)
+    .order('full_name');
+
+  const defaultChecked = presetUserId ? new Set([presetUserId]) : new Set();
+
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:#fff;margin-bottom:4px;letter-spacing:1px;">🚨 Send Urgent Message</h2>
+    <div style="font-size:12.5px;color:rgba(255,255,255,0.5);margin-bottom:18px;">Sends a high-priority email with a big red URGENT banner and your custom message.</div>
+
+    <div class="form-group">
+      <label class="form-label">Subject Line <span style="color:#F87171;">*</span></label>
+      <input id="urg-subject" class="form-input" placeholder="e.g. Store location change — effective immediately"/>
+      <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">Appears as the email subject and big headline at the top.</div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Message <span style="color:#F87171;">*</span></label>
+      <textarea id="urg-message" class="form-input" rows="6" placeholder="Type the full message here. Line breaks are preserved."></textarea>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Action Required (optional)</label>
+      <input id="urg-action" class="form-input" placeholder="e.g. Log in and confirm your new address by 6pm today"/>
+      <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">Shows in a red "Action Required" box — use if you need them to DO something.</div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Deadline (optional)</label>
+      <input id="urg-deadline" class="form-input" placeholder="e.g. Tonight at 11:59pm CT"/>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Send To <span style="color:#F87171;">*</span></label>
+      <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
+        <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="urgToggleAll(true)">Select All</button>
+        <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="urgToggleAll(false)">Clear All</button>
+        <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="urgSelectByRole('agent')">Only Agents</button>
+        <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="urgSelectByRole('manager')">Only Managers</button>
+      </div>
+      <div style="max-height:240px;overflow-y:auto;background:rgba(0,0,0,0.2);border-radius:8px;padding:8px;">
+        ${(everyone || []).filter(u => u.id !== currentProfile.id).map(u => `
+          <label style="display:flex;align-items:center;gap:10px;padding:6px 8px;cursor:pointer;border-radius:6px;" onmouseover="this.style.background='rgba(255,255,255,0.04)'" onmouseout="this.style.background=''">
+            <input type="checkbox" class="urg-recipient" data-role="${u.role}" value="${u.id}" ${defaultChecked.has(u.id) ? 'checked' : ''} style="width:16px;height:16px;accent-color:#C62828;"/>
+            <div style="flex:1;">
+              <div style="font-size:13px;color:#fff;">${escapeHtml(u.full_name || u.email)}</div>
+              <div style="font-size:10.5px;color:rgba(255,255,255,0.45);">${escapeHtml(u.email)} · ${roleLabel(u.role)}</div>
+            </div>
+          </label>
+        `).join('')}
+      </div>
+    </div>
+
+    <div style="display:flex;gap:10px;margin-top:14px;">
+      <button class="bo-btn bo-btn-primary" style="background:linear-gradient(135deg,#C62828,#FF6B00);" onclick="sendUrgentMessage()">🚨 Send Urgent Message</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="urg-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-box').style.maxWidth = '620px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+function urgToggleAll(checked){
+  document.querySelectorAll('.urg-recipient').forEach(cb => { cb.checked = checked; });
+}
+function urgSelectByRole(role){
+  document.querySelectorAll('.urg-recipient').forEach(cb => {
+    cb.checked = (cb.dataset.role === role);
+  });
+}
+
+async function sendUrgentMessage(){
+  const subject = (document.getElementById('urg-subject').value || '').trim();
+  const message = (document.getElementById('urg-message').value || '').trim();
+  const action = (document.getElementById('urg-action').value || '').trim();
+  const deadline = (document.getElementById('urg-deadline').value || '').trim();
+  const recipientIds = Array.from(document.querySelectorAll('.urg-recipient:checked')).map(cb => cb.value);
+  const msg = document.getElementById('urg-msg');
+
+  if(!subject){ msg.innerHTML='<span style="color:#F87171;">Subject line required.</span>'; return; }
+  if(!message){ msg.innerHTML='<span style="color:#F87171;">Message body required.</span>'; return; }
+  if(recipientIds.length === 0){ msg.innerHTML='<span style="color:#F87171;">Select at least one recipient.</span>'; return; }
+
+  if(!confirm('Send urgent message to ' + recipientIds.length + ' recipient' + (recipientIds.length === 1 ? '' : 's') + '?')) return;
+
+  msg.innerHTML='<span style="color:rgba(255,255,255,0.6);">Sending…</span>';
+
+  let sent = 0, failed = 0;
+  for(const userId of recipientIds){
+    try {
+      const { data: p } = await sb.from('profiles').select('email,full_name').eq('id', userId).single();
+      if(!p) { failed++; continue; }
+      await sendEmailViaFunction('urgent_custom', p.email, {
+        full_name: p.full_name,
+        subject_line: subject,
+        message: message,
+        action_required: action || null,
+        deadline: deadline || null,
+        sent_by: currentProfile.full_name || currentProfile.email,
+        sent_by_email: currentProfile.email
+      });
+      sent++;
+    } catch(e){
+      console.warn('Urgent send failed for user', userId, e);
+      failed++;
+    }
+  }
+
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Sent to ' + sent + ' recipient' + (sent === 1 ? '' : 's') + (failed > 0 ? ' (' + failed + ' failed)' : '') + '.</span>';
+  setTimeout(() => closeAllModals(), 1800);
 }
 
 
@@ -3531,7 +3671,28 @@ async function autoAssignContracts(userId, programs){
 }
 
 async function toggleAgentActive(id, currentlyActive){
-  await sb.from('profiles').update({ active: !currentlyActive }).eq('id', id);
+  const goingInactive = currentlyActive === true;
+  let reason = '';
+  if(goingInactive){
+    reason = prompt('Deactivate this agent?\n\nOptionally, give a short reason (will be included in the email to them). Leave blank to skip the reason.', '') || '';
+    if(reason === null) return; // cancelled
+  }
+
+  const { error } = await sb.from('profiles').update({ active: !currentlyActive }).eq('id', id);
+  if(error){ alert('Error: ' + error.message); return; }
+
+  // Email the agent
+  try {
+    const { data: p } = await sb.from('profiles').select('email,full_name').eq('id', id).single();
+    if(p){
+      await sendEmailViaFunction(
+        goingInactive ? 'account_deactivated' : 'account_reactivated',
+        p.email,
+        { full_name: p.full_name, reason: reason || null }
+      );
+    }
+  } catch(e){ console.warn('activate/deactivate email failed:', e); }
+
   renderMainContent();
 }
 
@@ -3637,7 +3798,7 @@ async function generateAndSetPassword(userId){
         <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-top:8px;line-height:1.5;">Copy this now and send it to the user securely (text, private message, etc.). They'll be prompted to change it on next login.</div>
       </div>`;
     msg.innerHTML = '';
-    notifyUserOfPasswordChange(userId);
+    notifyUserOfPasswordChange(userId, pw);
   } catch(e){
     msg.innerHTML = '<span style="color:#F87171;">Error: '+e.message+'. Make sure the admin-set-password Edge Function is deployed.</span>';
   }
@@ -3676,22 +3837,34 @@ async function setCustomPassword(userId){
     }
     msg.innerHTML = '<span style="color:#00FF88;">✓ Password set. Remember to share it with the user — we won\'t display it again. They will be prompted to change it on next login.</span>';
     document.getElementById('pwm-custom').value = '';
-    notifyUserOfPasswordChange(userId);
+    notifyUserOfPasswordChange(userId, pw);
   } catch(e){
     msg.innerHTML = '<span style="color:#F87171;">Error: '+e.message+'. Make sure the admin-set-password Edge Function is deployed.</span>';
   }
 }
 
-async function notifyUserOfPasswordChange(userId){
-  // Best-effort SMS — silently skips if user has no carrier or opted out.
+async function notifyUserOfPasswordChange(userId, newPassword){
   try {
-    const { data: target } = await sb.from('profiles').select('phone,phone_carrier,sms_opt_in,notify_password,full_name').eq('id', userId).single();
-    if(!target || !target.phone || !target.phone_carrier) return;
+    const { data: target } = await sb.from('profiles').select('email,phone,phone_carrier,sms_opt_in,notify_password,full_name').eq('id', userId).single();
+    if(!target) return;
+
+    // Always email — this is a security notification
+    try {
+      await sendEmailViaFunction('password_changed_by_admin', target.email, {
+        full_name: target.full_name,
+        new_password: newPassword || null
+      });
+    } catch(e){ console.warn('password_changed_by_admin email failed:', e); }
+
+    // SMS is best-effort — silently skips if user has no carrier or opted out.
+    if(!target.phone || !target.phone_carrier) return;
     if(target.sms_opt_in === false || target.notify_password === false) return;
-    await sendSmsViaFunction({
-      to_phone: target.phone, carrier: target.phone_carrier,
-      message: 'Circle Solutions: your password was just changed by an admin. Sign in at circlesolutionsinc.com to set your own.'
-    });
+    try {
+      await sendSmsViaFunction({
+        to_phone: target.phone, carrier: target.phone_carrier,
+        message: 'Circle Solutions: your password was just changed by an admin. Sign in at circlesolutionsinc.com to set your own.'
+      });
+    } catch(e){ /* silent */ }
   } catch(e){ /* silent */ }
 }
 
@@ -3847,7 +4020,10 @@ async function renderOwnerPanel(el){
 
     ${actionItems.length > 0 ? `
       <div class="bo-card" style="margin-bottom:18px;border-left:3px solid #FF6B00;">
-        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#FF6B00;letter-spacing:1.5px;margin-bottom:12px;">🔔 ACTION NEEDED</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:10px;flex-wrap:wrap;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#FF6B00;letter-spacing:1.5px;">🔔 ACTION NEEDED</div>
+          <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="runRemindersPass()" title="Send reminder emails to anyone with pending contracts/onboarding over 3 days old">📨 Send Reminders Now</button>
+        </div>
         <div style="display:flex;flex-direction:column;gap:8px;">
           ${actionItems.map(i => `
             <div style="display:flex;align-items:center;gap:12px;padding:12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:10px;cursor:pointer;" onclick="boShowAdmin('${i.action}')">
@@ -3904,6 +4080,11 @@ async function renderOwnerPanel(el){
         <div style="font-size:32px;margin-bottom:10px;">🎯</div>
         <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;margin-bottom:6px;">Programs</div>
         <div style="font-size:13px;color:rgba(255,255,255,0.55);line-height:1.55;">View the 3 program back offices: Retail Energy, B2B Commercial, Fiber Internet.</div>
+      </div>
+      <div class="bo-card" style="cursor:pointer;border-left:3px solid #C62828;" onclick="openUrgentMessageModal()">
+        <div style="font-size:32px;margin-bottom:10px;">🚨</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;margin-bottom:6px;">Send Urgent Message</div>
+        <div style="font-size:13px;color:rgba(255,255,255,0.55);line-height:1.55;">Fire off a high-priority email to specific agents — store changes, schedule changes, compliance alerts, anything that can't wait.</div>
       </div>
     </div>
 
@@ -4359,7 +4540,47 @@ async function submitApplication(){
   document.getElementById('app-success').style.display = 'block';
   window.scrollTo({top:0, behavior:'smooth'});
 
+  // PRIMARY: notify every owner + admin via Resend (pretty branded email)
+  notifyAdminsOfNewApplication(appData);
+  // FALLBACK: formsubmit.co as backup in case Resend is down
   sendApplicationEmail(appData);
+}
+
+async function notifyAdminsOfNewApplication(data){
+  try {
+    const { data: admins } = await sb.from('profiles')
+      .select('email')
+      .in('role', ['owner','admin'])
+      .eq('active', true);
+    if(!admins || admins.length === 0) return;
+    const notesBlock = [
+      (data.exp || data.industries?.length) ? 'Experience: ' + (data.exp || '') + (data.industries?.length ? ' · ' + data.industries.join(', ') : '') : null,
+      data.d2d ? 'D2D background: ' + data.d2d : null,
+      data.income ? 'Income goal: ' + data.income : null,
+      data.mgmt ? 'Management interest: ' + data.mgmt : null,
+      data.rejection ? 'Handles rejection: ' + data.rejection : null,
+      data.motivate ? 'Motivation: ' + data.motivate : null,
+      data.source ? 'Heard about us via: ' + data.source : null,
+      data.hours ? 'Hours/week: ' + data.hours : null,
+      data.days?.length ? 'Days available: ' + data.days.join(', ') : null,
+      data.start ? 'Can start: ' + data.start : null,
+      data.why ? '\nNotes: ' + data.why : null
+    ].filter(Boolean).join('\n');
+
+    for(const a of admins){
+      try {
+        await sendEmailViaFunction('new_application_submitted', a.email, {
+          applicant_name: data.fname + ' ' + data.lname,
+          applicant_email: data.email,
+          applicant_phone: data.phone,
+          program_interest: data.program + (data.type ? ' · ' + data.type : ''),
+          location: data.city + ', ' + data.state,
+          submitted_at: data.submitted,
+          notes: notesBlock
+        });
+      } catch(e){ console.warn('new_application email failed for', a.email, e); }
+    }
+  } catch(e){ console.warn('notifyAdminsOfNewApplication error:', e); }
 }
 
 function buildApplicationEmailBody(data){
@@ -6176,6 +6397,118 @@ function closeWizard(){
 }
 
 // When an agent completes all their onboarding, email owner + admins so they can unlock codes.
+// ═══════════════════════════════════════════════════════════════════════
+// REMINDER SYSTEM — nudges for pending contracts + onboarding (3+ days old)
+// ═══════════════════════════════════════════════════════════════════════
+// Triggered automatically when an owner/admin logs in, if >24h since last run.
+// Also manually via "Send Reminders Now" button in Owner Panel.
+// Won't re-nag the same person more than once every 3 days.
+const REMINDER_DAYS_THRESHOLD = 3;   // only remind if pending this many days
+const REMINDER_COOLDOWN_HOURS = 72;  // don't re-send within 72h of last nudge
+
+async function runRemindersPass(options){
+  options = options || {};
+  const silent = !!options.silent;
+
+  if(!['owner','admin'].includes(currentProfile.role)){ return; }
+
+  const now = new Date();
+  const thresholdISO = new Date(now.getTime() - REMINDER_DAYS_THRESHOLD * 24 * 60 * 60 * 1000).toISOString();
+  const cooldownISO = new Date(now.getTime() - REMINDER_COOLDOWN_HOURS * 60 * 60 * 1000).toISOString();
+
+  let contractsNudged = 0, onboardingNudged = 0;
+
+  // 1) Pending contracts over 3 days old
+  try {
+    const { data: pending } = await sb.from('contract_assignments')
+      .select('id,user_id,template_snapshot,assigned_at,last_reminder_at')
+      .eq('status', 'pending')
+      .lt('assigned_at', thresholdISO);
+
+    for(const a of (pending || [])){
+      // Skip if reminded recently
+      if(a.last_reminder_at && a.last_reminder_at > cooldownISO) continue;
+
+      const { data: p } = await sb.from('profiles').select('email,full_name,active').eq('id', a.user_id).single();
+      if(!p || !p.active) continue;
+
+      const daysPending = Math.floor((now - new Date(a.assigned_at)) / (24*60*60*1000));
+      try {
+        await sendEmailViaFunction('contract_reminder', p.email, {
+          full_name: p.full_name,
+          contract_title: a.template_snapshot?.title || 'Contract',
+          days_pending: daysPending
+        });
+        // Mark reminded
+        await sb.from('contract_assignments').update({ last_reminder_at: now.toISOString() }).eq('id', a.id);
+        contractsNudged++;
+      } catch(e){ console.warn('Contract reminder failed for', p.email, e); }
+    }
+  } catch(e){ console.warn('Contract reminders pass error:', e); }
+
+  // 2) Pending onboarding over 3 days old
+  try {
+    const { data: pending } = await sb.from('agent_onboarding')
+      .select('id,user_id,packet_snapshot,assigned_at,last_reminder_at,status')
+      .neq('status', 'complete')
+      .lt('assigned_at', thresholdISO);
+
+    // Group by user so we send one email per user with a list of their pending packets
+    const byUser = {};
+    for(const p of (pending || [])){
+      if(p.last_reminder_at && p.last_reminder_at > cooldownISO) continue;
+      if(!byUser[p.user_id]) byUser[p.user_id] = [];
+      byUser[p.user_id].push(p);
+    }
+
+    for(const userId of Object.keys(byUser)){
+      const packets = byUser[userId];
+      const { data: prof } = await sb.from('profiles').select('email,full_name,active').eq('id', userId).single();
+      if(!prof || !prof.active) continue;
+
+      const packetNames = packets.map(x => x.packet_snapshot?.name).filter(Boolean);
+      const oldest = packets.reduce((min, x) => x.assigned_at < min ? x.assigned_at : min, packets[0].assigned_at);
+      const daysPending = Math.floor((now - new Date(oldest)) / (24*60*60*1000));
+
+      try {
+        await sendEmailViaFunction('onboarding_reminder', prof.email, {
+          full_name: prof.full_name,
+          packet_count: packets.length,
+          packet_names: packetNames,
+          days_pending: daysPending
+        });
+        // Mark all reminded
+        for(const pp of packets){
+          await sb.from('agent_onboarding').update({ last_reminder_at: now.toISOString() }).eq('id', pp.id);
+        }
+        onboardingNudged++;
+      } catch(e){ console.warn('Onboarding reminder failed for', prof.email, e); }
+    }
+  } catch(e){ console.warn('Onboarding reminders pass error:', e); }
+
+  // Save last run timestamp
+  try { localStorage.setItem('_csi_last_reminder_run', now.toISOString()); } catch(_){}
+
+  if(!silent){
+    alert('✓ Reminders sent.\n\n' + contractsNudged + ' contract nudge' + (contractsNudged === 1 ? '' : 's') + '\n' + onboardingNudged + ' onboarding nudge' + (onboardingNudged === 1 ? '' : 's'));
+  }
+  return { contractsNudged, onboardingNudged };
+}
+
+// Auto-run once per 24h when owner/admin loads the app
+async function maybeAutoRunReminders(){
+  if(!['owner','admin'].includes(currentProfile.role)) return;
+  try {
+    const last = localStorage.getItem('_csi_last_reminder_run');
+    if(last){
+      const lastDate = new Date(last);
+      if((new Date() - lastDate) < 24*60*60*1000) return; // ran within 24h
+    }
+    await runRemindersPass({ silent: true });
+  } catch(e){ console.warn('Auto reminder run skipped:', e); }
+}
+
+
 async function notifyAdminsOnboardingComplete(){
   try {
     const { data: admins } = await sb.from('profiles')
@@ -6189,10 +6522,11 @@ async function notifyAdminsOnboardingComplete(){
       .join(', ') || 'No programs assigned';
     for(const admin of admins){
       try {
-        await sendEmailViaFunction('announcement', admin.email, {
-          title: '✅ Agent ready for codes: ' + agentName,
-          body: agentName + ' has completed all onboarding steps and is ready for codes + training.\n\nPrograms: ' + agentPrograms + '\n\nLog in to the back office and go to 📋 Pending Onboarding → "Ready for Codes & Training" section to unlock them.',
-          posted_by: 'Circle Solutions System'
+        await sendEmailViaFunction('onboarding_complete_admin', admin.email, {
+          agent_name: agentName,
+          agent_email: currentProfile.email,
+          programs: agentPrograms,
+          completed_at: new Date().toLocaleString()
         });
       } catch(e){ console.warn('Admin notify email failed for', admin.email, e); }
     }
@@ -6709,16 +7043,20 @@ async function sendPacketsToAgent(userId){
     // Mark profile as not_started → will go in_progress on first save
     await sb.from('profiles').update({ onboarding_status: 'not_started' }).eq('id', userId);
 
-    // Email the agent
+    // Email the agent with the DEDICATED onboarding-assigned template (not welcome)
     try {
       const { data: profile } = await sb.from('profiles').select('email,full_name').eq('id', userId).single();
+      // Collect packet names for the email
+      const packetNames = [];
+      for(const pid of checked){
+        const { data: pk } = await sb.from('onboarding_packets').select('name').eq('id', pid).single();
+        if(pk?.name) packetNames.push(pk.name);
+      }
       if(profile){
-        await sendEmailViaFunction('welcome', profile.email, {
+        await sendEmailViaFunction('onboarding_assigned', profile.email, {
           full_name: profile.full_name,
-          email: profile.email,
-          password: 'Sign in with your existing password to begin onboarding.',
-          role_label: 'Onboarding required',
-          programs: []
+          packet_count: checked.length,
+          packet_names: packetNames
         });
       }
     } catch(e){ /* email is best-effort */ }
@@ -6776,7 +7114,21 @@ async function viewAgentOnboardingDetail(userId){
 
 async function unlockCodesForAgent(userId){
   if(!confirm('Mark this agent as ready for codes? This unlocks their full back office.')) return;
-  await sb.from('profiles').update({ codes_unlocked: true }).eq('id', userId);
+  const { error } = await sb.from('profiles').update({ codes_unlocked: true }).eq('id', userId);
+  if(error){ alert('Error: ' + error.message); return; }
+
+  // Email the agent their congrats
+  try {
+    const { data: p } = await sb.from('profiles').select('email,full_name,programs').eq('id', userId).single();
+    if(p){
+      const programNames = (p.programs || []).map(pid => { const pg = allPrograms.find(x => x.id === pid); return pg ? pg.name : null; }).filter(Boolean);
+      await sendEmailViaFunction('codes_unlocked', p.email, {
+        full_name: p.full_name,
+        programs: programNames
+      });
+    }
+  } catch(e){ console.warn('codes_unlocked email failed:', e); }
+
   renderMainContent();
 }
 
@@ -7487,13 +7839,13 @@ async function notifyOwnerOfContractSignature(template, agentName, signedAt, ip)
       .in('role', ['owner','admin'])
       .eq('active', true);
     if(!admins || admins.length === 0) return;
-    const body = `${agentName} just signed the contract "${template.title || 'Untitled'}".\n\nSigned at: ${new Date(signedAt).toLocaleString()}\nIP address: ${ip || 'unknown'}\n\nThe signed PDF is saved to their agent profile. Log in → Team → click 📄 on their row to view.`;
     for(const admin of admins){
       try {
-        await sendEmailViaFunction('announcement', admin.email, {
-          title: '📄 Contract signed: ' + agentName + ' — ' + (template.title || 'Untitled'),
-          body,
-          posted_by: 'Circle Solutions System'
+        await sendEmailViaFunction('contract_signed_admin', admin.email, {
+          agent_name: agentName,
+          contract_title: template.title || 'Untitled',
+          signed_at: new Date(signedAt).toLocaleString(),
+          ip_address: ip || 'unknown'
         });
       } catch(e){ console.warn('Contract sign notify failed for', admin.email, e); }
     }
@@ -7939,6 +8291,11 @@ window.openAgentContractsModal = openAgentContractsModal;
 window.openAgentProfile = openAgentProfile;
 window.openSendContractToAgentModal = openSendContractToAgentModal;
 window.sendContractsToAgent = sendContractsToAgent;
+window.openUrgentMessageModal = openUrgentMessageModal;
+window.sendUrgentMessage = sendUrgentMessage;
+window.urgToggleAll = urgToggleAll;
+window.urgSelectByRole = urgSelectByRole;
+window.runRemindersPass = runRemindersPass;
 </script>
 
 </body>
