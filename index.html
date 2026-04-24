@@ -2258,10 +2258,22 @@ async function renderDashboard(el, prog, canManage){
     const myActive = (myEnrollments || []).filter(e => e.status === 'active').length;
 
     let teamTotal = null;
+    let pipelineAgents = [];
     if(canManage){
       const { count } = await sb.from('enrollments')
         .select('*', { count:'exact', head:true }).eq('program_id', prog.id);
       teamTotal = count;
+
+      // New-agents pipeline for this program — in-progress + ready-for-codes
+      const { data: pa } = await sb.from('profiles')
+        .select('id,full_name,email,avatar_url,onboarding_status,codes_unlocked')
+        .eq('active', true)
+        .contains('programs', [prog.id])
+        .in('onboarding_status', ['not_started','in_progress','complete'])
+        .neq('onboarding_status', 'exempt')
+        .order('onboarding_status', { ascending: true });
+      // Only show agents who haven't been unlocked yet
+      pipelineAgents = (pa || []).filter(a => !a.codes_unlocked || a.onboarding_status !== 'complete').slice(0, 10);
     }
 
     const recent = (myEnrollments || []).slice(0, 5);
@@ -2271,7 +2283,42 @@ async function renderDashboard(el, prog, canManage){
         <div class="stat-card"><div class="stat-num" style="color:${prog.color};">${myTotal}</div><div class="stat-lbl">My Enrollments</div></div>
         <div class="stat-card"><div class="stat-num" style="color:#00FF88;">${myActive}</div><div class="stat-lbl">Active</div></div>
         ${canManage ? `<div class="stat-card"><div class="stat-num" style="color:#FFD700;">${teamTotal ?? 0}</div><div class="stat-lbl">Team Total</div></div>` : ''}
+        ${canManage ? `<div class="stat-card" style="cursor:pointer;" onclick="boShowAdmin('onboarding-pending')"><div class="stat-num" style="color:#FF6B00;">${pipelineAgents.length}</div><div class="stat-lbl">In Pipeline</div></div>` : ''}
       </div>
+
+      ${canManage && pipelineAgents.length > 0 ? `
+        <div class="bo-card" style="margin-bottom:18px;border-left:3px solid #FF6B00;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
+            <div>
+              <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#FF6B00;letter-spacing:1px;">🔄 NEW AGENTS PIPELINE</div>
+              <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-top:2px;">Onboarding in progress or waiting on codes unlock</div>
+            </div>
+            <button class="bo-btn bo-btn-ghost" style="padding:6px 14px;font-size:12px;" onclick="boShowAdmin('onboarding-pending')">View all →</button>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:6px;">
+            ${pipelineAgents.map(a => {
+              const avatarHtml = a.avatar_url
+                ? `<img src="${a.avatar_url}" style="width:30px;height:30px;border-radius:50%;object-fit:cover;"/>`
+                : `<div style="width:30px;height:30px;border-radius:50%;background:rgba(255,255,255,0.1);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:11px;">${(a.full_name || a.email).substring(0,1).toUpperCase()}</div>`;
+              const statusBadge = a.onboarding_status === 'complete'
+                ? '<span style="background:rgba(0,198,255,0.15);color:#00C6FF;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">⚡ READY FOR CODES</span>'
+                : a.onboarding_status === 'in_progress'
+                ? '<span style="background:rgba(255,107,0,0.15);color:#FF6B00;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">🔄 IN PROGRESS</span>'
+                : '<span style="background:rgba(248,113,113,0.15);color:#F87171;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">⏳ NOT STARTED</span>';
+              return `
+                <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:rgba(255,255,255,0.03);border-radius:8px;">
+                  ${avatarHtml}
+                  <div style="flex:1;min-width:0;">
+                    <div style="font-size:13px;color:#fff;font-weight:600;">${escapeHtml(a.full_name || a.email)}</div>
+                    <div style="font-size:11px;color:rgba(255,255,255,0.45);">${escapeHtml(a.email)}</div>
+                  </div>
+                  ${statusBadge}
+                </div>`;
+            }).join('')}
+          </div>
+        </div>
+      ` : ''}
+
       <div class="bo-card">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
           <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;">My Recent Enrollments</div>
@@ -2817,7 +2864,7 @@ async function renderAgents(el){
       ${(!agents || agents.length === 0) ? '<div style="color:rgba(255,255,255,0.4);font-size:13.5px;padding:14px 0;">No team members yet.</div>' : `
         <div style="overflow-x:auto;">
         <table class="bo-table" id="agents-table">
-          <thead><tr><th>Name</th><th>Role</th><th>Programs</th><th>Market</th><th>Reports To</th><th>Status</th><th style="text-align:right;">Actions</th></tr></thead>
+          <thead><tr><th>Name</th><th>Role</th><th>Programs</th><th>Market</th><th>Reports To</th><th>Onboarding</th><th>Status</th><th style="text-align:right;">Actions</th></tr></thead>
           <tbody>${agents.map(a => {
             const isSelf = a.id === currentProfile.id;
             const avatarHtml = a.avatar_url
@@ -2825,11 +2872,27 @@ async function renderAgents(el){
               : `<div style="width:34px;height:34px;border-radius:50%;background:${roleBadgeBg(a.role)};color:${roleBadgeColor(a.role)};display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;border:1px solid rgba(255,255,255,0.08);">${(a.full_name || a.email || '?').substring(0,1).toUpperCase()}</div>`;
             const market = allMarkets.find(m => m.id === a.market_id);
             const reportsTo = a.reports_to ? byId[a.reports_to] : null;
-            // Owner is ONLY editable/deletable by owner. Managers can't touch other managers/admins/owners.
             const canEdit = isOwner || (isAdmin && a.role !== 'owner') || (isManager && ['agent','team_lead'].includes(a.role)) || isSelf;
-            const canDelete = isOwner && !isSelf; // owner only, can't delete self
+            const canDelete = isOwner && !isSelf;
             const canResetPw = (isOwner || isAdmin) && !isSelf && !(currentProfile.role === 'admin' && a.role === 'owner');
             const canToggleActive = (isOwner || isAdmin || (isManager && ['agent','team_lead'].includes(a.role))) && !isSelf;
+
+            // Onboarding column — compact visual badge
+            let onboardingBadge = '';
+            if(a.onboarding_status === 'exempt'){
+              onboardingBadge = '<span style="font-size:11px;color:rgba(255,255,255,0.35);">Exempt</span>';
+            } else if(a.onboarding_status === 'complete'){
+              if(a.codes_unlocked){
+                onboardingBadge = '<span style="background:rgba(0,255,136,0.12);color:#00FF88;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;white-space:nowrap;">✓ UNLOCKED</span>';
+              } else {
+                onboardingBadge = '<span style="background:rgba(0,198,255,0.12);color:#00C6FF;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;white-space:nowrap;">⚡ READY</span>';
+              }
+            } else if(a.onboarding_status === 'in_progress'){
+              onboardingBadge = '<span style="background:rgba(255,107,0,0.12);color:#FF6B00;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;white-space:nowrap;">🔄 IN PROGRESS</span>';
+            } else {
+              onboardingBadge = '<span style="background:rgba(248,113,113,0.12);color:#F87171;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;white-space:nowrap;">⏳ NOT STARTED</span>';
+            }
+
             return `
             <tr data-agent-id="${a.id}" data-search="${(a.full_name + ' ' + a.email).toLowerCase()}">
               <td>
@@ -2845,11 +2908,13 @@ async function renderAgents(el){
               <td style="font-size:11.5px;">${(a.programs || []).map(pid => { const p = allPrograms.find(x=>x.id===pid); return p ? `<span style="background:${p.color}22;color:${p.color};padding:2px 8px;border-radius:50px;margin-right:4px;font-weight:600;">${p.icon} ${p.name.split(' ')[0]}</span>` : ''; }).join('') || '<span style="color:rgba(255,255,255,0.3);">None</span>'}</td>
               <td style="font-size:12px;color:rgba(255,255,255,0.7);">${market ? market.name : '<span style="color:rgba(255,255,255,0.3);">—</span>'}</td>
               <td style="font-size:12px;color:rgba(255,255,255,0.7);">${reportsTo ? (reportsTo.full_name || reportsTo.email) : '<span style="color:rgba(255,255,255,0.3);">—</span>'}</td>
+              <td>${onboardingBadge}</td>
               <td>${a.active ? '<span style="color:#00FF88;font-size:12px;">● Active</span>' : '<span style="color:rgba(255,255,255,0.4);font-size:12px;">○ Inactive</span>'}</td>
               <td style="text-align:right;white-space:nowrap;">
                 ${canEdit ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" onclick="openAgentModal('${a.id}')">Edit</button>` : ''}
-                ${(isOwner || isAdmin) && !isSelf ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" title="Email login details" onclick="emailLoginToAgent('${a.id}')">📧</button>` : ''}
-                ${canResetPw ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" onclick="openResetPasswordModal('${a.id}')">🔑</button>` : ''}
+                ${(isOwner || isAdmin) && !isSelf ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" title="Resend welcome email" onclick="emailLoginToAgent('${a.id}')">📧</button>` : ''}
+                ${(isOwner || isAdmin) && !isSelf ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" title="Copy login link" onclick="copyLoginLink('${a.id}')">🔗</button>` : ''}
+                ${canResetPw ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" title="Manage password" onclick="openResetPasswordModal('${a.id}')">🔑</button>` : ''}
                 ${(isOwner || isAdmin) ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" title="View signed contracts" onclick="openAgentContractsModal('${a.id}')">📄</button>` : ''}
                 ${canToggleActive ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" onclick="toggleAgentActive('${a.id}', ${a.active})">${a.active ? 'Deactivate' : 'Activate'}</button>` : ''}
                 ${canDelete ? `<button class="bo-btn bo-btn-danger" style="padding:5px 10px;font-size:11px;margin-left:4px;" onclick="deleteAgent('${a.id}', '${(a.full_name || a.email).replace(/'/g,"\\'")}')">🗑️</button>` : ''}
@@ -3450,13 +3515,50 @@ async function renderOwnerPanel(el){
     return;
   }
 
-  // Quick stats
-  const [{ count: agentCount }, { count: activeCount }, { count: appsCount }, { count: marketsCount }] = await Promise.all([
+  el.innerHTML = '<div style="padding:40px;text-align:center;color:rgba(255,255,255,0.4);">Loading…</div>';
+
+  // Fetch all the stats we care about in parallel
+  const [
+    { count: agentCount },
+    { count: activeCount },
+    { count: appsCount },
+    { count: marketsCount },
+    { count: newAppsCount },
+    { count: pendingOnboardingCount },
+    { count: readyForCodesCount },
+    { count: pendingContractsCount },
+    { count: signedContractsCount },
+    { count: upcomingMeetingsCount },
+  ] = await Promise.all([
     sb.from('profiles').select('*', { count:'exact', head:true }),
     sb.from('profiles').select('*', { count:'exact', head:true }).eq('active', true),
     sb.from('applications').select('*', { count:'exact', head:true }),
-    sb.from('markets').select('*', { count:'exact', head:true })
+    sb.from('markets').select('*', { count:'exact', head:true }),
+    sb.from('applications').select('*', { count:'exact', head:true }).eq('status', 'new'),
+    sb.from('profiles').select('*', { count:'exact', head:true }).eq('onboarding_status', 'in_progress'),
+    sb.from('profiles').select('*', { count:'exact', head:true }).eq('onboarding_status', 'complete').eq('codes_unlocked', false).neq('role', 'owner').neq('role', 'admin').neq('role', 'manager').neq('role', 'team_lead'),
+    sb.from('contract_assignments').select('*', { count:'exact', head:true }).eq('status', 'pending'),
+    sb.from('contract_assignments').select('*', { count:'exact', head:true }).eq('status', 'signed'),
+    sb.from('meetings').select('*', { count:'exact', head:true }).gt('scheduled_at', new Date().toISOString()),
   ]);
+
+  // Build "Action needed" queue — what requires the owner's attention
+  const actionItems = [];
+  if(newAppsCount > 0) actionItems.push({
+    emoji: '📝', color: '#FF6B00', count: newAppsCount,
+    label: `New applications to review`,
+    action: 'applications'
+  });
+  if(readyForCodesCount > 0) actionItems.push({
+    emoji: '⚡', color: '#00C6FF', count: readyForCodesCount,
+    label: `Agents ready for codes unlock`,
+    action: 'onboarding-pending'
+  });
+  if(pendingOnboardingCount > 0) actionItems.push({
+    emoji: '🔄', color: '#FFD700', count: pendingOnboardingCount,
+    label: `Agents still in onboarding`,
+    action: 'onboarding-pending'
+  });
 
   el.innerHTML = `
     <div style="margin-bottom:24px;">
@@ -3464,11 +3566,33 @@ async function renderOwnerPanel(el){
       <p style="font-size:14px;color:rgba(255,255,255,0.5);">Owner-only controls — visible only to you.</p>
     </div>
 
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:24px;">
+    ${actionItems.length > 0 ? `
+      <div class="bo-card" style="margin-bottom:18px;border-left:3px solid #FF6B00;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#FF6B00;letter-spacing:1.5px;margin-bottom:12px;">🔔 ACTION NEEDED</div>
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          ${actionItems.map(i => `
+            <div style="display:flex;align-items:center;gap:12px;padding:12px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:10px;cursor:pointer;" onclick="boShowAdmin('${i.action}')">
+              <div style="font-size:22px;">${i.emoji}</div>
+              <div style="flex:1;">
+                <div style="font-size:14px;color:#fff;font-weight:600;">${escapeHtml(i.label)}</div>
+                <div style="font-size:11.5px;color:rgba(255,255,255,0.5);">Click to review</div>
+              </div>
+              <div style="background:${i.color};color:#000;padding:4px 12px;border-radius:50px;font-weight:700;font-size:13px;min-width:32px;text-align:center;">${i.count}</div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    ` : ''}
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:18px;">
       <div class="stat-card"><div class="stat-num" style="color:#FFD700;">${agentCount || 0}</div><div class="stat-lbl">Total Users</div></div>
       <div class="stat-card"><div class="stat-num" style="color:#00FF88;">${activeCount || 0}</div><div class="stat-lbl">Active</div></div>
       <div class="stat-card"><div class="stat-num" style="color:#00C6FF;">${marketsCount || 0}</div><div class="stat-lbl">Markets</div></div>
       <div class="stat-card"><div class="stat-num" style="color:#FF6B00;">${appsCount || 0}</div><div class="stat-lbl">Applications</div></div>
+      <div class="stat-card"><div class="stat-num" style="color:#A855F7;">${upcomingMeetingsCount || 0}</div><div class="stat-lbl">Upcoming Calls</div></div>
+      <div class="stat-card"><div class="stat-num" style="color:#FF0080;">${pendingContractsCount || 0}</div><div class="stat-lbl">Pending Contracts</div></div>
+      <div class="stat-card"><div class="stat-num" style="color:#00FF88;">${signedContractsCount || 0}</div><div class="stat-lbl">Signed Contracts</div></div>
+      <div class="stat-card"><div class="stat-num" style="color:#FFD700;">${(pendingOnboardingCount || 0) + (readyForCodesCount || 0)}</div><div class="stat-lbl">In Pipeline</div></div>
     </div>
 
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;">
@@ -3476,6 +3600,16 @@ async function renderOwnerPanel(el){
         <div style="font-size:32px;margin-bottom:10px;">👥</div>
         <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;margin-bottom:6px;">Team Management</div>
         <div style="font-size:13px;color:rgba(255,255,255,0.55);line-height:1.55;">Add, edit, deactivate, or delete team members. Assign roles, programs, markets, and reporting structure.</div>
+      </div>
+      <div class="bo-card" style="cursor:pointer;" onclick="boShowAdmin('onboarding-master')">
+        <div style="font-size:32px;margin-bottom:10px;">🎯</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;margin-bottom:6px;">Onboarding Center</div>
+        <div style="font-size:13px;color:rgba(255,255,255,0.55);line-height:1.55;">Build and edit per-program onboarding packets. Owner-only master file for all new agent onboarding flows.</div>
+      </div>
+      <div class="bo-card" style="cursor:pointer;" onclick="boShowAdmin('contract-builder')">
+        <div style="font-size:32px;margin-bottom:10px;">📄</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;margin-bottom:6px;">Contract Builder</div>
+        <div style="font-size:13px;color:rgba(255,255,255,0.55);line-height:1.55;">In-house contract builder with e-signature. Build from scratch or upload PDFs. Signed PDFs save to each agent's profile.</div>
       </div>
       <div class="bo-card" style="cursor:pointer;" onclick="boShowAdmin('markets')">
         <div style="font-size:32px;margin-bottom:10px;">📍</div>
@@ -3500,11 +3634,13 @@ async function renderOwnerPanel(el){
         <li>Only you can <strong>delete</strong> team members permanently</li>
         <li>Only you can <strong>reset passwords</strong> for other users</li>
         <li>Only you can <strong>add, rename, or remove markets</strong></li>
-        <li>Only you can <strong>promote users to Manager, Admin, or Owner</strong></li>
-        <li>Managers can only toggle agents/team leads in their programs — they cannot touch your profile or other managers</li>
+        <li>Only you can <strong>edit onboarding packets</strong> in the Master Center</li>
+        <li>Only you can <strong>build contract templates</strong> in the Contract Builder</li>
+        <li>Only you see <strong>sensitive PII</strong> (SSN, banking, ID uploads) submitted during onboarding</li>
       </ul>
     </div>`;
 }
+
 
 
 // ═══════════════════════════════════════════════════════════════
@@ -4119,6 +4255,25 @@ function generateTempPassword(){
   let p = '';
   for(let i=0; i<12; i++) p += chars[Math.floor(Math.random()*chars.length)];
   return p;
+}
+
+// Copy a ready-to-send login link for the agent (puts site URL + their email in clipboard)
+async function copyLoginLink(userId){
+  const { data: profile } = await sb.from('profiles').select('full_name,email').eq('id', userId).single();
+  if(!profile){ alert('User not found'); return; }
+  const msg = `Hi ${profile.full_name || 'there'},\n\nYour Circle Solutions back office is ready.\n\nSign in at: ${window.location.origin}\nEmail: ${profile.email}\n\nIf you don't have your password yet, ask an admin to reset it for you or use the "Forgot Password" link on the login page.\n\nHeads up: first-time emails may land in spam — check your junk folder and mark as "Not Spam" so future emails from us reach your inbox.`;
+  try {
+    await navigator.clipboard.writeText(msg);
+    alert('✓ Login instructions copied to clipboard.\n\nYou can now paste this into a text message, iMessage, WhatsApp, Slack — anywhere you want.');
+  } catch(e){
+    // Fallback for browsers without clipboard permission
+    const ta = document.createElement('textarea');
+    ta.value = msg; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); alert('✓ Login instructions copied to clipboard.'); }
+    catch(_){ alert('Could not copy. Message:\n\n' + msg); }
+    ta.remove();
+  }
 }
 
 
@@ -7033,12 +7188,36 @@ async function finalizeContractSignature(assignmentId){
 
   if(error){ msg.innerHTML = '<span style="color:#F87171;">'+error.message+'</span>'; return; }
 
+  // Notify owner + admins that a contract was signed (best-effort, non-blocking)
+  try { notifyOwnerOfContractSignature(template, agentName, signedAt, ip); } catch(_){}
+
   msg.innerHTML = '<span style="color:#00FF88;">✓ Signed successfully. PDF saved to your profile.</span>';
   setTimeout(() => {
     closeAllModals();
     document.getElementById('modal-box').style.maxWidth = '560px';
     renderMainContent();
   }, 1400);
+}
+
+// When an agent signs a contract, email every owner + admin so they know it's done.
+async function notifyOwnerOfContractSignature(template, agentName, signedAt, ip){
+  try {
+    const { data: admins } = await sb.from('profiles')
+      .select('email')
+      .in('role', ['owner','admin'])
+      .eq('active', true);
+    if(!admins || admins.length === 0) return;
+    const body = `${agentName} just signed the contract "${template.title || 'Untitled'}".\n\nSigned at: ${new Date(signedAt).toLocaleString()}\nIP address: ${ip || 'unknown'}\n\nThe signed PDF is saved to their agent profile. Log in → Team → click 📄 on their row to view.`;
+    for(const admin of admins){
+      try {
+        await sendEmailViaFunction('announcement', admin.email, {
+          title: '📄 Contract signed: ' + agentName + ' — ' + (template.title || 'Untitled'),
+          body,
+          posted_by: 'Circle Solutions System'
+        });
+      } catch(e){ console.warn('Contract sign notify failed for', admin.email, e); }
+    }
+  } catch(e){ console.warn('notifyOwnerOfContractSignature error:', e); }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -7390,6 +7569,7 @@ window.filterAgentRows = filterAgentRows;
 
 // Phase 2 exports
 window.emailLoginToAgent = emailLoginToAgent;
+window.copyLoginLink = copyLoginLink;
 window.renderGlobalDocuments = renderGlobalDocuments;
 window.openFolderModal = openFolderModal;
 window.saveFolder = saveFolder;
