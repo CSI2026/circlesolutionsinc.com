@@ -2063,17 +2063,25 @@ function renderSidebar(){
 
   // Programs the user can see
   const userProgramIds = isAdmin ? allPrograms.map(p => p.id) : (currentProfile.programs || []);
-  const visiblePrograms = allPrograms.filter(p => userProgramIds.includes(p.id));
+  const visiblePrograms = allPrograms.filter(p => {
+    if(!userProgramIds.includes(p.id)) return false;
+    // Hide archived from everyone (only Programs Manager shows them)
+    if(p.status === 'archived') return false;
+    // Hide paused from non-owners (owner sees everything for management purposes)
+    if(p.status === 'paused' && !isOwner) return false;
+    return true;
+  });
 
   if(visiblePrograms.length === 0){
     listEl.innerHTML = '<div style="padding:12px 24px;font-size:12.5px;color:rgba(255,255,255,0.4);line-height:1.6;">No programs assigned yet. Contact your manager or owner to gain access.</div>';
   } else {
     listEl.innerHTML = visiblePrograms.map(p => `
       <button class="bo-program-tab ${activeProgramId === p.id && !activeAdminView ? 'active' : ''}"
-              style="--prog-color:${p.color};"
-              onclick="boSelectProgram('${p.id}')">
+              style="--prog-color:${p.color};${p.status === 'paused' ? 'opacity:0.55;' : ''}"
+              onclick="boSelectProgram('${p.id}')"
+              ${p.status === 'paused' ? 'title="This program is paused — only owners can see it."' : ''}>
         <span class="bo-prog-icon">${p.icon}</span>
-        <span>${p.name}</span>
+        <span>${p.name}${p.status === 'paused' ? ' ⏸' : ''}</span>
       </button>
     `).join('');
   }
@@ -2170,6 +2178,8 @@ function boShowView(view){
     renderMainContent();
   } else {
     activeSubView = view;
+    // Reset leaderboard period offset when switching tabs
+    window._lbOffset = 0;
     renderMainContent();
   }
 }
@@ -2384,6 +2394,8 @@ async function renderDashboard(el, prog, canManage){
 
 // ─── Enrollment Modal ───
 function openEnrollmentModal(programId){
+  const prog = allPrograms.find(p => p.id === programId);
+  const showCommission = prog && (prog.leaderboard_metric === 'commission_sum' || prog.leaderboard_show_dollars);
   document.getElementById('modal-box').innerHTML = `
     <h2 style="font-family:'Bebas Neue',sans-serif;font-size:32px;color:#fff;margin-bottom:18px;letter-spacing:1px;">Log New Enrollment</h2>
     <div class="form-group"><label class="form-label">Customer Name</label><input id="enr-name" class="form-input" placeholder="John Doe"/></div>
@@ -2395,6 +2407,13 @@ function openEnrollmentModal(programId){
         <option value="pending">Pending</option>
       </select>
     </div>
+    ${showCommission ? `
+      <div class="form-group">
+        <label class="form-label">Commission Earned ($)</label>
+        <input id="enr-commission" class="form-input" type="number" step="0.01" placeholder="0.00"/>
+        <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">Used for leaderboard scoring${prog.leaderboard_metric === 'commission_sum' ? ' (required)' : ' (optional)'}.</div>
+      </div>
+    ` : ''}
     <div style="display:flex;gap:10px;margin-top:18px;">
       <button class="bo-btn bo-btn-primary" onclick="saveEnrollment('${programId}')">Save</button>
       <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
@@ -2408,12 +2427,18 @@ async function saveEnrollment(programId){
   const loc = document.getElementById('enr-loc').value.trim();
   const notes = document.getElementById('enr-notes').value.trim();
   const status = document.getElementById('enr-status').value;
+  const commissionEl = document.getElementById('enr-commission');
+  const commission = commissionEl ? parseFloat(commissionEl.value) : null;
   const msg = document.getElementById('enr-msg');
   if(!name){ msg.style.color='#F87171'; msg.textContent='Customer name is required.'; return; }
-  const { error } = await sb.from('enrollments').insert({
+
+  const insertData = {
     user_id: currentUser.id, program_id: programId,
     customer_name: name, customer_location: loc, notes, status
-  });
+  };
+  if(commissionEl && !isNaN(commission)) insertData.commission = commission;
+
+  const { error } = await sb.from('enrollments').insert(insertData);
   if(error){ msg.style.color='#F87171'; msg.textContent = error.message; return; }
   closeAllModals();
   renderMainContent();
@@ -2642,40 +2667,195 @@ async function deleteCode(id){
 
 
 // ─── Leaderboard ───
+// ═══════════════════════════════════════════════════════════════════════
+// LEADERBOARD — per-program configurable rankings with period filtering
+// ═══════════════════════════════════════════════════════════════════════
+
+// Compute the start/end of the CURRENT period based on a program's reset rule.
+// Returns { start: Date, end: Date, label: string }.
+function computeLeaderboardPeriod(prog, offset){
+  // offset: 0 = current period, -1 = previous, etc.
+  offset = offset || 0;
+  const reset = prog.leaderboard_reset || 'weekly';
+  const anchor = prog.leaderboard_anchor_date ? new Date(prog.leaderboard_anchor_date + 'T00:00:00') : new Date();
+  const now = new Date();
+
+  if(reset === 'never'){
+    return { start: new Date(0), end: new Date('2099-12-31T23:59:59'), label: 'All Time' };
+  }
+
+  if(reset === 'monthly'){
+    const d = new Date(now.getFullYear(), now.getMonth() + offset, 1);
+    const end = new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59);
+    const label = d.toLocaleString('default', { month: 'long', year: 'numeric' });
+    return { start: d, end, label };
+  }
+
+  // Weekly or biweekly — count days from anchor
+  const periodDays = reset === 'biweekly' ? 14 : 7;
+  const anchorMs = anchor.getTime();
+  const nowMs = now.getTime();
+  const daysSinceAnchor = Math.floor((nowMs - anchorMs) / (24*60*60*1000));
+  const periodIndexNow = Math.floor(daysSinceAnchor / periodDays);
+  const targetIndex = periodIndexNow + offset;
+  const start = new Date(anchorMs + targetIndex * periodDays * 24*60*60*1000);
+  start.setHours(0,0,0,0);
+  const end = new Date(start.getTime() + periodDays * 24*60*60*1000 - 1);
+
+  let label;
+  if(offset === 0) label = (reset === 'biweekly' ? 'This Pay Period' : 'This Week');
+  else if(offset === -1) label = (reset === 'biweekly' ? 'Last Pay Period' : 'Last Week');
+  else label = start.toLocaleDateString() + ' – ' + end.toLocaleDateString();
+  return { start, end, label };
+}
+
 async function renderLeaderboard(el, prog){
-  // Aggregate enrollments by user for this program
-  const { data: enrollments } = await sb.from('enrollments').select('user_id,status,profiles!enrollments_user_id_fkey(full_name,email)').eq('program_id', prog.id);
+  const isOwner = currentProfile.role === 'owner';
+
+  // If config disabled for this program, show a message
+  if(prog.leaderboard_active === false){
+    el.innerHTML = `
+      <div class="bo-card" style="text-align:center;padding:40px;">
+        <div style="font-size:42px;margin-bottom:10px;">🏆</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:rgba(255,255,255,0.6);letter-spacing:1px;margin-bottom:8px;">Leaderboard Off</div>
+        <div style="color:rgba(255,255,255,0.45);font-size:13px;">Leaderboards are disabled for this program.${isOwner ? ' You can turn them back on in <strong>Leaderboard Config</strong>.' : ''}</div>
+        ${isOwner ? `<button class="bo-btn bo-btn-primary" style="margin-top:14px;" onclick="openProgramEditor('${prog.id}')">⚙️ Configure</button>` : ''}
+      </div>`;
+    return;
+  }
+
+  // State for which period to display (default current = 0)
+  if(typeof window._lbOffset !== 'number') window._lbOffset = 0;
+  const offset = window._lbOffset;
+  const period = computeLeaderboardPeriod(prog, offset);
+  const metric = prog.leaderboard_metric || 'enrollment_count';
+  const showDollars = !!prog.leaderboard_show_dollars;
+
+  // Pull enrollments in this period
+  const startISO = period.start.toISOString().split('T')[0];
+  const endISO = period.end.toISOString().split('T')[0];
+  const { data: enrollments } = await sb.from('enrollments')
+    .select('user_id,status,commission,enrollment_date,profiles!enrollments_user_id_fkey(full_name,email,avatar_url,role,active)')
+    .eq('program_id', prog.id)
+    .gte('enrollment_date', startISO)
+    .lte('enrollment_date', endISO);
+
+  // Aggregate per user
   const tally = {};
   (enrollments || []).forEach(e => {
+    if(!e.profiles || !e.profiles.active) return;
     const uid = e.user_id;
     if(!tally[uid]){
       tally[uid] = {
+        userId: uid,
         name: e.profiles?.full_name || e.profiles?.email || 'Unknown',
-        total: 0, active: 0
+        email: e.profiles?.email || '',
+        avatar_url: e.profiles?.avatar_url || null,
+        role: e.profiles?.role || 'agent',
+        total: 0, active: 0, commission: 0
       };
     }
     tally[uid].total++;
     if(e.status === 'active') tally[uid].active++;
+    if(typeof e.commission === 'number') tally[uid].commission += e.commission;
   });
-  const ranked = Object.values(tally).sort((a,b) => b.active - a.active || b.total - a.total);
+
+  // Score each entry by the chosen metric
+  const ranked = Object.values(tally).map(t => {
+    let score;
+    if(metric === 'enrollment_active_count') score = t.active;
+    else if(metric === 'commission_sum') score = t.commission;
+    else score = t.total; // default: enrollment_count
+    return { ...t, score };
+  }).filter(t => t.score > 0)
+    .sort((a,b) => b.score - a.score || b.total - a.total);
+
+  // Find current user's rank for "your rank" pill
+  const myRank = ranked.findIndex(r => r.userId === currentProfile.id) + 1;
+  const me = ranked.find(r => r.userId === currentProfile.id);
+
+  // Period nav buttons
+  const periodNav = `
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="lbShiftPeriod(-1)">← Previous</button>
+      <div style="font-size:12.5px;color:rgba(255,255,255,0.6);min-width:140px;text-align:center;font-weight:600;">${escapeHtml(period.label)}</div>
+      <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;${offset >= 0 ? 'opacity:0.4;pointer-events:none;' : ''}" onclick="lbShiftPeriod(1)">Next →</button>
+      ${offset !== 0 ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="lbShiftPeriod('reset')">⌂ Current</button>` : ''}
+    </div>`;
+
+  // Metric label for column header
+  const metricLabel = metric === 'enrollment_active_count' ? 'Active' :
+                      metric === 'commission_sum' ? 'Commission' : 'Enrollments';
 
   el.innerHTML = `
     <div class="bo-card">
-      <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;margin-bottom:16px;">🏆 Team Leaderboard</div>
-      ${ranked.length === 0 ? '<div style="color:rgba(255,255,255,0.4);font-size:13.5px;padding:14px 0;">No enrollments logged for this program yet.</div>' : `
-        <table class="bo-table">
-          <thead><tr><th style="width:60px;">Rank</th><th>Agent</th><th>Active</th><th>Total</th></tr></thead>
-          <tbody>${ranked.map((r,i) => `
-            <tr>
-              <td><span style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:${i===0?'#FFD700':i===1?'#C0C0C0':i===2?'#CD7F32':'rgba(255,255,255,0.4)'};">${i+1}</span></td>
-              <td style="font-weight:600;">${r.name}</td>
-              <td><span style="color:#00FF88;font-weight:700;">${r.active}</span></td>
-              <td>${r.total}</td>
-            </tr>`).join('')}</tbody>
-        </table>`}
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;margin-bottom:18px;">
+        <div>
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:28px;color:#fff;letter-spacing:1px;">🏆 ${escapeHtml(prog.name)} Leaderboard</div>
+          <div style="font-size:12px;color:rgba(255,255,255,0.45);margin-top:2px;">Ranking by ${metricLabel.toLowerCase()}${prog.leaderboard_reset === 'never' ? '' : ' · resets ' + prog.leaderboard_reset}</div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          ${periodNav}
+          ${isOwner ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="openProgramEditor('${prog.id}')">⚙️ Config</button>` : ''}
+        </div>
+      </div>
+
+      ${myRank > 0 && myRank > 10 && me ? `
+        <div style="background:rgba(255,107,0,0.06);border:1px solid rgba(255,107,0,0.25);border-radius:10px;padding:12px;margin-bottom:14px;display:flex;align-items:center;gap:12px;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#FF6B00;min-width:40px;text-align:center;">#${myRank}</div>
+          <div style="flex:1;">
+            <div style="font-size:11px;color:rgba(255,255,255,0.5);letter-spacing:1.5px;font-weight:700;">YOUR RANK</div>
+            <div style="font-size:13.5px;color:#fff;margin-top:1px;">${me.score}${metric === 'commission_sum' ? '' : (metric === 'enrollment_active_count' ? ' active' : ' total')}${showDollars && metric !== 'commission_sum' ? ' · $' + me.commission.toFixed(0) : (metric === 'commission_sum' ? '$' + me.score.toFixed(0) : '')}</div>
+          </div>
+        </div>` : ''}
+
+      ${ranked.length === 0 ? `
+        <div style="text-align:center;padding:40px 20px;color:rgba(255,255,255,0.4);">
+          <div style="font-size:40px;margin-bottom:8px;">📊</div>
+          <div style="font-size:14px;">No enrollments logged in this period yet.</div>
+          ${offset === 0 ? '<div style="font-size:12px;margin-top:6px;">Be the first on the board — log an enrollment from the Dashboard.</div>' : ''}
+        </div>
+      ` : `
+        <div style="display:flex;flex-direction:column;gap:6px;">
+          ${ranked.slice(0, 50).map((r, i) => {
+            const rank = i + 1;
+            const medal = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : '';
+            const rankColor = rank === 1 ? '#FFD700' : rank === 2 ? '#C0C0C0' : rank === 3 ? '#CD7F32' : 'rgba(255,255,255,0.4)';
+            const isMe = r.userId === currentProfile.id;
+            const avatar = r.avatar_url
+              ? `<img src="${r.avatar_url}" style="width:40px;height:40px;border-radius:50%;object-fit:cover;border:1px solid rgba(255,255,255,0.15);"/>`
+              : `<div style="width:40px;height:40px;border-radius:50%;background:${roleBadgeBg(r.role)};color:${roleBadgeColor(r.role)};display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px;">${(r.name || '?').substring(0,1).toUpperCase()}</div>`;
+            const scoreDisplay = metric === 'commission_sum'
+              ? '$' + r.score.toLocaleString(undefined, {minimumFractionDigits:0, maximumFractionDigits:0})
+              : r.score;
+            const subInfo = (showDollars && metric !== 'commission_sum')
+              ? '$' + r.commission.toFixed(0) + ' · ' + r.total + ' total'
+              : (metric === 'commission_sum' ? r.total + ' enrollments' : (r.active + ' active'));
+            return `
+              <div style="display:flex;align-items:center;gap:12px;padding:10px 14px;background:${isMe ? 'rgba(255,107,0,0.08)' : (rank <= 3 ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.02)')};border:1px solid ${isMe ? 'rgba(255,107,0,0.3)' : 'rgba(255,255,255,0.05)'};border-radius:10px;">
+                <div style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:${rankColor};min-width:48px;text-align:center;">${medal || '#'+rank}</div>
+                ${avatar}
+                <div style="flex:1;min-width:0;">
+                  <div style="font-size:13.5px;color:#fff;font-weight:600;">${escapeHtml(r.name)}${isMe ? ' <span style="color:#FF6B00;font-size:10.5px;font-weight:700;margin-left:4px;letter-spacing:1px;">YOU</span>' : ''}</div>
+                  <div style="font-size:11px;color:rgba(255,255,255,0.45);">${escapeHtml(subInfo)}</div>
+                </div>
+                <div style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:${rank <= 3 ? rankColor : '#fff'};letter-spacing:1px;min-width:60px;text-align:right;">${scoreDisplay}</div>
+              </div>`;
+          }).join('')}
+        </div>
+        ${ranked.length > 50 ? `<div style="text-align:center;color:rgba(255,255,255,0.4);font-size:11.5px;margin-top:12px;">Showing top 50 of ${ranked.length}</div>` : ''}
+      `}
     </div>`;
 }
 
+function lbShiftPeriod(direction){
+  if(direction === 'reset'){ window._lbOffset = 0; }
+  else { window._lbOffset = (window._lbOffset || 0) + direction; }
+  if(window._lbOffset > 0) window._lbOffset = 0; // can't peek into future
+  renderMainContent();
+}
+
+// ─── Owner-only config modal ───
 
 // ─── Announcements ───
 async function renderAnnouncements(el, prog, canManage){
@@ -3408,8 +3588,10 @@ function openAgentModal(editId){
   const isAdmin = isOwner || role === 'admin';
   const isManager = role === 'manager';
   const managerPrograms = currentProfile.programs || [];
+  // Hide archived programs from any assignment UI (paused are still allowed since owner may want to keep agents on roster)
+  const assignablePrograms = allPrograms.filter(p => p.status !== 'archived');
   // Managers can only toggle programs they themselves have
-  const availablePrograms = isAdmin ? allPrograms : allPrograms.filter(p => managerPrograms.includes(p.id));
+  const availablePrograms = isAdmin ? assignablePrograms : assignablePrograms.filter(p => managerPrograms.includes(p.id));
 
   if(isEdit){
     sb.from('profiles').select('*').eq('id', editId).single().then(async ({data}) => {
@@ -4182,7 +4364,7 @@ async function renderMarketsAdmin(el){
       <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">📍 Markets</h1>
       <p style="font-size:14px;color:rgba(255,255,255,0.5);">Markets group your team by geography per program. A manager could run Dallas in Fiber AND San Antonio in B2B — each assigned independently.</p>
     </div>
-    ${allPrograms.map(prog => {
+    ${allPrograms.filter(prog => prog.status !== 'archived').map(prog => {
       const progMarkets = allMarkets.filter(m => m.program_id === prog.id);
       return `
         <div class="bo-card" style="border-left:3px solid ${prog.color};">
@@ -4320,21 +4502,322 @@ async function deleteApplication(id){
 
 
 // ─── Programs Admin (view-only listing; programs are seeded via SQL) ───
+// ═══════════════════════════════════════════════════════════════════════
+// PROGRAMS MANAGER — owner-only single source of truth for all programs
+// Combines: program details (name/icon/color/desc), status (active/paused/
+// archived), and pay-period/leaderboard config.
+// ═══════════════════════════════════════════════════════════════════════
 async function renderProgramsAdmin(el){
+  const isOwner = currentProfile.role === 'owner';
+  if(!isOwner){
+    // Non-owner: keep the old read-only summary card view
+    el.innerHTML = `
+      <div style="margin-bottom:24px;">
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">🎯 Programs</h1>
+        <p style="font-size:14px;color:rgba(255,255,255,0.5);">All programs you have access to.</p>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;">
+        ${allPrograms.filter(p => p.status !== 'archived').map(p => `
+          <div style="background:linear-gradient(135deg,${p.color}15,${p.color}05);border:1px solid ${p.color}40;border-radius:14px;padding:24px;${p.status === 'paused' ? 'opacity:0.55;' : ''}">
+            <div style="font-size:40px;margin-bottom:12px;">${p.icon}</div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:${p.color};margin-bottom:6px;letter-spacing:1px;">${escapeHtml(p.name)}</div>
+            <div style="font-size:13px;color:rgba(255,255,255,0.5);line-height:1.6;">${escapeHtml(p.description || '')}</div>
+            ${p.status === 'paused' ? '<div style="margin-top:8px;font-size:11px;color:#FFD700;font-weight:700;letter-spacing:1px;">⏸ PAUSED</div>' : ''}
+          </div>`).join('')}
+      </div>`;
+    return;
+  }
+
+  // Owner view — pull all programs (including paused/archived for owner)
+  const { data: allProgs } = await sb.from('programs').select('*').order('display_order', { ascending: true }).order('name');
+  const showArchived = !!window._showArchivedPrograms;
+  const visible = (allProgs || []).filter(p => showArchived ? true : p.status !== 'archived');
+  const archivedCount = (allProgs || []).filter(p => p.status === 'archived').length;
+
+  // Get counts per program (agents + enrollments) for context
+  const counts = {};
+  await Promise.all((visible || []).map(async p => {
+    const [{ count: agents }, { count: enrolls }] = await Promise.all([
+      sb.from('profiles').select('id', { count:'exact', head:true }).contains('programs', [p.id]),
+      sb.from('enrollments').select('id', { count:'exact', head:true }).eq('program_id', p.id)
+    ]);
+    counts[p.id] = { agents: agents || 0, enrollments: enrolls || 0 };
+  }));
+
   el.innerHTML = `
-    <div style="margin-bottom:24px;">
-      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">🎯 Programs</h1>
-      <p style="font-size:14px;color:rgba(255,255,255,0.5);">The 3 program back offices. To add or rename programs, edit the <code style="background:rgba(255,255,255,0.08);padding:2px 6px;border-radius:4px;">programs</code> table in Supabase directly.</p>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px;flex-wrap:wrap;gap:12px;">
+      <div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">🎯 Programs Manager</h1>
+        <p style="font-size:14px;color:rgba(255,255,255,0.5);">Add, edit, pause, or archive programs. Each one's pay-period rules also drive its leaderboard.</p>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        ${archivedCount > 0 ? `<button class="bo-btn bo-btn-ghost" onclick="toggleShowArchived()">${showArchived ? 'Hide' : 'Show'} archived (${archivedCount})</button>` : ''}
+        <button class="bo-btn bo-btn-primary" onclick="openProgramEditor()">+ Add Program</button>
+      </div>
     </div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;">
-      ${allPrograms.map(p => `
-        <div style="background:linear-gradient(135deg,${p.color}15,${p.color}05);border:1px solid ${p.color}40;border-radius:14px;padding:24px;">
-          <div style="font-size:40px;margin-bottom:12px;">${p.icon}</div>
-          <div style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:${p.color};margin-bottom:6px;letter-spacing:1px;">${p.name}</div>
-          <div style="font-size:13px;color:rgba(255,255,255,0.5);line-height:1.6;">${p.description || ''}</div>
-          <div style="margin-top:10px;font-size:11px;color:rgba(255,255,255,0.35);font-family:monospace;">id: ${p.id}</div>
-        </div>`).join('')}
-    </div>`;
+
+    ${visible.length === 0 ? `
+      <div class="bo-card" style="text-align:center;padding:40px;">
+        <div style="font-size:42px;margin-bottom:10px;">🎯</div>
+        <div style="color:rgba(255,255,255,0.5);font-size:14px;">No programs yet. Click <strong>+ Add Program</strong> to create your first one.</div>
+      </div>
+    ` : `
+      <div style="display:flex;flex-direction:column;gap:12px;">
+        ${visible.map(p => {
+          const c = counts[p.id] || { agents: 0, enrollments: 0 };
+          const isPaused = p.status === 'paused';
+          const isArchived = p.status === 'archived';
+          const dim = isPaused || isArchived;
+          const cycleLabel = (p.leaderboard_reset || 'weekly');
+          return `
+            <div style="background:linear-gradient(135deg,${p.color}10,${p.color}03);border:1px solid ${p.color}40;border-radius:14px;padding:20px;${dim ? 'opacity:0.65;' : ''}">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;">
+                <div style="display:flex;gap:14px;align-items:flex-start;flex:1;min-width:0;">
+                  <div style="font-size:42px;flex-shrink:0;line-height:1;">${p.icon}</div>
+                  <div style="flex:1;min-width:0;">
+                    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px;">
+                      <div style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:${p.color};letter-spacing:1px;">${escapeHtml(p.name)}</div>
+                      ${isArchived ? '<span style="background:rgba(248,113,113,0.15);color:#F87171;padding:2px 10px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1.5px;">ARCHIVED</span>' :
+                        isPaused ? '<span style="background:rgba(255,215,0,0.15);color:#FFD700;padding:2px 10px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1.5px;">⏸ PAUSED</span>' :
+                        '<span style="background:rgba(0,255,136,0.12);color:#00FF88;padding:2px 10px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1.5px;">● ACTIVE</span>'}
+                    </div>
+                    <div style="font-size:12.5px;color:rgba(255,255,255,0.5);line-height:1.55;margin-bottom:8px;">${escapeHtml(p.description || '')}</div>
+                    <div style="display:flex;gap:14px;flex-wrap:wrap;font-size:11.5px;color:rgba(255,255,255,0.55);">
+                      <div><strong style="color:rgba(255,255,255,0.75);">${c.agents}</strong> agents</div>
+                      <div><strong style="color:rgba(255,255,255,0.75);">${c.enrollments}</strong> enrollments</div>
+                      <div>Pay cycle: <strong style="color:rgba(255,255,255,0.75);">${cycleLabel}</strong></div>
+                      <div>Leaderboard: <strong style="color:rgba(255,255,255,0.75);">${p.leaderboard_active === false ? 'off' : 'on'}</strong></div>
+                    </div>
+                  </div>
+                </div>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                  <button class="bo-btn bo-btn-ghost" style="padding:6px 14px;font-size:12px;" onclick="openProgramEditor('${p.id}')">✏️ Edit</button>
+                  ${isArchived ? `
+                    <button class="bo-btn bo-btn-ghost" style="padding:6px 14px;font-size:12px;" onclick="setProgramStatus('${p.id}','active')">↶ Restore</button>
+                    <button class="bo-btn bo-btn-danger" style="padding:6px 14px;font-size:12px;" onclick="deleteProgramPermanent('${p.id}')">🗑️ Delete Forever</button>
+                  ` : `
+                    <button class="bo-btn bo-btn-ghost" style="padding:6px 14px;font-size:12px;" onclick="setProgramStatus('${p.id}','${isPaused ? 'active' : 'paused'}')">${isPaused ? '▶ Resume' : '⏸ Pause'}</button>
+                    <button class="bo-btn bo-btn-ghost" style="padding:6px 14px;font-size:12px;color:#F87171;border-color:rgba(248,113,113,0.3);" onclick="setProgramStatus('${p.id}','archived')">🗃️ Archive</button>
+                  `}
+                </div>
+              </div>
+            </div>`;
+        }).join('')}
+      </div>
+    `}`;
+}
+
+function toggleShowArchived(){
+  window._showArchivedPrograms = !window._showArchivedPrograms;
+  renderMainContent();
+}
+
+async function setProgramStatus(programId, newStatus){
+  const verbMap = { active: 'restore', paused: 'pause', archived: 'archive' };
+  const verb = verbMap[newStatus] || 'change';
+  if(!confirm(verb.charAt(0).toUpperCase() + verb.slice(1) + ' this program?\n\n' +
+    (newStatus === 'paused' ? 'Agents will see it as paused. Their data is preserved.' :
+     newStatus === 'archived' ? 'It will be hidden from everyone. Owner can restore it later.' :
+     'Will be visible to agents again.'))) return;
+  const { error } = await sb.from('programs').update({ status: newStatus }).eq('id', programId);
+  if(error){ alert('Error: ' + error.message); return; }
+  // Update in-memory cache
+  const p = allPrograms.find(x => x.id === programId);
+  if(p) p.status = newStatus;
+  renderMainContent();
+}
+
+async function deleteProgramPermanent(programId){
+  const { data: p } = await sb.from('programs').select('name').eq('id', programId).single();
+  if(!p) return;
+  // Check for data
+  const [{ count: agents }, { count: enrolls }] = await Promise.all([
+    sb.from('profiles').select('id', { count:'exact', head:true }).contains('programs', [programId]),
+    sb.from('enrollments').select('id', { count:'exact', head:true }).eq('program_id', programId)
+  ]);
+  let warning = '⚠️ DELETE FOREVER: ' + p.name + '\n\nThis cannot be undone.';
+  if((agents || 0) + (enrolls || 0) > 0){
+    warning += '\n\n⛔ DATA WILL BE AFFECTED:\n  • ' + (agents || 0) + ' agents are assigned to this program\n  • ' + (enrolls || 0) + ' enrollment records exist\n\nDeleting will cascade-remove all enrollments and detach the program from agents (their other programs are unaffected).';
+  }
+  warning += '\n\nType DELETE to confirm:';
+  const typed = prompt(warning);
+  if(typed !== 'DELETE') return;
+
+  const { error } = await sb.from('programs').delete().eq('id', programId);
+  if(error){ alert('Error: ' + error.message); return; }
+  // Remove from cache
+  const idx = allPrograms.findIndex(x => x.id === programId);
+  if(idx >= 0) allPrograms.splice(idx, 1);
+  alert('✓ Program deleted permanently.');
+  renderMainContent();
+}
+
+// ─── Editor (add or edit) ───
+async function openProgramEditor(programId){
+  const isEdit = !!programId;
+  let p = {
+    id: '', name: '', description: '', icon: '🎯', color: '#FF6B00',
+    status: 'active',
+    leaderboard_active: true,
+    leaderboard_metric: 'enrollment_count',
+    leaderboard_reset: 'weekly',
+    leaderboard_anchor_date: new Date().toISOString().split('T')[0],
+    leaderboard_show_dollars: false
+  };
+  if(isEdit){
+    const { data } = await sb.from('programs').select('*').eq('id', programId).single();
+    if(data) p = { ...p, ...data };
+    if(p.leaderboard_anchor_date && p.leaderboard_anchor_date.includes('T')){
+      p.leaderboard_anchor_date = p.leaderboard_anchor_date.split('T')[0];
+    }
+  }
+
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:#fff;margin-bottom:6px;letter-spacing:1px;">${isEdit ? 'Edit' : 'New'} Program</h2>
+    <div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-bottom:18px;">${isEdit ? 'Editing ' + escapeHtml(p.name) : 'Add a new program to the back office.'}</div>
+
+    <div class="form-group">
+      <label class="form-label">Program ID${isEdit ? '' : ' <span style="color:#F87171;">*</span>'}</label>
+      <input id="pe-id" class="form-input" value="${escapeHtml(p.id)}" ${isEdit ? 'readonly style="opacity:0.5;cursor:not-allowed;"' : 'placeholder="e.g. solar, satellite, gen_mobile (lowercase, no spaces)"'}/>
+      <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">${isEdit ? 'ID cannot be changed once set — it links to all existing data.' : 'Unique short code, lowercase, no spaces. Used internally — not shown to users.'}</div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Name <span style="color:#F87171;">*</span></label>
+      <input id="pe-name" class="form-input" value="${escapeHtml(p.name)}" placeholder="e.g. Solar Energy"/>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Description</label>
+      <textarea id="pe-desc" class="form-input" rows="2" placeholder="Brief description shown to agents.">${escapeHtml(p.description || '')}</textarea>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <div class="form-group">
+        <label class="form-label">Icon (emoji)</label>
+        <input id="pe-icon" class="form-input" value="${escapeHtml(p.icon || '🎯')}" maxlength="4"/>
+        <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">Pick from 🎯 ⚡ 🏢 🌐 ☀️ 📡 📱 💡 🔌 🚪</div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Brand Color</label>
+        <input id="pe-color" class="form-input" type="color" value="${p.color || '#FF6B00'}" style="height:42px;cursor:pointer;"/>
+      </div>
+    </div>
+
+    <hr style="border:none;border-top:1px solid rgba(255,255,255,0.08);margin:18px 0;"/>
+    <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#FF6B00;letter-spacing:1.5px;margin-bottom:10px;">📅 Pay Cycle &amp; Leaderboard</div>
+
+    <div class="form-group">
+      <label class="form-label">
+        <input type="checkbox" id="pe-lb-active" ${p.leaderboard_active !== false ? 'checked' : ''} style="margin-right:8px;width:16px;height:16px;accent-color:#FF6B00;"/>
+        Show leaderboard for this program
+      </label>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Pay Cycle</label>
+      <select id="pe-reset" class="form-input" onchange="onPeResetChange()">
+        <option value="weekly" ${p.leaderboard_reset === 'weekly' ? 'selected' : ''}>Weekly (every 7 days)</option>
+        <option value="biweekly" ${p.leaderboard_reset === 'biweekly' ? 'selected' : ''}>Bi-weekly / Pay Period (every 14 days)</option>
+        <option value="monthly" ${p.leaderboard_reset === 'monthly' ? 'selected' : ''}>Monthly (1st of each month)</option>
+        <option value="never" ${p.leaderboard_reset === 'never' ? 'selected' : ''}>Never (all-time)</option>
+      </select>
+    </div>
+
+    <div class="form-group" id="pe-anchor-wrap">
+      <label class="form-label">Pay cycle Day 1 (start of any period)</label>
+      <input type="date" id="pe-anchor" class="form-input" value="${p.leaderboard_anchor_date || new Date().toISOString().split('T')[0]}"/>
+      <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">Pick the start of any past or current pay period — the system aligns every cycle to it. Example: if your pay period runs Tuesday → Monday, pick a Tuesday.</div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Leaderboard Score By</label>
+      <select id="pe-metric" class="form-input">
+        <option value="enrollment_count" ${p.leaderboard_metric === 'enrollment_count' ? 'selected' : ''}>Total enrollments</option>
+        <option value="enrollment_active_count" ${p.leaderboard_metric === 'enrollment_active_count' ? 'selected' : ''}>Active enrollments only</option>
+        <option value="commission_sum" ${p.leaderboard_metric === 'commission_sum' ? 'selected' : ''}>Commission earned ($)</option>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">
+        <input type="checkbox" id="pe-dollars" ${p.leaderboard_show_dollars ? 'checked' : ''} style="margin-right:8px;width:16px;height:16px;accent-color:#FF6B00;"/>
+        Also show dollar amounts next to enrollment counts
+      </label>
+    </div>
+
+    <div style="display:flex;gap:10px;margin-top:18px;">
+      <button class="bo-btn bo-btn-primary" onclick="saveProgram(${isEdit ? `'${p.id}'` : 'null'})">${isEdit ? 'Save Changes' : 'Create Program'}</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="pe-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-box').style.maxWidth = '560px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+
+  // Hide anchor field if reset is 'monthly' or 'never'
+  setTimeout(() => onPeResetChange(), 50);
+}
+
+function onPeResetChange(){
+  const reset = document.getElementById('pe-reset')?.value;
+  const wrap = document.getElementById('pe-anchor-wrap');
+  if(!wrap) return;
+  // Anchor date is meaningful for weekly/biweekly only
+  wrap.style.display = (reset === 'monthly' || reset === 'never') ? 'none' : '';
+}
+
+async function saveProgram(existingId){
+  const isEdit = !!existingId;
+  const id = (document.getElementById('pe-id').value || '').trim().toLowerCase().replace(/\s+/g,'_').replace(/[^a-z0-9_]/g,'');
+  const name = (document.getElementById('pe-name').value || '').trim();
+  const description = (document.getElementById('pe-desc').value || '').trim();
+  const icon = (document.getElementById('pe-icon').value || '🎯').trim();
+  const color = document.getElementById('pe-color').value || '#FF6B00';
+  const lbActive = document.getElementById('pe-lb-active').checked;
+  const lbMetric = document.getElementById('pe-metric').value;
+  const lbReset = document.getElementById('pe-reset').value;
+  const lbAnchor = document.getElementById('pe-anchor').value || null;
+  const lbDollars = document.getElementById('pe-dollars').checked;
+  const msg = document.getElementById('pe-msg');
+
+  if(!id){ msg.innerHTML = '<span style="color:#F87171;">Program ID is required.</span>'; return; }
+  if(!name){ msg.innerHTML = '<span style="color:#F87171;">Program name is required.</span>'; return; }
+
+  const payload = {
+    name, description, icon, color,
+    leaderboard_active: lbActive,
+    leaderboard_metric: lbMetric,
+    leaderboard_reset: lbReset,
+    leaderboard_anchor_date: lbAnchor,
+    leaderboard_show_dollars: lbDollars
+  };
+
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Saving…</span>';
+
+  if(isEdit){
+    const { error } = await sb.from('programs').update(payload).eq('id', existingId);
+    if(error){ msg.innerHTML = '<span style="color:#F87171;">' + error.message + '</span>'; return; }
+    // Update cache
+    const p = allPrograms.find(x => x.id === existingId);
+    if(p) Object.assign(p, payload);
+  } else {
+    // Create — id is required and must be unique
+    payload.id = id;
+    payload.status = 'active';
+    payload.display_order = (allPrograms.length || 0);
+    const { data, error } = await sb.from('programs').insert(payload).select().single();
+    if(error){
+      const friendly = (error.message || '').includes('duplicate')
+        ? 'A program with ID "' + id + '" already exists. Pick a different ID.'
+        : error.message;
+      msg.innerHTML = '<span style="color:#F87171;">' + escapeHtml(friendly) + '</span>';
+      return;
+    }
+    if(data) allPrograms.push(data);
+  }
+
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Saved.</span>';
+  setTimeout(() => { closeAllModals(); renderMainContent(); }, 800);
 }
 
 
@@ -6917,7 +7400,7 @@ async function renderOnboardingMaster(el){
       <p style="font-size:14px;color:rgba(255,255,255,0.5);">Build the onboarding flow each new agent goes through. Edits apply to NEW agents — agents already in progress keep their original packet.</p>
     </div>
     ${grantsHtml}
-    ${allPrograms.map(prog => {
+    ${allPrograms.filter(prog => prog.status !== 'archived').map(prog => {
       const progPackets = (packets || []).filter(p => p.program_id === prog.id);
       // Map program by name to a starter type for the generator
       const lname = (prog.name || '').toLowerCase();
@@ -8818,6 +9301,13 @@ window.runRemindersPass = runRemindersPass;
 window.toggleNotificationsPanel = toggleNotificationsPanel;
 window.onNotificationClick = onNotificationClick;
 window.markAllNotificationsRead = markAllNotificationsRead;
+window.lbShiftPeriod = lbShiftPeriod;
+window.openProgramEditor = openProgramEditor;
+window.saveProgram = saveProgram;
+window.setProgramStatus = setProgramStatus;
+window.deleteProgramPermanent = deleteProgramPermanent;
+window.toggleShowArchived = toggleShowArchived;
+window.onPeResetChange = onPeResetChange;
 </script>
 
 </body>
