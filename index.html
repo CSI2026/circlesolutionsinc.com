@@ -3723,6 +3723,29 @@ function renderAgentModalUI(existing, editId, availablePrograms, isOwner, isAdmi
       ${isSelf && !isOwner ? '<div style="font-size:11.5px;color:rgba(255,255,255,0.4);margin-top:4px;">You cannot change your own role.</div>' : ''}
       </div>` : '<input type="hidden" id="ag-role" value="agent"/>'}
 
+    ${isOwner ? `
+    <div class="form-group" style="padding:16px;background:linear-gradient(135deg,rgba(255,107,0,0.04),rgba(0,255,136,0.04));border:2px solid rgba(255,107,0,0.25);border-radius:12px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FF6B00;letter-spacing:2px;margin-bottom:4px;">🏢 DEPARTMENT ACCESS</div>
+      <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-bottom:12px;">These flags grant cross-department privileges INDEPENDENT of role. A regular Agent can be flagged as Inventory Manager and gain office-level inventory access. Owner-only setting.</div>
+
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:10px 12px;background:rgba(0,198,255,0.05);border:1px solid rgba(0,198,255,0.2);border-radius:8px;margin-bottom:8px;">
+        <input type="checkbox" id="ag-inv-mgr" ${e.is_inventory_manager ? 'checked' : ''} style="width:18px;height:18px;accent-color:#00C6FF;flex-shrink:0;"/>
+        <div style="flex:1;">
+          <div style="font-weight:600;color:#00C6FF;font-size:14px;">📦 Inventory Department</div>
+          <div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-top:2px;line-height:1.5;">Office-level access. Can assign items to managers and agents anywhere in the company. Sees the 📦 Inventory nav item.</div>
+        </div>
+      </label>
+
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:10px 12px;background:rgba(0,255,136,0.05);border:1px solid rgba(0,255,136,0.2);border-radius:8px;">
+        <input type="checkbox" id="ag-payroll-mgr" ${e.is_payroll_manager ? 'checked' : ''} style="width:18px;height:18px;accent-color:#00FF88;flex-shrink:0;"/>
+        <div style="flex:1;">
+          <div style="font-weight:600;color:#00FF88;font-size:14px;">💵 Payroll Department</div>
+          <div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-top:2px;line-height:1.5;">Full access to the Payroll dashboard. Can enter sales counts, lock/unlock agents, view all hours. Bypasses account-locked state. Sees the 💵 Payroll nav item.</div>
+        </div>
+      </label>
+    </div>
+    ` : '<input type="hidden" id="ag-inv-mgr" value="' + (e.is_inventory_manager ? 'on' : '') + '"/><input type="hidden" id="ag-payroll-mgr" value="' + (e.is_payroll_manager ? 'on' : '') + '"/>'}
+
     <div class="form-group">
       <label class="form-label">Programs — check all that this user should access</label>
       <div>${programCheckboxes || '<div style="color:rgba(255,255,255,0.4);font-size:12.5px;">No programs available.</div>'}</div>
@@ -3771,26 +3794,6 @@ function renderAgentModalUI(existing, editId, availablePrograms, isOwner, isAdmi
         </div>
       </label>
     </div>` : '<input type="hidden" id="ag-can-host" value="' + (e.can_host_meetings ? 'on' : '') + '"/>'}
-
-    ${isOwner ? `<div class="form-group" style="padding:14px;background:rgba(0,198,255,0.05);border:1px solid rgba(0,198,255,0.2);border-radius:10px;">
-      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
-        <input type="checkbox" id="ag-inv-mgr" ${e.is_inventory_manager ? 'checked' : ''} style="width:18px;height:18px;accent-color:#00C6FF;"/>
-        <div style="flex:1;">
-          <div style="font-weight:600;color:#00C6FF;font-size:14px;">📦 Inventory Manager</div>
-          <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-top:2px;">Grants office-level inventory access — can assign items to managers AND agents anywhere in the company. Independent of role. Owner-only setting.</div>
-        </div>
-      </label>
-    </div>` : '<input type="hidden" id="ag-inv-mgr" value="' + (e.is_inventory_manager ? 'on' : '') + '"/>'}
-
-    ${isOwner ? `<div class="form-group" style="padding:14px;background:rgba(0,255,136,0.05);border:1px solid rgba(0,255,136,0.2);border-radius:10px;">
-      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
-        <input type="checkbox" id="ag-payroll-mgr" ${e.is_payroll_manager ? 'checked' : ''} style="width:18px;height:18px;accent-color:#00FF88;"/>
-        <div style="flex:1;">
-          <div style="font-weight:600;color:#00FF88;font-size:14px;">💵 Payroll Manager</div>
-          <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-top:2px;">Full access to the Payroll dashboard. Can enter sales counts, lock/unlock agents, and view all hours. Bypasses account-locked state. Owner-only setting.</div>
-        </div>
-      </label>
-    </div>` : '<input type="hidden" id="ag-payroll-mgr" value="' + (e.is_payroll_manager ? 'on' : '') + '"/>'}
 
     <div style="display:flex;gap:10px;margin-top:18px;">
       <button class="bo-btn bo-btn-primary" onclick="saveAgent('${editId || ''}')">${isEdit ? 'Save Changes' : 'Create Team Member'}</button>
