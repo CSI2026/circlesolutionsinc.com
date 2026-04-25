@@ -2153,6 +2153,14 @@ function boShowView(view){
 function renderMainContent(){
   const el = document.getElementById('bo-content');
 
+  // ─── HARD LOCKOUT: anyone with pending onboarding cannot navigate ANYWHERE ───
+  // This catches direct URL nav, console manipulation, or any code path
+  // that tries to render UI while onboarding is still required.
+  if(currentProfile && (currentProfile.onboarding_status === 'in_progress' || currentProfile.onboarding_status === 'not_started')){
+    checkAndShowOnboardingLockout();
+    return;
+  }
+
   if(activeAdminView === 'profile'){ renderMyProfile(el); return; }
   if(activeAdminView === 'credentials'){ el.innerHTML = renderChangePassword(); return; }
   if(activeAdminView === 'agents'){ renderAgents(el); return; }
@@ -6601,6 +6609,12 @@ async function renderOnboardingMaster(el){
     ${grantsHtml}
     ${allPrograms.map(prog => {
       const progPackets = (packets || []).filter(p => p.program_id === prog.id);
+      // Map program by name to a starter type for the generator
+      const lname = (prog.name || '').toLowerCase();
+      let starterType = null;
+      if(lname.includes('retail') || lname.includes('reliant') || lname.includes('residential')) starterType = 'retail_energy';
+      else if(lname.includes('b2b') || lname.includes('commercial') || lname.includes('business')) starterType = 'b2b_energy';
+      else if(lname.includes('fiber') || lname.includes('internet')) starterType = 'fiber';
       return `
       <div class="bo-card" style="border-left:3px solid ${prog.color};margin-bottom:14px;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:10px;">
@@ -6608,7 +6622,10 @@ async function renderOnboardingMaster(el){
             <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:${prog.color};letter-spacing:1px;">${prog.icon} ${prog.name}</div>
             <div style="font-size:12px;color:rgba(255,255,255,0.4);margin-top:2px;">${progPackets.length} packet${progPackets.length===1?'':'s'}</div>
           </div>
-          <button class="bo-btn bo-btn-primary" onclick="openPacketEditor('${prog.id}')">+ New Packet</button>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            ${starterType && progPackets.length === 0 ? `<button class="bo-btn bo-btn-ghost" style="border-color:${prog.color}55;color:${prog.color};" onclick="generateStarterPacket('${prog.id}','${starterType}')">⚡ Generate Starter Packet</button>` : ''}
+            <button class="bo-btn bo-btn-primary" onclick="openPacketEditor('${prog.id}')">+ New Packet</button>
+          </div>
         </div>
         ${progPackets.length === 0 ? '<div style="color:rgba(255,255,255,0.4);font-size:13px;padding:6px 0;">No packets for this program yet. New agents in this program have nothing to onboard with.</div>' :
           progPackets.map(pk => `
@@ -6631,6 +6648,176 @@ async function renderOnboardingMaster(el){
       </div>`;
     }).join('')}`;
 }
+
+// ─── Pre-built starter packet templates (industry-standard onboarding) ────
+const STARTER_PACKET_TEMPLATES = {
+  retail_energy: {
+    name: 'Retail Energy Onboarding',
+    description: 'Standard onboarding for Reliant Energy kiosk agents — required for all new hires before codes can be issued.',
+    steps: [
+      {
+        title: 'Personal Information',
+        description: 'Confirm your full legal name, date of birth, address, phone, and emergency contact.',
+        step_type: 'personal_info',
+        required: true,
+      },
+      {
+        title: 'Government-Issued Photo ID',
+        description: 'Upload a clear photo of your driver\'s license or state ID. Both sides if your state requires it. Must be unexpired and the photo must clearly match you.',
+        step_type: 'id_upload',
+        required: true,
+      },
+      {
+        title: 'W-9 Tax Form',
+        description: 'Complete your W-9 with your legal name, address, and SSN/EIN. This is required for 1099 contractor payments.',
+        step_type: 'w9',
+        required: true,
+      },
+      {
+        title: 'Direct Deposit Information',
+        description: 'Provide your bank routing and account numbers so commissions can be paid directly. Your banking info is encrypted and only visible to the owner.',
+        step_type: 'direct_deposit',
+        required: true,
+      },
+      {
+        title: 'Profile Photo / Badge Picture',
+        description: 'Upload a clear, professional headshot for your back-office profile and Reliant kiosk badge. Plain background, well-lit, looking at the camera.',
+        step_type: 'profile_photo',
+        required: true,
+      },
+      {
+        title: 'Background Check Authorization',
+        description: 'Sign the authorization form allowing Circle Solutions Inc. and Reliant Energy to run a background check. Required before you can be assigned to a Walmart, Sam\'s Club, Kroger, or H-E-B location.',
+        step_type: 'background_check',
+        required: true,
+      },
+      {
+        title: 'Independent Contractor Agreement',
+        description: 'Read and sign the standard 1099 contractor agreement that defines your relationship with Circle Solutions Inc.',
+        step_type: 'document',
+        config: {
+          signature_method: 'click_to_sign',
+          // document_url to be filled in after upload by owner
+        },
+        required: true,
+      },
+      {
+        title: 'Reliant Energy Code of Conduct',
+        description: 'Read and acknowledge Reliant Energy\'s vendor code of conduct, including kiosk professionalism, customer interaction standards, and prohibited sales practices.',
+        step_type: 'document',
+        config: {
+          signature_method: 'acknowledge',
+        },
+        required: true,
+      },
+      {
+        title: 'Sales Compliance Training Acknowledgment',
+        description: 'Confirm you have reviewed the sales compliance training materials covering misrepresentation, slamming, and customer rights.',
+        step_type: 'custom',
+        config: {
+          fields: [
+            { id: 'reviewed_training', label: 'I have reviewed all sales compliance training materials', type: 'checkbox', required: true },
+            { id: 'understand_consequences', label: 'I understand that violating compliance rules may result in immediate termination', type: 'checkbox', required: true },
+            { id: 'agent_signature', label: 'Type your full legal name to acknowledge', type: 'text', required: true, placeholder: 'First Middle Last' }
+          ]
+        },
+        required: true,
+      },
+    ]
+  },
+
+  b2b_energy: {
+    name: 'B2B Commercial Energy Onboarding',
+    description: 'Onboarding for outbound B2B commercial energy reps. Includes contract, W-9, direct deposit, and compliance review.',
+    steps: [
+      { title: 'Personal Information', description: 'Confirm your full legal name, date of birth, address, phone, and emergency contact.', step_type: 'personal_info', required: true },
+      { title: 'Government-Issued Photo ID', description: 'Upload a clear photo of your driver\'s license or state ID.', step_type: 'id_upload', required: true },
+      { title: 'W-9 Tax Form', description: 'Complete your W-9 with your legal name, address, and SSN/EIN.', step_type: 'w9', required: true },
+      { title: 'Direct Deposit Information', description: 'Provide your bank routing and account numbers for commission payments.', step_type: 'direct_deposit', required: true },
+      { title: 'Profile Photo', description: 'Upload a professional headshot for your back-office profile.', step_type: 'profile_photo', required: true },
+      { title: 'Background Check Authorization', description: 'Sign the authorization form allowing Circle Solutions Inc. to run a background check.', step_type: 'background_check', required: true },
+      { title: 'Independent Contractor Agreement', description: 'Read and sign the 1099 contractor agreement.', step_type: 'document', config: { signature_method: 'click_to_sign' }, required: true },
+      { title: 'B2B Sales Compliance Acknowledgment', description: 'Confirm you understand commercial energy sales rules including DOE-required disclosures and TPV requirements.', step_type: 'custom', config: { fields: [
+        { id: 'tpv_understanding', label: 'I understand all B2B enrollments require Third-Party Verification (TPV)', type: 'checkbox', required: true },
+        { id: 'doe_disclosures', label: 'I understand DOE-required disclosure obligations', type: 'checkbox', required: true },
+        { id: 'agent_signature', label: 'Type your full legal name to acknowledge', type: 'text', required: true, placeholder: 'First Middle Last' }
+      ]}, required: true },
+    ]
+  },
+
+  fiber: {
+    name: 'Fiber Internet (D2D) Onboarding',
+    description: 'Onboarding for door-to-door fiber internet sales agents. Includes W-9, direct deposit, contract, and field-safety acknowledgment.',
+    steps: [
+      { title: 'Personal Information', description: 'Confirm your full legal name, date of birth, address, phone, and emergency contact.', step_type: 'personal_info', required: true },
+      { title: 'Government-Issued Photo ID', description: 'Upload a clear photo of your driver\'s license or state ID.', step_type: 'id_upload', required: true },
+      { title: 'W-9 Tax Form', description: 'Complete your W-9 with your legal name, address, and SSN/EIN.', step_type: 'w9', required: true },
+      { title: 'Direct Deposit Information', description: 'Provide your bank routing and account numbers for commission payments.', step_type: 'direct_deposit', required: true },
+      { title: 'Profile Photo / Badge Picture', description: 'Upload a clear, professional headshot for your back-office profile and field ID badge.', step_type: 'profile_photo', required: true },
+      { title: 'Background Check Authorization', description: 'Sign the authorization form for a background check (required by most fiber carriers before you can canvass).', step_type: 'background_check', required: true },
+      { title: 'Independent Contractor Agreement', description: 'Read and sign the 1099 contractor agreement.', step_type: 'document', config: { signature_method: 'click_to_sign' }, required: true },
+      { title: 'D2D Field Safety & Conduct', description: 'Acknowledge field safety rules and door-to-door professional conduct standards.', step_type: 'custom', config: { fields: [
+        { id: 'field_safety', label: 'I will follow all D2D safety protocols (territory check-in, safe hours, etc.)', type: 'checkbox', required: true },
+        { id: 'no_trespass', label: 'I will respect "No Soliciting" signs and immediately leave properties when asked', type: 'checkbox', required: true },
+        { id: 'professional_attire', label: 'I will wear approved Circle Solutions branded attire and ID badge while in the field', type: 'checkbox', required: true },
+        { id: 'agent_signature', label: 'Type your full legal name to acknowledge', type: 'text', required: true, placeholder: 'First Middle Last' }
+      ]}, required: true },
+    ]
+  },
+};
+
+async function generateStarterPacket(programId, starterType){
+  if(!currentProfile.has_master_center_access){ alert('Access denied'); return; }
+  const tpl = STARTER_PACKET_TEMPLATES[starterType];
+  if(!tpl){ alert('Unknown starter type: ' + starterType); return; }
+
+  if(!confirm('Generate the starter "' + tpl.name + '" packet?\n\nIt includes ' + tpl.steps.length + ' pre-built steps. You can edit, add, or remove steps after creation.')) return;
+
+  try {
+    // Create the packet (no created_by column in this schema)
+    const { data: pkt, error: pktErr } = await sb.from('onboarding_packets').insert({
+      program_id: programId,
+      name: tpl.name,
+      description: tpl.description,
+      active: true,
+      version: 1
+    }).select().single();
+
+    if(pktErr || !pkt){ alert('Failed to create packet: ' + (pktErr?.message || 'unknown')); return; }
+
+    // Insert all steps — signature_method is a top-level column, not inside config
+    const stepRows = tpl.steps.map((s, i) => {
+      const cfg = s.config || {};
+      const sigMethod = cfg.signature_method || null;
+      // Don't double-store signature_method in config
+      const cleanConfig = { ...cfg };
+      delete cleanConfig.signature_method;
+      return {
+        packet_id: pkt.id,
+        title: s.title,
+        description: s.description || '',
+        step_type: s.step_type,
+        signature_method: sigMethod,
+        config: cleanConfig,
+        required: s.required !== false,
+        display_order: i
+      };
+    });
+    const { error: stepsErr } = await sb.from('onboarding_steps').insert(stepRows);
+    if(stepsErr){
+      // Roll back the packet on error
+      await sb.from('onboarding_packets').delete().eq('id', pkt.id);
+      alert('Failed to create steps: ' + stepsErr.message);
+      return;
+    }
+
+    alert('✓ Starter packet created with ' + tpl.steps.length + ' steps. You can now edit it to customize, add documents, or change step order.');
+    renderMainContent();
+  } catch(e){
+    alert('Error: ' + e.message);
+  }
+}
+
 
 async function openPacketEditor(programId, packetId){
   let packet = null;
@@ -8250,6 +8437,7 @@ window.wizardNext = wizardNext;
 window.closeWizard = closeWizard;
 window.renderOnboardingMaster = renderOnboardingMaster;
 window.openPacketEditor = openPacketEditor;
+window.generateStarterPacket = generateStarterPacket;
 window.packetEditorAddStep = packetEditorAddStep;
 window.packetUpdateStep = packetUpdateStep;
 window.packetUpdateConfig = packetUpdateConfig;
