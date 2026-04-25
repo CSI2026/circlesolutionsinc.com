@@ -1147,9 +1147,23 @@ footer{
       <div id="bo-role-badge" class="role-badge role-agent" style="padding:5px 13px;font-size:11px;"></div>
     </div>
     <div style="display:flex;align-items:center;gap:14px;">
+      <!-- Notification bell -->
+      <div id="bo-bell-wrap" style="position:relative;cursor:pointer;display:none;" onclick="toggleNotificationsPanel(event)" title="Notifications">
+        <div style="width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,0.06);display:flex;align-items:center;justify-content:center;font-size:18px;transition:background 0.15s;" onmouseover="this.style.background='rgba(255,255,255,0.12)'" onmouseout="this.style.background='rgba(255,255,255,0.06)'">🔔</div>
+        <div id="bo-bell-badge" style="display:none;position:absolute;top:-3px;right:-3px;background:#FF0080;color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:50px;min-width:18px;text-align:center;border:2px solid #000;">0</div>
+      </div>
       <div id="bo-user-avatar-wrap" style="display:flex;align-items:center;gap:10px;"></div>
       <button class="logout-btn" onclick="doLogout()">Sign Out</button>
     </div>
+  </div>
+
+  <!-- Notifications dropdown panel (positioned absolutely) -->
+  <div id="bo-notifications-panel" style="display:none;position:fixed;top:64px;right:24px;width:380px;max-width:calc(100vw - 32px);max-height:600px;background:#0d0d0d;border:1px solid rgba(255,255,255,0.1);border-radius:14px;box-shadow:0 8px 30px rgba(0,0,0,0.5);z-index:9999;overflow:hidden;flex-direction:column;">
+    <div style="padding:14px 18px;border-bottom:1px solid rgba(255,255,255,0.07);display:flex;justify-content:space-between;align-items:center;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#fff;letter-spacing:1px;">🔔 Notifications</div>
+      <button id="bo-mark-all-btn" class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:11px;display:none;" onclick="markAllNotificationsRead()">Mark all read</button>
+    </div>
+    <div id="bo-notifications-list" style="flex:1;overflow-y:auto;max-height:520px;"></div>
   </div>
 
   <div style="display:flex;min-height:calc(100vh - 76px);">
@@ -1897,6 +1911,13 @@ async function doLogin(e){
 }
 
 async function doLogout(){
+  // Clean up notifications channel
+  if(_notificationsChannel){
+    try { sb.removeChannel(_notificationsChannel); } catch(_){}
+    _notificationsChannel = null;
+  }
+  _notificationsCache = [];
+  _notificationsPanelOpen = false;
   await sb.auth.signOut();
   currentUser = null;
   currentProfile = null;
@@ -2001,6 +2022,9 @@ function enterBackOffice(){
 
   // Background: run reminder nudges (silent) if owner/admin and not in last 24h
   try { maybeAutoRunReminders(); } catch(_){}
+
+  // Init in-app notifications
+  try { loadNotifications(); subscribeToNotifications(); } catch(_){}
 
   // Auto-select: owner lands on owner panel; others on first program
   const userPrograms = (p.role === 'owner' || p.role === 'admin')
@@ -3219,7 +3243,7 @@ async function sendContractsToAgent(userId){
       contractNames.push(t.title);
     }
 
-    // Email the agent
+    // Email the agent + push in-app notification
     try {
       const { data: profile } = await sb.from('profiles').select('email,full_name').eq('id', userId).single();
       if(profile){
@@ -3228,8 +3252,14 @@ async function sendContractsToAgent(userId){
           contract_count: contractNames.length,
           contract_names: contractNames
         });
+        await notifyUser(userId, {
+          type: 'contract_sent',
+          title: contractNames.length > 1 ? contractNames.length + ' contracts to sign' : 'New contract to sign',
+          body: contractNames.join(', '),
+          link_view: 'my-contracts'
+        });
       }
-    } catch(e){ console.warn('contract_sent_to_agent email failed:', e); }
+    } catch(e){ console.warn('contract_sent_to_agent notify failed:', e); }
 
     msg.innerHTML='<span style="color:#00FF88;">✓ Contract(s) sent. Agent will see them in their My Contracts tab.</span>';
     setTimeout(() => {
@@ -3352,6 +3382,12 @@ async function sendUrgentMessage(){
         deadline: deadline || null,
         sent_by: currentProfile.full_name || currentProfile.email,
         sent_by_email: currentProfile.email
+      });
+      // In-app notification
+      await notifyUser(userId, {
+        type: 'urgent',
+        title: '🚨 URGENT: ' + subject,
+        body: message + (action ? '\n\nAction Required: ' + action : '') + (deadline ? '\n⏰ Deadline: ' + deadline : '')
       });
       sent++;
     } catch(e){
@@ -3689,7 +3725,7 @@ async function toggleAgentActive(id, currentlyActive){
   const { error } = await sb.from('profiles').update({ active: !currentlyActive }).eq('id', id);
   if(error){ alert('Error: ' + error.message); return; }
 
-  // Email the agent
+  // Email the agent + in-app notification
   try {
     const { data: p } = await sb.from('profiles').select('email,full_name').eq('id', id).single();
     if(p){
@@ -3698,8 +3734,17 @@ async function toggleAgentActive(id, currentlyActive){
         p.email,
         { full_name: p.full_name, reason: reason || null }
       );
+      // For reactivated accounts, push a notification — they'll see it on next login
+      if(!goingInactive){
+        await notifyUser(id, {
+          type: 'account_reactivated',
+          title: '✅ Your account is active again',
+          body: 'Welcome back. Your access has been restored.'
+        });
+      }
+      // Don't bother in-app for deactivated — they can't log in to see it
     }
-  } catch(e){ console.warn('activate/deactivate email failed:', e); }
+  } catch(e){ console.warn('activate/deactivate notify failed:', e); }
 
   renderMainContent();
 }
@@ -3863,6 +3908,15 @@ async function notifyUserOfPasswordChange(userId, newPassword){
         new_password: newPassword || null
       });
     } catch(e){ console.warn('password_changed_by_admin email failed:', e); }
+
+    // In-app notification (they'll see it next time they log in)
+    try {
+      await notifyUser(userId, {
+        type: 'password_changed',
+        title: '🔐 Your password was changed',
+        body: 'An administrator updated your password. Sign in and you\'ll be prompted to set your own.'
+      });
+    } catch(e){ /* silent */ }
 
     // SMS is best-effort — silently skips if user has no carrier or opted out.
     if(!target.phone || !target.phone_carrier) return;
@@ -4557,7 +4611,7 @@ async function submitApplication(){
 async function notifyAdminsOfNewApplication(data){
   try {
     const { data: admins } = await sb.from('profiles')
-      .select('email')
+      .select('id,email')
       .in('role', ['owner','admin'])
       .eq('active', true);
     if(!admins || admins.length === 0) return;
@@ -4587,6 +4641,15 @@ async function notifyAdminsOfNewApplication(data){
           notes: notesBlock
         });
       } catch(e){ console.warn('new_application email failed for', a.email, e); }
+      // In-app
+      try {
+        await notifyUser(a.id, {
+          type: 'new_application',
+          title: '📝 New application: ' + data.fname + ' ' + data.lname,
+          body: data.program + ' · ' + data.city + ', ' + data.state,
+          link_view: 'applications'
+        });
+      } catch(e){ console.warn('new_application in-app failed for', a.id, e); }
     }
   } catch(e){ console.warn('notifyAdminsOfNewApplication error:', e); }
 }
@@ -4687,6 +4750,232 @@ async function sendEmailViaFunction(template, to, variables){
   if(error){ console.error('Email send error:', error); throw error; }
   return data;
 }
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// IN-APP NOTIFICATIONS — bell icon + realtime push + dropdown panel
+// ═══════════════════════════════════════════════════════════════════════
+let _notificationsCache = [];
+let _notificationsChannel = null;
+let _notificationsPanelOpen = false;
+
+const NOTIFICATION_ICONS = {
+  contract_sent: '📄',
+  contract_signed: '✍️',
+  contract_reminder: '⏰',
+  onboarding_assigned: '📋',
+  onboarding_complete: '✅',
+  onboarding_reminder: '⏰',
+  codes_unlocked: '🎉',
+  new_application: '📝',
+  account_deactivated: '🚫',
+  account_reactivated: '✅',
+  password_changed: '🔐',
+  urgent: '🚨',
+  generic: '🔔',
+};
+
+// Send an in-app notification to a specific user
+async function notifyUser(userId, payload){
+  // payload: { type, title, body?, link_view?, link_id?, metadata? }
+  if(!userId || !payload || !payload.title) return;
+  try {
+    await sb.from('notifications').insert({
+      user_id: userId,
+      type: payload.type || 'generic',
+      title: payload.title,
+      body: payload.body || null,
+      link_view: payload.link_view || null,
+      link_id: payload.link_id || null,
+      metadata: payload.metadata || {}
+    });
+  } catch(e){ console.warn('notifyUser failed for', userId, e); }
+}
+
+// Helper — notify all owners + admins
+async function notifyOwnersAndAdmins(payload){
+  try {
+    const { data: admins } = await sb.from('profiles')
+      .select('id').in('role', ['owner','admin']).eq('active', true);
+    if(!admins) return;
+    for(const a of admins){
+      if(a.id === currentProfile?.id) continue; // don't notify yourself for your own action
+      await notifyUser(a.id, payload);
+    }
+  } catch(e){ console.warn('notifyOwnersAndAdmins failed:', e); }
+}
+
+// Load recent notifications from DB and render into the panel
+async function loadNotifications(){
+  if(!currentProfile) return;
+  try {
+    const { data } = await sb.from('notifications')
+      .select('*').eq('user_id', currentProfile.id)
+      .order('created_at', { ascending: false }).limit(50);
+    _notificationsCache = data || [];
+    renderNotificationsBell();
+    renderNotificationsList();
+  } catch(e){ console.warn('loadNotifications error:', e); }
+}
+
+function renderNotificationsBell(){
+  const wrap = document.getElementById('bo-bell-wrap');
+  const badge = document.getElementById('bo-bell-badge');
+  if(!wrap || !badge) return;
+  wrap.style.display = currentProfile ? 'block' : 'none';
+  const unread = _notificationsCache.filter(n => !n.read_at).length;
+  if(unread > 0){
+    badge.style.display = 'block';
+    badge.textContent = unread > 99 ? '99+' : String(unread);
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+function renderNotificationsList(){
+  const list = document.getElementById('bo-notifications-list');
+  const markAllBtn = document.getElementById('bo-mark-all-btn');
+  if(!list) return;
+  const unread = _notificationsCache.filter(n => !n.read_at);
+  if(markAllBtn) markAllBtn.style.display = unread.length > 0 ? 'block' : 'none';
+
+  if(_notificationsCache.length === 0){
+    list.innerHTML = '<div style="padding:30px;text-align:center;color:rgba(255,255,255,0.4);font-size:13px;">No notifications yet.</div>';
+    return;
+  }
+
+  list.innerHTML = _notificationsCache.map(n => {
+    const icon = NOTIFICATION_ICONS[n.type] || '🔔';
+    const ts = formatRelativeTime(n.created_at);
+    const isUnread = !n.read_at;
+    return `
+      <div data-notif-id="${n.id}" onclick="onNotificationClick('${n.id}')" style="padding:12px 16px;border-bottom:1px solid rgba(255,255,255,0.05);cursor:pointer;display:flex;gap:12px;background:${isUnread ? 'rgba(255,107,0,0.05)' : 'transparent'};transition:background 0.15s;" onmouseover="this.style.background='rgba(255,255,255,0.04)'" onmouseout="this.style.background='${isUnread ? 'rgba(255,107,0,0.05)' : 'transparent'}'">
+        <div style="font-size:22px;flex-shrink:0;line-height:1;">${icon}</div>
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:13.5px;color:#fff;font-weight:${isUnread ? '600' : '500'};line-height:1.4;">${escapeHtml(n.title)}</div>
+          ${n.body ? `<div style="font-size:12px;color:rgba(255,255,255,0.55);margin-top:3px;line-height:1.45;">${escapeHtml(n.body).replace(/\n/g,'<br/>')}</div>` : ''}
+          <div style="font-size:11px;color:rgba(255,255,255,0.35);margin-top:5px;">${ts}</div>
+        </div>
+        ${isUnread ? '<div style="width:8px;height:8px;background:#FF6B00;border-radius:50%;flex-shrink:0;margin-top:6px;"></div>' : ''}
+      </div>`;
+  }).join('');
+}
+
+function formatRelativeTime(iso){
+  const then = new Date(iso);
+  const now = new Date();
+  const diffSec = Math.floor((now - then) / 1000);
+  if(diffSec < 60) return 'Just now';
+  if(diffSec < 3600) return Math.floor(diffSec/60) + 'm ago';
+  if(diffSec < 86400) return Math.floor(diffSec/3600) + 'h ago';
+  if(diffSec < 604800) return Math.floor(diffSec/86400) + 'd ago';
+  return then.toLocaleDateString();
+}
+
+function toggleNotificationsPanel(e){
+  if(e) e.stopPropagation();
+  const panel = document.getElementById('bo-notifications-panel');
+  if(!panel) return;
+  _notificationsPanelOpen = !_notificationsPanelOpen;
+  panel.style.display = _notificationsPanelOpen ? 'flex' : 'none';
+  if(_notificationsPanelOpen){
+    renderNotificationsList();
+    // Click-outside-to-close handler
+    setTimeout(() => {
+      document.addEventListener('click', closeNotificationsOnOutsideClick);
+    }, 0);
+  }
+}
+
+function closeNotificationsOnOutsideClick(e){
+  const panel = document.getElementById('bo-notifications-panel');
+  const bell = document.getElementById('bo-bell-wrap');
+  if(panel && !panel.contains(e.target) && bell && !bell.contains(e.target)){
+    panel.style.display = 'none';
+    _notificationsPanelOpen = false;
+    document.removeEventListener('click', closeNotificationsOnOutsideClick);
+  }
+}
+
+async function onNotificationClick(notifId){
+  const n = _notificationsCache.find(x => x.id === notifId);
+  if(!n) return;
+
+  // Mark as read
+  if(!n.read_at){
+    try {
+      await sb.from('notifications').update({ read_at: new Date().toISOString() }).eq('id', notifId);
+      n.read_at = new Date().toISOString();
+      renderNotificationsBell();
+      renderNotificationsList();
+    } catch(e){ console.warn('Mark read failed:', e); }
+  }
+
+  // Close panel + navigate
+  document.getElementById('bo-notifications-panel').style.display = 'none';
+  _notificationsPanelOpen = false;
+  document.removeEventListener('click', closeNotificationsOnOutsideClick);
+
+  // Navigation logic based on link_view + link_id
+  if(n.link_view){
+    if(n.link_view === 'agent-profile' && n.link_id){
+      openAgentProfile(n.link_id);
+    } else if(n.link_view === 'my-contracts'){
+      activeAdminView = 'my-contracts';
+      activeProgramId = null;
+      renderSidebar();
+      renderMainContent();
+    } else if(n.link_view === 'onboarding-pending'){
+      boShowAdmin('onboarding-pending');
+    } else if(n.link_view === 'applications'){
+      boShowAdmin('applications');
+    } else {
+      boShowAdmin(n.link_view);
+    }
+  }
+}
+
+async function markAllNotificationsRead(){
+  try {
+    const unreadIds = _notificationsCache.filter(n => !n.read_at).map(n => n.id);
+    if(unreadIds.length === 0) return;
+    await sb.from('notifications').update({ read_at: new Date().toISOString() }).in('id', unreadIds);
+    for(const n of _notificationsCache){ if(!n.read_at) n.read_at = new Date().toISOString(); }
+    renderNotificationsBell();
+    renderNotificationsList();
+  } catch(e){ console.warn('Mark all read failed:', e); }
+}
+
+// Subscribe to realtime inserts so the bell badge updates instantly when something new arrives
+function subscribeToNotifications(){
+  if(!currentProfile) return;
+  if(_notificationsChannel){
+    try { sb.removeChannel(_notificationsChannel); } catch(_){}
+    _notificationsChannel = null;
+  }
+  _notificationsChannel = sb.channel('notifications-' + currentProfile.id)
+    .on('postgres_changes', {
+      event: 'INSERT',
+      schema: 'public',
+      table: 'notifications',
+      filter: 'user_id=eq.' + currentProfile.id
+    }, (payload) => {
+      // Prepend the new notification to cache
+      if(payload.new){
+        _notificationsCache.unshift(payload.new);
+        renderNotificationsBell();
+        if(_notificationsPanelOpen) renderNotificationsList();
+        // Brief flash on the bell to draw attention
+        const bell = document.getElementById('bo-bell-wrap');
+        if(bell){
+          bell.style.transform = 'scale(1.15)';
+          setTimeout(() => { bell.style.transform = 'scale(1)'; }, 200);
+        }
+      }
+    })
+    .subscribe();
+}
+
 
 // SMS via free carrier email-to-SMS gateways (no paid SMS service)
 async function sendSmsViaFunction(opts){
@@ -6447,6 +6736,12 @@ async function runRemindersPass(options){
           contract_title: a.template_snapshot?.title || 'Contract',
           days_pending: daysPending
         });
+        await notifyUser(a.user_id, {
+          type: 'contract_reminder',
+          title: '⏰ Contract still waiting: ' + (a.template_snapshot?.title || 'Contract'),
+          body: 'Sent ' + daysPending + ' days ago — please review and sign.',
+          link_view: 'my-contracts'
+        });
         // Mark reminded
         await sb.from('contract_assignments').update({ last_reminder_at: now.toISOString() }).eq('id', a.id);
         contractsNudged++;
@@ -6485,6 +6780,11 @@ async function runRemindersPass(options){
           packet_names: packetNames,
           days_pending: daysPending
         });
+        await notifyUser(userId, {
+          type: 'onboarding_reminder',
+          title: '⏰ Onboarding still pending',
+          body: packetNames.join(', ') + ' — sent ' + daysPending + ' days ago. Log in to finish.',
+        });
         // Mark all reminded
         for(const pp of packets){
           await sb.from('agent_onboarding').update({ last_reminder_at: now.toISOString() }).eq('id', pp.id);
@@ -6520,7 +6820,7 @@ async function maybeAutoRunReminders(){
 async function notifyAdminsOnboardingComplete(){
   try {
     const { data: admins } = await sb.from('profiles')
-      .select('email,full_name')
+      .select('id,email,full_name')
       .in('role', ['owner','admin'])
       .eq('active', true);
     if(!admins || admins.length === 0) return;
@@ -6537,6 +6837,16 @@ async function notifyAdminsOnboardingComplete(){
           completed_at: new Date().toLocaleString()
         });
       } catch(e){ console.warn('Admin notify email failed for', admin.email, e); }
+      // In-app notification
+      try {
+        await notifyUser(admin.id, {
+          type: 'onboarding_complete',
+          title: '✅ ' + agentName + ' is ready for codes',
+          body: 'They finished onboarding for ' + agentPrograms + '. Click to unlock their codes.',
+          link_view: 'agent-profile',
+          link_id: currentProfile.id
+        });
+      } catch(e){ console.warn('Admin in-app notify failed for', admin.id, e); }
     }
   } catch(e){ console.warn('notifyAdminsOnboardingComplete error:', e); }
 }
@@ -7230,7 +7540,7 @@ async function sendPacketsToAgent(userId){
     // Mark profile as not_started → will go in_progress on first save
     await sb.from('profiles').update({ onboarding_status: 'not_started' }).eq('id', userId);
 
-    // Email the agent with the DEDICATED onboarding-assigned template (not welcome)
+    // Email the agent with the DEDICATED onboarding-assigned template (not welcome) + in-app
     try {
       const { data: profile } = await sb.from('profiles').select('email,full_name').eq('id', userId).single();
       // Collect packet names for the email
@@ -7244,6 +7554,11 @@ async function sendPacketsToAgent(userId){
           full_name: profile.full_name,
           packet_count: checked.length,
           packet_names: packetNames
+        });
+        await notifyUser(userId, {
+          type: 'onboarding_assigned',
+          title: checked.length > 1 ? checked.length + ' onboarding packets assigned' : 'Onboarding packet assigned',
+          body: packetNames.join(', ') + ' — log in to begin.',
         });
       }
     } catch(e){ /* email is best-effort */ }
@@ -7304,7 +7619,7 @@ async function unlockCodesForAgent(userId){
   const { error } = await sb.from('profiles').update({ codes_unlocked: true }).eq('id', userId);
   if(error){ alert('Error: ' + error.message); return; }
 
-  // Email the agent their congrats
+  // Email the agent their congrats + push in-app notification
   try {
     const { data: p } = await sb.from('profiles').select('email,full_name,programs').eq('id', userId).single();
     if(p){
@@ -7313,8 +7628,14 @@ async function unlockCodesForAgent(userId){
         full_name: p.full_name,
         programs: programNames
       });
+      await notifyUser(userId, {
+        type: 'codes_unlocked',
+        title: '🎉 You\'ve been coded!',
+        body: 'Your codes are unlocked. Training Calls, Meetings, and Codes are now available. Welcome to the team!',
+        link_view: 'profile'
+      });
     }
-  } catch(e){ console.warn('codes_unlocked email failed:', e); }
+  } catch(e){ console.warn('codes_unlocked notify failed:', e); }
 
   renderMainContent();
 }
@@ -8022,7 +8343,7 @@ async function finalizeContractSignature(assignmentId){
 async function notifyOwnerOfContractSignature(template, agentName, signedAt, ip){
   try {
     const { data: admins } = await sb.from('profiles')
-      .select('email')
+      .select('id,email')
       .in('role', ['owner','admin'])
       .eq('active', true);
     if(!admins || admins.length === 0) return;
@@ -8035,6 +8356,16 @@ async function notifyOwnerOfContractSignature(template, agentName, signedAt, ip)
           ip_address: ip || 'unknown'
         });
       } catch(e){ console.warn('Contract sign notify failed for', admin.email, e); }
+      // In-app notification
+      try {
+        await notifyUser(admin.id, {
+          type: 'contract_signed',
+          title: '✍️ ' + agentName + ' signed: ' + (template.title || 'Untitled'),
+          body: 'Signed at ' + new Date(signedAt).toLocaleString() + ' from IP ' + (ip || 'unknown'),
+          link_view: 'agent-profile',
+          link_id: currentProfile.id
+        });
+      } catch(e){ console.warn('Contract sign in-app notify failed for', admin.id, e); }
     }
   } catch(e){ console.warn('notifyOwnerOfContractSignature error:', e); }
 }
@@ -8484,6 +8815,9 @@ window.sendUrgentMessage = sendUrgentMessage;
 window.urgToggleAll = urgToggleAll;
 window.urgSelectByRole = urgSelectByRole;
 window.runRemindersPass = runRemindersPass;
+window.toggleNotificationsPanel = toggleNotificationsPanel;
+window.onNotificationClick = onNotificationClick;
+window.markAllNotificationsRead = markAllNotificationsRead;
 </script>
 
 </body>
