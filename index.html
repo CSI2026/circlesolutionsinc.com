@@ -1176,6 +1176,8 @@ footer{
       <button class="bo-nav-item" id="nav-global-docs" onclick="boShowAdmin('global-docs')">📁 Company Library</button>
       <button class="bo-nav-item" id="nav-my-forms" onclick="boShowAdmin('my-forms')">📋 My Forms</button>
       <button class="bo-nav-item" id="nav-my-contracts" onclick="boShowAdmin('my-contracts')">📄 My Contracts</button>
+      <button class="bo-nav-item" id="nav-photo-checkin" onclick="boShowAdmin('photo-audit-checkin')" style="display:none;">📸 Daily Check-In</button>
+      <button class="bo-nav-item" id="nav-my-inventory" onclick="boShowAdmin('my-inventory')" style="display:none;">📦 My Inventory</button>
 
       <div id="bo-admin-nav-wrap" style="display:none;">
         <div style="padding:24px 24px 14px 24px;margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);font-size:10.5px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:rgba(255,255,255,0.35);">Administration</div>
@@ -1998,6 +2000,13 @@ function enterBackOffice(){
     return;
   }
 
+  // Account lockout (payroll auto-lock or manual): block at the door for agents
+  if(currentProfile.account_locked === true && !['owner','admin'].includes(currentProfile.role) && !currentProfile.is_payroll_manager){
+    showPage('backoffice');
+    setTimeout(() => showAccountLockoutScreen(), 100);
+    return;
+  }
+
   // Update header with avatar + name
   const p = currentProfile;
   const avatarWrap = document.getElementById('bo-user-avatar-wrap');
@@ -2108,14 +2117,32 @@ function renderSidebar(){
   if(isOwner){
     navItems.push({ id:'owner-panel', label:'👑 Owner Panel' });
     navItems.push({ id:'markets', label:'📍 Markets' });
+    navItems.push({ id:'stores', label:'🏪 Stores' });
     navItems.push({ id:'contract-builder', label:'📄 Contract Builder' });
     navItems.push({ id:'forms-admin', label:'📋 All Forms' });
     navItems.push({ id:'applications', label:'📝 Applications' });
     navItems.push({ id:'programs-admin', label:'🎯 Programs' });
   } else if(isAdmin){
+    navItems.push({ id:'stores', label:'🏪 Stores' });
     navItems.push({ id:'forms-admin', label:'📋 All Forms' });
     navItems.push({ id:'applications', label:'📝 Applications' });
     navItems.push({ id:'programs-admin', label:'🎯 Programs' });
+  }
+
+  // Inventory — owner, admin, OR users with is_inventory_manager flag, OR managers
+  const canInventory = isOwner || isAdmin || isManager || currentProfile.is_inventory_manager;
+  if(canInventory){
+    navItems.push({ id:'inventory', label:'📦 Inventory' });
+  }
+
+  // Photo Audits review — owner, admin, manager, team_lead can see audits
+  if(isOwner || isAdmin || isManager || isTeamLead){
+    navItems.push({ id:'photo-audits-review', label:'📸 Photo Audits' });
+  }
+
+  // Payroll — owner, admin, OR users with is_payroll_manager flag
+  if(isOwner || isAdmin || currentProfile.is_payroll_manager){
+    navItems.push({ id:'payroll', label:'💵 Payroll' });
   }
 
   // Onboarding Center — owner OR users with master_center_access grant
@@ -2126,6 +2153,21 @@ function renderSidebar(){
   // Onboarding Status — owner + admin can view all in-progress agents + send packets
   if(isOwner || isAdmin){
     navItems.push({ id:'onboarding-pending', label:'📋 Pending Onboarding' });
+  }
+
+  // Show "Daily Check-In" only if agent is assigned to at least one store
+  // Show "My Inventory" only if agent has any inventory assigned
+  // (Both default hidden in HTML; we toggle here)
+  const checkinBtn = document.getElementById('nav-photo-checkin');
+  const myInvBtn = document.getElementById('nav-my-inventory');
+  if(checkinBtn || myInvBtn){
+    Promise.all([
+      sb.from('agent_stores').select('id', { count:'exact', head:true }).eq('user_id', currentProfile.id),
+      sb.from('inventory_items').select('id', { count:'exact', head:true }).eq('assigned_to_user', currentProfile.id).eq('status', 'assigned'),
+    ]).then(([{ count: storeCount }, { count: invCount }]) => {
+      if(checkinBtn) checkinBtn.style.display = (storeCount && storeCount > 0) ? 'flex' : 'none';
+      if(myInvBtn) myInvBtn.style.display = (invCount && invCount > 0) ? 'flex' : 'none';
+    }).catch(() => {});
   }
 
   adminNav.innerHTML = navItems.map(it => `
@@ -2195,6 +2237,13 @@ function renderMainContent(){
     return;
   }
 
+  // ─── ACCOUNT LOCKOUT: payroll auto-lock or manual lock by admin ───
+  // Locked agents cannot do anything until owner/payroll unlocks them.
+  if(currentProfile && currentProfile.account_locked === true){
+    showAccountLockoutScreen();
+    return;
+  }
+
   if(activeAdminView === 'profile'){ renderMyProfile(el); return; }
   if(activeAdminView === 'credentials'){ el.innerHTML = renderChangePassword(); return; }
   if(activeAdminView === 'agents'){ renderAgents(el); return; }
@@ -2210,6 +2259,12 @@ function renderMainContent(){
   if(activeAdminView === 'my-contracts'){ renderMyContracts(el); return; }
   if(activeAdminView === 'onboarding-master'){ renderOnboardingMaster(el); return; }
   if(activeAdminView === 'onboarding-pending'){ renderOnboardingPending(el); return; }
+  if(activeAdminView === 'stores'){ renderStoresAdmin(el); return; }
+  if(activeAdminView === 'inventory'){ renderInventory(el); return; }
+  if(activeAdminView === 'photo-audits-review'){ renderPhotoAuditsReview(el); return; }
+  if(activeAdminView === 'payroll'){ renderPayroll(el); return; }
+  if(activeAdminView === 'photo-audit-checkin'){ renderPhotoAuditCheckin(el); return; }
+  if(activeAdminView === 'my-inventory'){ renderMyInventory(el); return; }
   if(activeAdminView === 'agent-profile'){
     if(window._currentAgentProfileId) openAgentProfile(window._currentAgentProfileId);
     else { activeAdminView = 'agents'; renderAgents(el); }
@@ -3717,6 +3772,26 @@ function renderAgentModalUI(existing, editId, availablePrograms, isOwner, isAdmi
       </label>
     </div>` : '<input type="hidden" id="ag-can-host" value="' + (e.can_host_meetings ? 'on' : '') + '"/>'}
 
+    ${isOwner ? `<div class="form-group" style="padding:14px;background:rgba(0,198,255,0.05);border:1px solid rgba(0,198,255,0.2);border-radius:10px;">
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+        <input type="checkbox" id="ag-inv-mgr" ${e.is_inventory_manager ? 'checked' : ''} style="width:18px;height:18px;accent-color:#00C6FF;"/>
+        <div style="flex:1;">
+          <div style="font-weight:600;color:#00C6FF;font-size:14px;">📦 Inventory Manager</div>
+          <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-top:2px;">Grants office-level inventory access — can assign items to managers AND agents anywhere in the company. Independent of role. Owner-only setting.</div>
+        </div>
+      </label>
+    </div>` : '<input type="hidden" id="ag-inv-mgr" value="' + (e.is_inventory_manager ? 'on' : '') + '"/>'}
+
+    ${isOwner ? `<div class="form-group" style="padding:14px;background:rgba(0,255,136,0.05);border:1px solid rgba(0,255,136,0.2);border-radius:10px;">
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+        <input type="checkbox" id="ag-payroll-mgr" ${e.is_payroll_manager ? 'checked' : ''} style="width:18px;height:18px;accent-color:#00FF88;"/>
+        <div style="flex:1;">
+          <div style="font-weight:600;color:#00FF88;font-size:14px;">💵 Payroll Manager</div>
+          <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-top:2px;">Full access to the Payroll dashboard. Can enter sales counts, lock/unlock agents, and view all hours. Bypasses account-locked state. Owner-only setting.</div>
+        </div>
+      </label>
+    </div>` : '<input type="hidden" id="ag-payroll-mgr" value="' + (e.is_payroll_manager ? 'on' : '') + '"/>'}
+
     <div style="display:flex;gap:10px;margin-top:18px;">
       <button class="bo-btn bo-btn-primary" onclick="saveAgent('${editId || ''}')">${isEdit ? 'Save Changes' : 'Create Team Member'}</button>
       <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
@@ -3777,6 +3852,10 @@ async function saveAgent(editId){
   const sms_opt_in = document.getElementById('ag-sms-opt-in').checked;
   const canHostEl = document.getElementById('ag-can-host');
   const can_host_meetings = canHostEl ? (canHostEl.type === 'checkbox' ? canHostEl.checked : canHostEl.value === 'on') : false;
+  const invMgrEl = document.getElementById('ag-inv-mgr');
+  const is_inventory_manager = invMgrEl ? (invMgrEl.type === 'checkbox' ? invMgrEl.checked : invMgrEl.value === 'on') : false;
+  const payMgrEl = document.getElementById('ag-payroll-mgr');
+  const is_payroll_manager = payMgrEl ? (payMgrEl.type === 'checkbox' ? payMgrEl.checked : payMgrEl.value === 'on') : false;
   const msg = document.getElementById('ag-msg');
 
   if(!full_name || !email){ msg.innerHTML = '<span style="color:#F87171;">Name and email are required.</span>'; return; }
@@ -3787,8 +3866,12 @@ async function saveAgent(editId){
       phone_carrier, sms_opt_in,
       updated_at: new Date().toISOString()
     };
-    // Only owners can change can_host_meetings
-    if(currentProfile.role === 'owner'){ updateData.can_host_meetings = can_host_meetings; }
+    // Only owners can change can_host_meetings + is_inventory_manager + is_payroll_manager
+    if(currentProfile.role === 'owner'){
+      updateData.can_host_meetings = can_host_meetings;
+      updateData.is_inventory_manager = is_inventory_manager;
+      updateData.is_payroll_manager = is_payroll_manager;
+    }
     const { error } = await sb.from('profiles').update(updateData).eq('id', editId);
     if(error){ msg.innerHTML = '<span style="color:#F87171;">'+error.message+'</span>'; return; }
     closeAllModals();
@@ -4500,6 +4583,823 @@ async function deleteApplication(id){
   renderMainContent();
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// ACCOUNT LOCKOUT SCREEN — shown to anyone with profiles.account_locked = true
+// ═══════════════════════════════════════════════════════════════════════
+function showAccountLockoutScreen(){
+  const el = document.getElementById('bo-content');
+  const reason = currentProfile.lock_reason || 'Your account is on hold pending review.';
+  const lockedAt = currentProfile.locked_at ? new Date(currentProfile.locked_at).toLocaleString() : 'recently';
+  el.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:center;min-height:60vh;padding:20px;">
+      <div class="bo-card" style="max-width:540px;text-align:center;padding:40px 30px;border:2px solid rgba(248,113,113,0.4);">
+        <div style="font-size:64px;margin-bottom:16px;">🔒</div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:42px;color:#F87171;letter-spacing:2px;margin-bottom:14px;">ACCOUNT ON HOLD</h1>
+        <div style="background:rgba(248,113,113,0.06);border:1px solid rgba(248,113,113,0.2);border-radius:10px;padding:16px 20px;margin-bottom:20px;text-align:left;">
+          <div style="font-size:11px;color:rgba(255,255,255,0.5);letter-spacing:1.5px;font-weight:700;margin-bottom:6px;">REASON</div>
+          <div style="font-size:14px;color:#fff;line-height:1.55;white-space:pre-wrap;">${escapeHtml(reason)}</div>
+        </div>
+        <div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-bottom:20px;line-height:1.6;">
+          Locked since: <strong style="color:rgba(255,255,255,0.8);">${escapeHtml(lockedAt)}</strong><br/>
+          To resume work, contact the owner or payroll department for review.
+        </div>
+        <button class="bo-btn bo-btn-ghost" onclick="doLogout()">Sign Out</button>
+      </div>
+    </div>`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// PAYROLL HELPERS — hours calculation, sales lookup, weekly cap
+// ═══════════════════════════════════════════════════════════════════════
+
+// Returns the Monday 00:00 (CST/local) of the current week as a Date
+function getWeekStart(d){
+  const date = d ? new Date(d) : new Date();
+  const day = date.getDay(); // 0=Sun, 1=Mon, ... 6=Sat
+  const diff = day === 0 ? -6 : 1 - day; // shift to Monday
+  date.setDate(date.getDate() + diff);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+// Calculate hours worked by an agent within a date range, by pairing
+// check_in and check_out audits. Unpaired check-ins are counted as
+// "active" up to NOW (capped at 12hr per day to prevent broken-pair runaway).
+async function calculateAgentHoursInRange(userId, startDate, endDate){
+  const { data: audits } = await sb.from('photo_audits')
+    .select('audit_type,created_at,geofence_passed')
+    .eq('user_id', userId)
+    .gte('created_at', startDate.toISOString())
+    .lt('created_at', endDate.toISOString())
+    .order('created_at', { ascending: true });
+  if(!audits || audits.length === 0) return 0;
+
+  // Only count audits that passed the geofence (we don't pay for fraudulent attempts)
+  const valid = audits.filter(a => a.geofence_passed);
+  let totalMs = 0;
+  let pendingCheckIn = null;
+  const MAX_SHIFT_MS = 12 * 3600 * 1000;
+  for(const a of valid){
+    if(a.audit_type === 'check_in'){
+      pendingCheckIn = new Date(a.created_at);
+    } else if(a.audit_type === 'check_out' && pendingCheckIn){
+      let span = new Date(a.created_at) - pendingCheckIn;
+      if(span > MAX_SHIFT_MS) span = MAX_SHIFT_MS;
+      if(span > 0) totalMs += span;
+      pendingCheckIn = null;
+    }
+  }
+  // Open shift (still checked in): count up to now or end-of-range
+  if(pendingCheckIn){
+    const cap = endDate < new Date() ? endDate : new Date();
+    let span = cap - pendingCheckIn;
+    if(span > MAX_SHIFT_MS) span = MAX_SHIFT_MS;
+    if(span > 0) totalMs += span;
+  }
+  return totalMs / (3600 * 1000); // hours
+}
+
+async function calculateAgentDayHours(userId, day){
+  const start = day ? new Date(day) : new Date();
+  start.setHours(0,0,0,0);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+  return calculateAgentHoursInRange(userId, start, end);
+}
+
+async function calculateAgentWeekHours(userId){
+  const start = getWeekStart();
+  const end = new Date(start);
+  end.setDate(end.getDate() + 7);
+  return calculateAgentHoursInRange(userId, start, end);
+}
+
+// Sales for a given user and date: MAX(manual count, enrollment count)
+async function getAgentSalesForDay(userId, day){
+  const start = day ? new Date(day) : new Date();
+  start.setHours(0,0,0,0);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+  const dateStr = start.toISOString().split('T')[0];
+
+  const [manual, enrolls] = await Promise.all([
+    sb.from('payroll_sales_log').select('manual_sales_count').eq('user_id', userId).eq('log_date', dateStr).maybeSingle(),
+    sb.from('enrollments').select('id', { count: 'exact', head: true }).eq('user_id', userId).gte('enrollment_date', dateStr).lt('enrollment_date', end.toISOString().split('T')[0])
+  ]);
+  const m = manual?.data?.manual_sales_count || 0;
+  const e = enrolls?.count || 0;
+  return Math.max(m, e);
+}
+
+// Determine the per-agent weekly hour cap by looking at their programs.
+// Uses the MAX cap across all their assigned programs (if multiple).
+// Default is 40 if nothing configured.
+async function getAgentWeeklyHourCap(userId){
+  const { data: p } = await sb.from('profiles').select('programs').eq('id', userId).single();
+  if(!p || !p.programs || p.programs.length === 0) return 40;
+  const { data: progs } = await sb.from('programs').select('weekly_hour_cap').in('id', p.programs);
+  let max = 40;
+  for(const pr of (progs || [])){
+    if(pr.weekly_hour_cap && pr.weekly_hour_cap > max) max = pr.weekly_hour_cap;
+  }
+  return max;
+}
+
+// Agent's strictest zero-sales lockout threshold across their programs (MIN since strictest wins)
+async function getAgentZeroSalesThreshold(userId){
+  const { data: p } = await sb.from('profiles').select('programs').eq('id', userId).single();
+  if(!p || !p.programs || p.programs.length === 0) return 2;
+  const { data: progs } = await sb.from('programs').select('zero_sales_lockout_days').in('id', p.programs);
+  let min = 2;
+  let any = false;
+  for(const pr of (progs || [])){
+    if(pr.zero_sales_lockout_days && (!any || pr.zero_sales_lockout_days < min)){
+      min = pr.zero_sales_lockout_days;
+      any = true;
+    }
+  }
+  return min;
+}
+
+// Schedule reminder for a check-in/out — returns string if outside hours, null if OK
+async function checkScheduleReminder(userId, auditType){
+  const { data: p } = await sb.from('profiles').select('programs').eq('id', userId).single();
+  if(!p || !p.programs || p.programs.length === 0) return null;
+  // Use FIRST program with a schedule defined
+  const { data: progs } = await sb.from('programs').select('name,schedule').in('id', p.programs);
+  const withSchedule = (progs || []).find(pr => pr.schedule);
+  if(!withSchedule) return null;
+  const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const now = new Date();
+  const todayLabel = days[now.getDay()];
+  const todaySched = (withSchedule.schedule || []).find(s => s.day === todayLabel);
+  if(!todaySched) return 'Today (' + todayLabel + ') is not a scheduled work day for ' + withSchedule.name + '. Hours still count toward your weekly total.';
+  if(todaySched.optional) return null; // optional days don't nag
+  const cur = now.getHours() * 60 + now.getMinutes();
+  const [sh, sm] = todaySched.start.split(':').map(Number);
+  const [eh, em] = todaySched.end.split(':').map(Number);
+  const startMin = sh * 60 + sm;
+  const endMin = eh * 60 + em;
+  if(auditType === 'check_in' && cur < startMin - 30){
+    return 'Your scheduled shift starts at ' + todaySched.start + '. You\'re early — that\'s fine, but typical hours are ' + todaySched.start + '–' + todaySched.end + '.';
+  }
+  if(auditType === 'check_in' && cur > endMin){
+    return 'Your scheduled shift ended at ' + todaySched.end + '. Late check-in flagged for review.';
+  }
+  return null;
+}
+
+// ─── Auto-lock evaluator (called from payroll dashboard) ───
+// Looks at last N workdays for this agent; if zero sales on >= threshold of them
+// AND the agent had hours those days, lock the account.
+async function evaluateAgentForAutoLock(userId, daysToCheck){
+  daysToCheck = daysToCheck || 7;
+  const { data: prof } = await sb.from('profiles').select('account_locked,role,full_name,email,reports_to').eq('id', userId).single();
+  if(!prof) return null;
+  if(prof.account_locked) return { alreadyLocked: true };
+  if(['owner','admin'].includes(prof.role)) return null;
+
+  const threshold = await getAgentZeroSalesThreshold(userId);
+  let zeroDaysWithHours = 0;
+  const offendingDays = [];
+  const today = new Date();
+  today.setHours(0,0,0,0);
+
+  for(let i = 1; i <= daysToCheck; i++){
+    const day = new Date(today);
+    day.setDate(day.getDate() - i);
+    // Skip Sundays (optional day)
+    if(day.getDay() === 0) continue;
+    const hrs = await calculateAgentDayHours(userId, day);
+    if(hrs > 0.5){ // had a real shift (>30min)
+      const sales = await getAgentSalesForDay(userId, day);
+      if(sales === 0){
+        zeroDaysWithHours++;
+        offendingDays.push(day.toISOString().split('T')[0]);
+      }
+    }
+    if(zeroDaysWithHours >= threshold) break;
+  }
+
+  if(zeroDaysWithHours >= threshold){
+    return {
+      shouldLock: true,
+      threshold,
+      zeroDaysWithHours,
+      offendingDays,
+      agentName: prof.full_name || prof.email,
+      reportsTo: prof.reports_to
+    };
+  }
+  return null;
+}
+
+async function lockAgentAccount(userId, reason){
+  const { error } = await sb.from('profiles').update({
+    account_locked: true,
+    lock_reason: reason,
+    locked_at: new Date().toISOString(),
+    locked_by: currentProfile.id
+  }).eq('id', userId);
+  if(error){ console.warn('Lock failed:', error); return false; }
+  return true;
+}
+
+async function unlockAgentAccount(userId){
+  if(!confirm('Unlock this agent and allow them to resume work? They will be able to check in immediately.')) return;
+  const { error } = await sb.from('profiles').update({
+    account_locked: false,
+    lock_reason: null,
+    locked_at: null,
+    locked_by: null
+  }).eq('id', userId);
+  if(error){ alert('Error: ' + error.message); return; }
+  // Notify the agent
+  try {
+    await notifyUser(userId, {
+      type: 'account_reactivated',
+      title: '✅ Account unlocked',
+      body: 'Your account hold has been lifted by ' + (currentProfile.full_name || 'admin') + '. You may resume work.'
+    });
+  } catch(_){}
+  renderMainContent();
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// PAYROLL DASHBOARD
+// ═══════════════════════════════════════════════════════════════════════
+function canAccessPayroll(){
+  const r = currentProfile?.role;
+  return r === 'owner' || r === 'admin' || currentProfile?.is_payroll_manager;
+}
+
+async function renderPayroll(el){
+  if(!canAccessPayroll()){ el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied.</div>'; return; }
+
+  el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Calculating payroll data… this may take a few seconds for large teams.</div>';
+
+  // Fetch all active agents (not owner/admin)
+  const { data: agents } = await sb.from('profiles')
+    .select('id,full_name,email,avatar_url,role,programs,reports_to,account_locked,lock_reason,locked_at')
+    .eq('active', true)
+    .in('role', ['agent','team_lead','manager'])
+    .order('full_name');
+
+  if(!agents || agents.length === 0){
+    el.innerHTML = '<div class="bo-card" style="text-align:center;padding:40px;"><div style="color:rgba(255,255,255,0.5);">No active agents to display payroll for.</div></div>';
+    return;
+  }
+
+  // Calculate per agent
+  const today = new Date(); today.setHours(0,0,0,0);
+  const rows = await Promise.all(agents.map(async a => {
+    const [hrsToday, hrsWeek, salesToday, cap, salesWeek] = await Promise.all([
+      calculateAgentDayHours(a.id, today),
+      calculateAgentWeekHours(a.id),
+      getAgentSalesForDay(a.id, today),
+      getAgentWeeklyHourCap(a.id),
+      getAgentWeekSalesTotal(a.id)
+    ]);
+    return { ...a, hrsToday, hrsWeek, salesToday, cap, salesWeek };
+  }));
+
+  // Run auto-lock check on ALL agents
+  const autoLockResults = await Promise.all(rows.map(async r => {
+    if(r.account_locked || ['owner','admin'].includes(r.role)) return null;
+    const res = await evaluateAgentForAutoLock(r.id);
+    return res?.shouldLock ? { ...res, agentId: r.id } : null;
+  }));
+  const newlyLocked = autoLockResults.filter(Boolean);
+
+  // Apply auto-locks (best-effort)
+  if(newlyLocked.length > 0){
+    for(const lk of newlyLocked){
+      const reason = '⚠️ AUTO-LOCKED: ' + lk.zeroDaysWithHours + ' day(s) of hours logged with ZERO sales recorded.\n\nDays flagged: ' + lk.offendingDays.join(', ') + '\n\nThreshold: ' + lk.threshold + ' zero-sale-with-hours days triggers auto-lock.\n\nReview required from payroll or owner.';
+      await lockAgentAccount(lk.agentId, reason);
+      // Notify owner + admins + the agent's manager + payroll managers
+      try {
+        const { data: notifyTargets } = await sb.from('profiles').select('id').or('role.eq.owner,role.eq.admin,is_payroll_manager.eq.true').eq('active', true);
+        const ids = new Set((notifyTargets || []).map(x => x.id));
+        if(lk.reportsTo) ids.add(lk.reportsTo);
+        for(const id of ids){
+          await notifyUser(id, {
+            type: 'urgent',
+            title: '🔒 AUTO-LOCK: ' + lk.agentName,
+            body: lk.zeroDaysWithHours + ' days with hours but ZERO sales. Account locked. Immediate review required.',
+            link_view: 'payroll'
+          });
+        }
+      } catch(e){ console.warn('Auto-lock notify failed:', e); }
+    }
+    // Refresh the rows (account_locked is now true on those agents)
+    return renderPayroll(el);
+  }
+
+  // Stats summary
+  const totalAgents = rows.length;
+  const lockedCount = rows.filter(r => r.account_locked).length;
+  const atOrOverCap = rows.filter(r => r.hrsWeek >= r.cap).length;
+  const approachingCap = rows.filter(r => !r.account_locked && r.hrsWeek >= (r.cap - 2) && r.hrsWeek < r.cap).length;
+
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px;flex-wrap:wrap;gap:12px;">
+      <div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">💵 Payroll</h1>
+        <p style="font-size:14px;color:rgba(255,255,255,0.5);">Real-time hours and sales for every active agent. Hours auto-calculated from photo audit check-in/out pairs (geofence-verified only). Sales = max of manual entry or enrollments table.</p>
+      </div>
+      <div style="font-size:11px;color:rgba(255,255,255,0.4);text-align:right;">
+        Workweek: <strong style="color:rgba(255,255,255,0.7);">${getWeekStart().toLocaleDateString()}</strong> → <strong style="color:rgba(255,255,255,0.7);">${new Date(getWeekStart().getTime() + 6*24*3600*1000).toLocaleDateString()}</strong><br/>
+        <button class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:11px;margin-top:4px;" onclick="renderMainContent()">🔄 Refresh</button>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:18px;">
+      <div class="stat-card"><div class="stat-num" style="color:#FFD700;">${totalAgents}</div><div class="stat-lbl">Agents</div></div>
+      <div class="stat-card"><div class="stat-num" style="color:#F87171;">${lockedCount}</div><div class="stat-lbl">🔒 Locked</div></div>
+      <div class="stat-card"><div class="stat-num" style="color:#F87171;">${atOrOverCap}</div><div class="stat-lbl">At 40hr cap</div></div>
+      <div class="stat-card"><div class="stat-num" style="color:#FFD700;">${approachingCap}</div><div class="stat-lbl">Approaching cap</div></div>
+    </div>
+
+    <div class="bo-card" style="padding:0;overflow-x:auto;">
+      <table class="bo-table" style="margin:0;">
+        <thead>
+          <tr>
+            <th>Agent</th>
+            <th style="text-align:right;">Hrs Today</th>
+            <th style="text-align:right;">Sales Today</th>
+            <th style="text-align:right;">Hrs Week</th>
+            <th style="text-align:right;">Sales Week</th>
+            <th>Status</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(r => renderPayrollRow(r)).join('')}
+        </tbody>
+      </table>
+    </div>
+
+    <div style="margin-top:18px;font-size:11.5px;color:rgba(255,255,255,0.45);line-height:1.7;">
+      <strong>How protections work:</strong><br/>
+      • <strong>Zero-sale lockout:</strong> If an agent logs hours but has 0 sales for ${rows[0]?.cap ? '2' : '2'} days (Sunday excluded), their account auto-locks. Notifies owner + admins + payroll + their manager. Locked agents see an "Account on Hold" screen and cannot work until owner/payroll unlocks.<br/>
+      • <strong>40hr cap:</strong> Hard block on check-in once an agent hits their weekly cap. Resets every Monday 00:00 local.<br/>
+      • <strong>Hours calculation:</strong> Pairs check-in with check-out audits. Open shifts (no check-out) count up to the current moment, capped at 12hr/day to prevent runaway. Failed-geofence audits do NOT count.
+    </div>`;
+}
+
+async function getAgentWeekSalesTotal(userId){
+  const start = getWeekStart();
+  const end = new Date(start);
+  end.setDate(end.getDate() + 7);
+  // Sum sales day-by-day so we honor MAX(manual, enrollments)
+  let total = 0;
+  for(let i = 0; i < 7; i++){
+    const d = new Date(start);
+    d.setDate(d.getDate() + i);
+    if(d > new Date()) break;
+    total += await getAgentSalesForDay(userId, d);
+  }
+  return total;
+}
+
+function renderPayrollRow(r){
+  const hrsToday = r.hrsToday.toFixed(2);
+  const hrsWeek = r.hrsWeek.toFixed(2);
+  const pctOfCap = r.cap > 0 ? Math.min(100, (r.hrsWeek / r.cap) * 100) : 0;
+  const capColor = pctOfCap >= 100 ? '#F87171' : pctOfCap >= 90 ? '#FFD700' : pctOfCap >= 70 ? '#00C6FF' : '#00FF88';
+  const isAtCap = r.hrsWeek >= r.cap;
+  const avatarHtml = r.avatar_url
+    ? `<img src="${r.avatar_url}" style="width:30px;height:30px;border-radius:50%;object-fit:cover;"/>`
+    : `<div style="width:30px;height:30px;border-radius:50%;background:${roleBadgeBg(r.role)};color:${roleBadgeColor(r.role)};display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;">${(r.full_name || r.email || '?').substring(0,1).toUpperCase()}</div>`;
+
+  let statusBadge;
+  if(r.account_locked){
+    statusBadge = '<span style="background:rgba(248,113,113,0.15);color:#F87171;padding:3px 9px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">🔒 LOCKED</span>';
+  } else if(isAtCap){
+    statusBadge = '<span style="background:rgba(248,113,113,0.15);color:#F87171;padding:3px 9px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">⛔ AT CAP</span>';
+  } else if(r.hrsToday > 0 && r.salesToday === 0){
+    statusBadge = '<span style="background:rgba(255,193,7,0.15);color:#FFD700;padding:3px 9px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">⚠️ 0 SALES TODAY</span>';
+  } else {
+    statusBadge = '<span style="background:rgba(0,255,136,0.12);color:#00FF88;padding:3px 9px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">✓ OK</span>';
+  }
+
+  return `
+    <tr style="${r.account_locked ? 'background:rgba(248,113,113,0.04);' : ''}">
+      <td>
+        <div style="display:flex;align-items:center;gap:10px;cursor:pointer;" onclick="openAgentProfile('${r.id}')">
+          ${avatarHtml}
+          <div>
+            <div style="font-size:13px;color:#fff;font-weight:600;">${escapeHtml(r.full_name || r.email)}</div>
+            <div style="font-size:10.5px;color:rgba(255,255,255,0.45);">${escapeHtml(r.email)}</div>
+          </div>
+        </div>
+      </td>
+      <td style="text-align:right;font-family:monospace;font-size:13px;color:${r.hrsToday > 0 ? '#fff' : 'rgba(255,255,255,0.35)'};">${hrsToday}</td>
+      <td style="text-align:right;">
+        <button class="bo-btn bo-btn-ghost" style="padding:3px 10px;font-size:12px;font-family:monospace;${r.salesToday === 0 && r.hrsToday > 0 ? 'color:#FFD700;border-color:rgba(255,193,7,0.3);' : ''}" onclick="openSalesEntryModal('${r.id}','${escapeHtml(r.full_name || r.email).replace(/'/g, '')}')">${r.salesToday}</button>
+      </td>
+      <td style="text-align:right;font-family:monospace;font-size:13px;color:${capColor};font-weight:600;">${hrsWeek} <span style="font-size:10px;color:rgba(255,255,255,0.35);font-weight:400;">/ ${r.cap}</span></td>
+      <td style="text-align:right;font-family:monospace;font-size:13px;color:#fff;">${r.salesWeek}</td>
+      <td>${statusBadge}</td>
+      <td style="text-align:right;white-space:nowrap;">
+        ${r.account_locked
+          ? `<button class="bo-btn bo-btn-primary" style="padding:5px 10px;font-size:11px;background:linear-gradient(135deg,#00FF88,#00C6FF);" onclick="unlockAgentAccount('${r.id}')">🔓 Unlock</button>`
+          : `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;" onclick="openManualLockModal('${r.id}','${escapeHtml(r.full_name || r.email).replace(/'/g, '')}')">🔒 Lock</button>`}
+      </td>
+    </tr>`;
+}
+
+async function openSalesEntryModal(userId, agentName){
+  const today = new Date(); today.setHours(0,0,0,0);
+  const dateStr = today.toISOString().split('T')[0];
+  const { data: existing } = await sb.from('payroll_sales_log').select('*').eq('user_id', userId).eq('log_date', dateStr).maybeSingle();
+  const enrollCount = await sb.from('enrollments').select('id', { count: 'exact', head: true }).eq('user_id', userId).eq('enrollment_date', dateStr);
+
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;margin-bottom:6px;letter-spacing:1px;">💵 Sales Entry</h2>
+    <div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-bottom:14px;"><strong style="color:#fff;">${agentName}</strong> · ${today.toLocaleDateString()}</div>
+
+    <div style="background:rgba(0,198,255,0.06);border:1px solid rgba(0,198,255,0.2);border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:12px;color:rgba(255,255,255,0.7);line-height:1.55;">
+      <div>📊 <strong>Enrollment table count for today:</strong> ${enrollCount?.count || 0}</div>
+      <div style="margin-top:4px;font-size:11px;color:rgba(255,255,255,0.5);">The system uses <strong>MAX(manual entry, enrollments)</strong>. If enrollments are higher, your manual count is ignored.</div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Manual sales count for today *</label>
+      <input id="se-count" class="form-input" type="number" min="0" value="${existing?.manual_sales_count || 0}"/>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Notes (optional)</label>
+      <textarea id="se-notes" class="form-input" rows="2">${escapeHtml(existing?.notes || '')}</textarea>
+    </div>
+
+    <div style="display:flex;gap:10px;margin-top:14px;">
+      <button class="bo-btn bo-btn-primary" onclick="saveSalesEntry('${userId}')">Save</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="se-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-box').style.maxWidth = '480px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function saveSalesEntry(userId){
+  const count = parseInt(document.getElementById('se-count').value) || 0;
+  const notes = document.getElementById('se-notes').value.trim() || null;
+  const today = new Date().toISOString().split('T')[0];
+  const msg = document.getElementById('se-msg');
+
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Saving…</span>';
+  // Upsert
+  const { error } = await sb.from('payroll_sales_log').upsert({
+    user_id: userId,
+    log_date: today,
+    manual_sales_count: count,
+    entered_by: currentProfile.id,
+    entered_at: new Date().toISOString(),
+    notes
+  }, { onConflict: 'user_id,log_date' });
+  if(error){ msg.innerHTML = '<span style="color:#F87171;">' + error.message + '</span>'; return; }
+
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Saved.</span>';
+  setTimeout(() => { closeAllModals(); renderMainContent(); }, 600);
+}
+
+async function openManualLockModal(userId, agentName){
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;margin-bottom:6px;letter-spacing:1px;">🔒 Manual Lock</h2>
+    <div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-bottom:14px;">Lock <strong style="color:#fff;">${agentName}</strong>'s account immediately. They will see an "Account on Hold" screen and cannot work until unlocked.</div>
+    <div class="form-group">
+      <label class="form-label">Reason (shown to the agent) *</label>
+      <textarea id="ml-reason" class="form-input" rows="4" placeholder="e.g. Suspected fraudulent activity — pending review"></textarea>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:14px;">
+      <button class="bo-btn bo-btn-primary" style="background:linear-gradient(135deg,#C62828,#F87171);" onclick="confirmManualLock('${userId}')">🔒 Lock Now</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="ml-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-box').style.maxWidth = '460px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function confirmManualLock(userId){
+  const reason = (document.getElementById('ml-reason').value || '').trim();
+  const msg = document.getElementById('ml-msg');
+  if(!reason){ msg.innerHTML = '<span style="color:#F87171;">Reason is required.</span>'; return; }
+  const ok = await lockAgentAccount(userId, reason);
+  if(!ok){ msg.innerHTML = '<span style="color:#F87171;">Lock failed.</span>'; return; }
+  // Notify the agent via in-app
+  try {
+    await notifyUser(userId, {
+      type: 'urgent',
+      title: '🔒 Account locked',
+      body: 'Your account has been locked: ' + reason
+    });
+  } catch(_){}
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Locked.</span>';
+  setTimeout(() => { closeAllModals(); renderMainContent(); }, 600);
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// INVENTORY VARIANTS — Shirt → S/M/L/XL/XXL children
+// ═══════════════════════════════════════════════════════════════════════
+
+// Open variants editor for a parent inventory item
+async function openVariantsEditor(parentId){
+  const { data: parent } = await sb.from('inventory_items').select('*, inventory_categories(name,icon)').eq('id', parentId).single();
+  if(!parent){ alert('Item not found'); return; }
+  const { data: variants } = await sb.from('inventory_items').select('*').eq('parent_id', parentId).order('variant_label');
+
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;margin-bottom:6px;letter-spacing:1px;">${parent.inventory_categories?.icon || '📦'} Variants of ${escapeHtml(parent.name)}</h2>
+    <div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-bottom:14px;">Each variant (e.g. S/M/L) is tracked separately for assignment.</div>
+
+    ${(variants || []).length === 0 ? '<div style="background:rgba(255,255,255,0.04);padding:16px;border-radius:8px;text-align:center;color:rgba(255,255,255,0.5);font-size:13px;margin-bottom:14px;">No variants yet. Add one below.</div>' : `
+      <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px;max-height:280px;overflow-y:auto;">
+        ${variants.map(v => `
+          <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;background:rgba(255,255,255,0.04);border-radius:8px;">
+            <div style="font-size:13px;color:#fff;font-weight:600;flex:1;">${escapeHtml(v.variant_label || '?')}</div>
+            <div style="font-size:11.5px;color:rgba(255,255,255,0.55);">×${v.quantity}</div>
+            <span style="background:${v.status === 'in_stock' ? 'rgba(0,255,136,0.12)' : v.status === 'assigned' ? 'rgba(0,198,255,0.12)' : 'rgba(255,255,255,0.06)'};color:${v.status === 'in_stock' ? '#00FF88' : v.status === 'assigned' ? '#00C6FF' : 'rgba(255,255,255,0.6)'};padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;">${v.status.replace('_',' ').toUpperCase()}</span>
+            <button class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:11px;" onclick="openInventoryItemEditor('${v.id}')">✏️</button>
+            ${v.status === 'in_stock' ? `<button class="bo-btn bo-btn-primary" style="padding:4px 10px;font-size:11px;" onclick="openAssignInventoryModal('${v.id}')">📤</button>` : ''}
+          </div>
+        `).join('')}
+      </div>
+    `}
+
+    <div style="background:rgba(255,107,0,0.06);border:1px solid rgba(255,107,0,0.2);border-radius:8px;padding:12px 14px;">
+      <div style="font-size:11px;color:rgba(255,255,255,0.5);letter-spacing:1.5px;font-weight:700;margin-bottom:8px;">ADD VARIANT</div>
+      <div style="display:grid;grid-template-columns:1fr 80px auto;gap:8px;align-items:end;">
+        <div>
+          <label style="font-size:11px;color:rgba(255,255,255,0.5);display:block;margin-bottom:3px;">Label (e.g. Small, Medium)</label>
+          <input id="vn-label" class="form-input" placeholder="Small"/>
+        </div>
+        <div>
+          <label style="font-size:11px;color:rgba(255,255,255,0.5);display:block;margin-bottom:3px;">Qty</label>
+          <input id="vn-qty" class="form-input" type="number" min="1" value="1"/>
+        </div>
+        <button class="bo-btn bo-btn-primary" onclick="addVariant('${parentId}')">+ Add</button>
+      </div>
+    </div>
+
+    <div style="margin-top:14px;text-align:right;"><button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Close</button></div>`;
+  document.getElementById('modal-box').style.maxWidth = '560px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function addVariant(parentId){
+  const label = (document.getElementById('vn-label').value || '').trim();
+  const qty = parseInt(document.getElementById('vn-qty').value) || 1;
+  if(!label) return;
+  const { data: parent } = await sb.from('inventory_items').select('*').eq('id', parentId).single();
+  if(!parent) return;
+  await sb.from('inventory_items').insert({
+    parent_id: parentId,
+    variant_label: label,
+    name: parent.name + ' — ' + label,
+    category_id: parent.category_id,
+    program_id: parent.program_id,
+    quantity: qty,
+    condition: 'new',
+    status: 'in_stock',
+    created_by: currentProfile.id
+  });
+  openVariantsEditor(parentId);
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// PER-PROGRAM INVENTORY VIEW — owner/admin/inventory_manager picks a program
+// and sees inventory broken down with available vs assigned counts.
+// ═══════════════════════════════════════════════════════════════════════
+async function openProgramInventoryView(programId){
+  const prog = allPrograms.find(p => p.id === programId);
+  if(!prog) return;
+  // Pull all items for this program (parents + standalone)
+  const { data: items } = await sb.from('inventory_items')
+    .select('*, inventory_categories(name,icon)')
+    .eq('program_id', programId)
+    .is('parent_id', null)
+    .order('updated_at', { ascending: false });
+
+  // For each parent item, fetch its variants
+  const itemsWithVariants = await Promise.all((items || []).map(async i => {
+    const { data: variants } = await sb.from('inventory_items').select('*').eq('parent_id', i.id);
+    return { ...i, variants: variants || [] };
+  }));
+
+  // Group by category
+  const byCategory = {};
+  for(const i of itemsWithVariants){
+    const catName = i.inventory_categories?.name || 'Other';
+    if(!byCategory[catName]) byCategory[catName] = { icon: i.inventory_categories?.icon || '📦', items: [] };
+    byCategory[catName].items.push(i);
+  }
+
+  // Build display
+  let body = '';
+  if(Object.keys(byCategory).length === 0){
+    body = '<div class="bo-card" style="text-align:center;padding:40px;"><div style="font-size:42px;margin-bottom:10px;">📦</div><div style="color:rgba(255,255,255,0.5);font-size:14px;">No inventory assigned to this program yet.</div></div>';
+  } else {
+    body = Object.entries(byCategory).map(([catName, cat]) => `
+      <div class="bo-card" style="margin-bottom:14px;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#fff;letter-spacing:1.5px;margin-bottom:12px;">${cat.icon} ${escapeHtml(catName)}</div>
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          ${cat.items.map(i => renderProgramInventoryItemRow(i)).join('')}
+        </div>
+      </div>
+    `).join('');
+  }
+
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;margin-bottom:6px;letter-spacing:1px;">${prog.icon} ${escapeHtml(prog.name)} Inventory</h2>
+    <div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-bottom:14px;">All inventory tied to this program, broken down by category and variant.</div>
+    <div style="max-height:520px;overflow-y:auto;">${body}</div>
+    <div style="margin-top:14px;text-align:right;"><button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Close</button></div>`;
+  document.getElementById('modal-box').style.maxWidth = '720px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+function renderProgramInventoryItemRow(i){
+  const allVariants = i.variants;
+  if(allVariants.length === 0){
+    // No variants — show this item directly
+    const isAssigned = i.status === 'assigned';
+    return `
+      <div style="background:rgba(255,255,255,0.04);border-radius:8px;padding:10px 12px;display:flex;justify-content:space-between;align-items:center;gap:10px;">
+        <div style="flex:1;">
+          <div style="font-size:13px;color:#fff;font-weight:600;">${escapeHtml(i.name)}</div>
+          ${i.serial_number ? `<div style="font-size:10.5px;color:rgba(255,255,255,0.5);">S/N: ${escapeHtml(i.serial_number)}</div>` : ''}
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;">
+          ${isAssigned ? '<span style="background:rgba(0,198,255,0.12);color:#00C6FF;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;">ASSIGNED</span>' : '<span style="background:rgba(0,255,136,0.12);color:#00FF88;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;">AVAILABLE</span>'}
+          <span style="font-size:11px;color:rgba(255,255,255,0.5);">×${i.quantity}</span>
+        </div>
+      </div>`;
+  }
+  // Has variants — show breakdown
+  const totalQty = allVariants.reduce((s, v) => s + (v.quantity || 0), 0);
+  const availQty = allVariants.filter(v => v.status === 'in_stock').reduce((s, v) => s + (v.quantity || 0), 0);
+  const assignedQty = allVariants.filter(v => v.status === 'assigned').reduce((s, v) => s + (v.quantity || 0), 0);
+
+  return `
+    <div style="background:rgba(255,255,255,0.04);border-radius:8px;padding:12px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <div style="font-size:13px;color:#fff;font-weight:600;">${escapeHtml(i.name)}</div>
+        <div style="display:flex;gap:8px;font-size:11.5px;">
+          <span style="color:rgba(255,255,255,0.6);">Total: <strong style="color:#fff;">${totalQty}</strong></span>
+          <span style="color:#00FF88;">Available: <strong>${availQty}</strong></span>
+          <span style="color:#00C6FF;">Assigned: <strong>${assignedQty}</strong></span>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:6px;">
+        ${allVariants.map(v => {
+          const sc = v.status === 'in_stock' ? { bg: 'rgba(0,255,136,0.08)', fg: '#00FF88' } : v.status === 'assigned' ? { bg: 'rgba(0,198,255,0.08)', fg: '#00C6FF' } : { bg: 'rgba(255,255,255,0.04)', fg: 'rgba(255,255,255,0.5)' };
+          return `
+            <div style="background:${sc.bg};padding:6px 10px;border-radius:6px;display:flex;justify-content:space-between;align-items:center;">
+              <span style="font-size:11.5px;color:#fff;">${escapeHtml(v.variant_label || '?')}</span>
+              <span style="font-size:11.5px;color:${sc.fg};font-weight:700;">×${v.quantity}</span>
+            </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// CSV BATCH UPLOAD for inventory
+// ═══════════════════════════════════════════════════════════════════════
+async function openInventoryCsvImport(){
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;margin-bottom:6px;letter-spacing:1px;">📥 Bulk Inventory Import</h2>
+    <div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-bottom:14px;">Upload a CSV to create multiple items at once.</div>
+
+    <div style="background:rgba(0,198,255,0.06);border:1px solid rgba(0,198,255,0.2);border-radius:8px;padding:12px 14px;margin-bottom:14px;font-size:11.5px;color:rgba(255,255,255,0.7);line-height:1.6;">
+      <strong style="color:#00C6FF;">CSV format (first row = headers):</strong><br/>
+      <code style="background:rgba(0,0,0,0.3);padding:4px 8px;border-radius:4px;display:block;margin-top:6px;font-family:monospace;color:#fff;">name,category,program,sku,serial_number,quantity,condition,notes</code>
+      <div style="margin-top:8px;font-size:11px;color:rgba(255,255,255,0.5);">
+        • <strong>category</strong>: must match an existing category name (Tablets, Shirts, etc.)<br/>
+        • <strong>program</strong>: program ID (retail, b2b, fiber, or your custom ID) — leave blank for "any"<br/>
+        • <strong>condition</strong>: new / good / fair / damaged / retired (defaults to "new")<br/>
+        • <strong>quantity</strong>: integer (defaults to 1)
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">CSV File</label>
+      <input id="csv-file" type="file" accept=".csv" class="form-input"/>
+    </div>
+    <div id="csv-preview" style="margin-top:10px;"></div>
+
+    <div style="display:flex;gap:10px;margin-top:14px;">
+      <button class="bo-btn bo-btn-primary" onclick="processCsvImport()">Import</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="csv-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-box').style.maxWidth = '560px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function processCsvImport(){
+  const file = document.getElementById('csv-file').files?.[0];
+  const msg = document.getElementById('csv-msg');
+  if(!file){ msg.innerHTML = '<span style="color:#F87171;">Pick a CSV file first.</span>'; return; }
+
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Reading CSV…</span>';
+  const text = await file.text();
+  const rows = parseSimpleCsv(text);
+  if(rows.length === 0){ msg.innerHTML = '<span style="color:#F87171;">CSV is empty.</span>'; return; }
+
+  // Resolve categories by name → id
+  const { data: cats } = await sb.from('inventory_categories').select('id,name');
+  const catByName = {};
+  (cats || []).forEach(c => catByName[c.name.toLowerCase()] = c.id);
+
+  let imported = 0, errors = [];
+  for(let idx = 0; idx < rows.length; idx++){
+    const r = rows[idx];
+    if(!r.name || !r.category){
+      errors.push('Row ' + (idx + 2) + ': missing name or category');
+      continue;
+    }
+    const catId = catByName[r.category.toLowerCase()];
+    if(!catId){
+      errors.push('Row ' + (idx + 2) + ': unknown category "' + r.category + '"');
+      continue;
+    }
+    const payload = {
+      name: r.name,
+      category_id: catId,
+      program_id: r.program || null,
+      sku: r.sku || null,
+      serial_number: r.serial_number || null,
+      quantity: parseInt(r.quantity) || 1,
+      condition: ['new','good','fair','damaged','retired'].includes(r.condition) ? r.condition : 'new',
+      notes: r.notes || null,
+      status: 'in_stock',
+      created_by: currentProfile.id
+    };
+    const { error } = await sb.from('inventory_items').insert(payload);
+    if(error){ errors.push('Row ' + (idx + 2) + ': ' + error.message); }
+    else imported++;
+  }
+
+  let report = '<div style="color:#00FF88;">✓ Imported ' + imported + ' item(s).</div>';
+  if(errors.length > 0){
+    report += '<div style="margin-top:8px;color:#F87171;font-size:12px;">' + errors.length + ' error(s):<br/>' + errors.slice(0, 5).map(e => '• ' + escapeHtml(e)).join('<br/>') + (errors.length > 5 ? '<br/>... and ' + (errors.length - 5) + ' more' : '') + '</div>';
+  }
+  msg.innerHTML = report;
+  if(imported > 0) setTimeout(() => { closeAllModals(); renderMainContent(); }, 2400);
+}
+
+function parseSimpleCsv(text){
+  // Simple CSV parser — handles quoted fields with commas
+  const lines = text.split(/\r?\n/).filter(l => l.trim());
+  if(lines.length < 2) return [];
+  const headers = parseCsvLine(lines[0]).map(h => h.trim().toLowerCase());
+  const rows = [];
+  for(let i = 1; i < lines.length; i++){
+    const cells = parseCsvLine(lines[i]);
+    const row = {};
+    headers.forEach((h, idx) => { row[h] = (cells[idx] || '').trim(); });
+    rows.push(row);
+  }
+  return rows;
+}
+function parseCsvLine(line){
+  const out = [];
+  let cur = '', inQuotes = false;
+  for(let i = 0; i < line.length; i++){
+    const c = line[i];
+    if(c === '"'){
+      if(inQuotes && line[i+1] === '"'){ cur += '"'; i++; }
+      else inQuotes = !inQuotes;
+    } else if(c === ',' && !inQuotes){
+      out.push(cur); cur = '';
+    } else { cur += c; }
+  }
+  out.push(cur);
+  return out;
+}
+
+
+// Window exports
+window.showAccountLockoutScreen = showAccountLockoutScreen;
+window.unlockAgentAccount = unlockAgentAccount;
+window.lockAgentAccount = lockAgentAccount;
+window.renderPayroll = renderPayroll;
+window.openSalesEntryModal = openSalesEntryModal;
+window.saveSalesEntry = saveSalesEntry;
+window.openManualLockModal = openManualLockModal;
+window.confirmManualLock = confirmManualLock;
+window.openVariantsEditor = openVariantsEditor;
+window.addVariant = addVariant;
+window.openProgramInventoryView = openProgramInventoryView;
+window.openInventoryCsvImport = openInventoryCsvImport;
+window.processCsvImport = processCsvImport;
+
 
 // ─── Programs Admin (view-only listing; programs are seeded via SQL) ───
 // ═══════════════════════════════════════════════════════════════════════
@@ -4507,6 +5407,1096 @@ async function deleteApplication(id){
 // Combines: program details (name/icon/color/desc), status (active/paused/
 // archived), and pay-period/leaderboard config.
 // ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════
+// STORES ADMIN — owner/admin manages physical retail locations w/ GPS
+// ═══════════════════════════════════════════════════════════════════════
+async function renderStoresAdmin(el){
+  const canManage = ['owner','admin','manager'].includes(currentProfile.role);
+  if(!canManage){ el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied.</div>'; return; }
+
+  const { data: stores } = await sb.from('stores').select('*, markets(name)').order('name');
+
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px;flex-wrap:wrap;gap:12px;">
+      <div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">🏪 Stores</h1>
+        <p style="font-size:14px;color:rgba(255,255,255,0.5);">Physical retail locations. Each store has GPS coordinates used for the daily check-in geofence.</p>
+      </div>
+      <button class="bo-btn bo-btn-primary" onclick="openStoreEditor()">+ Add Store</button>
+    </div>
+    ${(stores || []).length === 0 ? `
+      <div class="bo-card" style="text-align:center;padding:40px;">
+        <div style="font-size:42px;margin-bottom:10px;">🏪</div>
+        <div style="color:rgba(255,255,255,0.5);font-size:14px;">No stores yet. Click <strong>+ Add Store</strong> to add your first physical location.</div>
+      </div>
+    ` : `
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        ${stores.map(s => {
+          const prog = s.program_id ? allPrograms.find(p => p.id === s.program_id) : null;
+          const hasGps = s.latitude !== null && s.longitude !== null;
+          return `
+            <div class="bo-card" style="${!s.active ? 'opacity:0.55;' : ''}">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;">
+                <div style="flex:1;min-width:0;">
+                  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                    <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#fff;letter-spacing:1px;">${escapeHtml(s.name)}${s.store_number ? ' #' + escapeHtml(s.store_number) : ''}</div>
+                    ${prog ? `<span style="background:${prog.color}22;color:${prog.color};padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;">${prog.icon} ${escapeHtml(prog.name.split(' ')[0])}</span>` : ''}
+                    ${!s.active ? '<span style="background:rgba(248,113,113,0.15);color:#F87171;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">INACTIVE</span>' : ''}
+                    ${hasGps ? `<span style="background:rgba(0,255,136,0.12);color:#00FF88;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;">📍 ${s.geofence_radius_meters || 100}m fence</span>` : '<span style="background:rgba(255,193,7,0.12);color:#FFD700;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;">⚠️ NO GPS</span>'}
+                  </div>
+                  <div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-top:4px;">
+                    ${s.street_address ? escapeHtml(s.street_address) + ' · ' : ''}${escapeHtml(s.city || '')}${s.state ? ', ' + escapeHtml(s.state) : ''}${s.zip ? ' ' + escapeHtml(s.zip) : ''}
+                  </div>
+                  ${s.markets?.name ? `<div style="font-size:11.5px;color:rgba(255,255,255,0.4);margin-top:2px;">Market: ${escapeHtml(s.markets.name)}</div>` : ''}
+                  ${hasGps ? `<div style="font-size:11px;color:rgba(255,255,255,0.35);margin-top:2px;font-family:monospace;">${s.latitude}, ${s.longitude}</div>` : ''}
+                </div>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                  <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="openStoreAssignAgents('${s.id}')">👥 Assign Agents</button>
+                  <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="openStoreEditor('${s.id}')">✏️ Edit</button>
+                  <button class="bo-btn bo-btn-danger" style="padding:5px 12px;font-size:11px;" onclick="deleteStore('${s.id}', this.dataset.n)" data-n="${escapeHtml(s.name).replace(/"/g,'&quot;')}">🗑️</button>
+                </div>
+              </div>
+            </div>`;
+        }).join('')}
+      </div>
+    `}`;
+}
+
+async function openStoreEditor(storeId){
+  const isEdit = !!storeId;
+  let s = { id:'', name:'', store_number:'', street_address:'', city:'', state:'', zip:'',
+    latitude:null, longitude:null, geofence_radius_meters:100,
+    market_id:null, program_id:null, active:true, notes:'' };
+  if(isEdit){
+    const { data } = await sb.from('stores').select('*').eq('id', storeId).single();
+    if(data) s = { ...s, ...data };
+  }
+  const { data: markets } = await sb.from('markets').select('id,name').order('name');
+
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:#fff;margin-bottom:14px;letter-spacing:1px;">${isEdit ? 'Edit' : 'New'} Store</h2>
+    <div style="display:grid;grid-template-columns:2fr 1fr;gap:12px;">
+      <div class="form-group"><label class="form-label">Store Name *</label><input id="se-name" class="form-input" value="${escapeHtml(s.name)}" placeholder="e.g. Walmart Supercenter"/></div>
+      <div class="form-group"><label class="form-label">Store #</label><input id="se-store-num" class="form-input" value="${escapeHtml(s.store_number || '')}" placeholder="e.g. 1234"/></div>
+    </div>
+    <div class="form-group"><label class="form-label">Street Address</label><input id="se-street" class="form-input" value="${escapeHtml(s.street_address || '')}" placeholder="123 Main St"/></div>
+    <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:12px;">
+      <div class="form-group"><label class="form-label">City</label><input id="se-city" class="form-input" value="${escapeHtml(s.city || '')}"/></div>
+      <div class="form-group"><label class="form-label">State</label><input id="se-state" class="form-input" value="${escapeHtml(s.state || '')}" maxlength="2" style="text-transform:uppercase;"/></div>
+      <div class="form-group"><label class="form-label">ZIP</label><input id="se-zip" class="form-input" value="${escapeHtml(s.zip || '')}" maxlength="10"/></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <div class="form-group">
+        <label class="form-label">Program</label>
+        <select id="se-program" class="form-input">
+          <option value="">— Any program —</option>
+          ${allPrograms.filter(p => p.status !== 'archived').map(p => `<option value="${p.id}" ${s.program_id === p.id ? 'selected' : ''}>${p.icon} ${escapeHtml(p.name)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Market</label>
+        <select id="se-market" class="form-input">
+          <option value="">— No market —</option>
+          ${(markets || []).map(m => `<option value="${m.id}" ${s.market_id === m.id ? 'selected' : ''}>${escapeHtml(m.name)}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+    <hr style="border:none;border-top:1px solid rgba(255,255,255,0.08);margin:18px 0;"/>
+    <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#FF6B00;letter-spacing:1.5px;margin-bottom:10px;">📍 GPS &amp; Geofence</div>
+    <div style="background:rgba(255,193,7,0.06);border:1px solid rgba(255,193,7,0.25);border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12px;color:rgba(255,255,255,0.7);line-height:1.55;">
+      <strong style="color:#FFD700;">How to get GPS:</strong> Open Google Maps → search for the store → right-click on the pin → click the lat/long that shows up. Or click <strong>Use My Current Location</strong> if you're standing at the store.
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <div class="form-group"><label class="form-label">Latitude</label><input id="se-lat" class="form-input" type="number" step="0.0000001" value="${s.latitude ?? ''}" placeholder="32.7767"/></div>
+      <div class="form-group"><label class="form-label">Longitude</label><input id="se-lng" class="form-input" type="number" step="0.0000001" value="${s.longitude ?? ''}" placeholder="-96.7970"/></div>
+    </div>
+    <button class="bo-btn bo-btn-ghost" style="padding:8px 14px;font-size:12px;margin-bottom:14px;" onclick="seUseMyLocation()">📍 Use My Current Location</button>
+    <div class="form-group">
+      <label class="form-label">Geofence Radius (meters)</label>
+      <input id="se-radius" class="form-input" type="number" min="50" max="2000" value="${s.geofence_radius_meters || 100}"/>
+      <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">100m (~330 ft) is strict. 250m allows the parking lot. 500m is generous.</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">
+        <input type="checkbox" id="se-active" ${s.active !== false ? 'checked' : ''} style="margin-right:8px;width:16px;height:16px;accent-color:#FF6B00;"/>
+        Store is active (agents can check in here)
+      </label>
+    </div>
+    <div class="form-group"><label class="form-label">Notes</label><textarea id="se-notes" class="form-input" rows="2">${escapeHtml(s.notes || '')}</textarea></div>
+    <div style="display:flex;gap:10px;margin-top:14px;">
+      <button class="bo-btn bo-btn-primary" onclick="saveStore(${isEdit ? `'${s.id}'` : 'null'})">${isEdit ? 'Save Changes' : 'Create Store'}</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="se-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-box').style.maxWidth = '640px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+function seUseMyLocation(){
+  const msg = document.getElementById('se-msg');
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Asking for location permission…</span>';
+  if(!navigator.geolocation){ msg.innerHTML = '<span style="color:#F87171;">Your browser does not support geolocation.</span>'; return; }
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      document.getElementById('se-lat').value = pos.coords.latitude.toFixed(7);
+      document.getElementById('se-lng').value = pos.coords.longitude.toFixed(7);
+      msg.innerHTML = '<span style="color:#00FF88;">✓ Location captured (accuracy: ~' + Math.round(pos.coords.accuracy) + 'm).</span>';
+    },
+    err => { msg.innerHTML = '<span style="color:#F87171;">Could not get location: ' + err.message + '</span>'; },
+    { enableHighAccuracy: true, timeout: 10000 }
+  );
+}
+
+async function saveStore(existingId){
+  const payload = {
+    name: document.getElementById('se-name').value.trim(),
+    store_number: document.getElementById('se-store-num').value.trim() || null,
+    street_address: document.getElementById('se-street').value.trim() || null,
+    city: document.getElementById('se-city').value.trim() || null,
+    state: (document.getElementById('se-state').value.trim() || '').toUpperCase() || null,
+    zip: document.getElementById('se-zip').value.trim() || null,
+    program_id: document.getElementById('se-program').value || null,
+    market_id: document.getElementById('se-market').value || null,
+    latitude: parseFloat(document.getElementById('se-lat').value) || null,
+    longitude: parseFloat(document.getElementById('se-lng').value) || null,
+    geofence_radius_meters: parseInt(document.getElementById('se-radius').value) || 100,
+    active: document.getElementById('se-active').checked,
+    notes: document.getElementById('se-notes').value.trim() || null
+  };
+  const msg = document.getElementById('se-msg');
+  if(!payload.name){ msg.innerHTML = '<span style="color:#F87171;">Store name is required.</span>'; return; }
+  if(payload.latitude === null || payload.longitude === null){
+    if(!confirm('No GPS coordinates set — agents will not be able to check in at this store. Save anyway?')) return;
+  }
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Saving…</span>';
+  if(existingId){
+    const { error } = await sb.from('stores').update(payload).eq('id', existingId);
+    if(error){ msg.innerHTML = '<span style="color:#F87171;">' + error.message + '</span>'; return; }
+  } else {
+    payload.created_by = currentProfile.id;
+    const { error } = await sb.from('stores').insert(payload);
+    if(error){ msg.innerHTML = '<span style="color:#F87171;">' + error.message + '</span>'; return; }
+  }
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Saved.</span>';
+  setTimeout(() => { closeAllModals(); renderMainContent(); }, 700);
+}
+
+async function deleteStore(storeId, storeName){
+  if(!confirm('Delete store "' + storeName + '"?\n\nAll agent assignments to this store will be removed. Past photo audits remain.')) return;
+  const { error } = await sb.from('stores').delete().eq('id', storeId);
+  if(error){ alert('Error: ' + error.message); return; }
+  renderMainContent();
+}
+
+async function openStoreAssignAgents(storeId){
+  const { data: store } = await sb.from('stores').select('name').eq('id', storeId).single();
+  const { data: agents } = await sb.from('profiles')
+    .select('id,full_name,email,role')
+    .eq('active', true).in('role', ['agent','team_lead','manager']).order('full_name');
+  const { data: existing } = await sb.from('agent_stores').select('user_id').eq('store_id', storeId);
+  const assignedSet = new Set((existing || []).map(x => x.user_id));
+
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#fff;margin-bottom:6px;letter-spacing:1px;">👥 Assign Agents to Store</h2>
+    <div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-bottom:14px;">Store: <strong style="color:#fff;">${escapeHtml(store?.name || '')}</strong></div>
+    <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-bottom:10px;">Check the agents who can clock in at this store. Agents can be assigned to multiple stores.</div>
+    <div style="max-height:340px;overflow-y:auto;background:rgba(0,0,0,0.2);border-radius:8px;padding:8px;">
+      ${(agents || []).map(a => `
+        <label style="display:flex;align-items:center;gap:10px;padding:7px 10px;cursor:pointer;border-radius:6px;">
+          <input type="checkbox" class="sa-agent" value="${a.id}" ${assignedSet.has(a.id) ? 'checked' : ''} style="width:16px;height:16px;accent-color:#FF6B00;"/>
+          <div style="flex:1;">
+            <div style="font-size:13px;color:#fff;">${escapeHtml(a.full_name || a.email)}</div>
+            <div style="font-size:10.5px;color:rgba(255,255,255,0.45);">${escapeHtml(a.email)} · ${roleLabel(a.role)}</div>
+          </div>
+        </label>
+      `).join('')}
+    </div>
+    <div style="display:flex;gap:10px;margin-top:14px;">
+      <button class="bo-btn bo-btn-primary" onclick="saveStoreAssignments('${storeId}')">Save</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="sa-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-box').style.maxWidth = '520px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function saveStoreAssignments(storeId){
+  const checked = Array.from(document.querySelectorAll('.sa-agent:checked')).map(cb => cb.value);
+  const msg = document.getElementById('sa-msg');
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Saving…</span>';
+  await sb.from('agent_stores').delete().eq('store_id', storeId);
+  if(checked.length > 0){
+    const rows = checked.map(uid => ({ store_id: storeId, user_id: uid, assigned_by: currentProfile.id }));
+    const { error } = await sb.from('agent_stores').insert(rows);
+    if(error){ msg.innerHTML = '<span style="color:#F87171;">' + error.message + '</span>'; return; }
+  }
+  msg.innerHTML = '<span style="color:#00FF88;">✓ ' + checked.length + ' agent(s) assigned.</span>';
+  setTimeout(() => closeAllModals(), 800);
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// INVENTORY DEPARTMENT
+// ═══════════════════════════════════════════════════════════════════════
+function canManageInventory(){
+  const r = currentProfile?.role;
+  return r === 'owner' || r === 'admin' || r === 'manager' || currentProfile?.is_inventory_manager;
+}
+
+async function renderInventory(el){
+  if(!canManageInventory()){ el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied.</div>'; return; }
+
+  // Pull only TOP-LEVEL items (parent_id IS NULL); variants are nested under their parents
+  const { data: allItems } = await sb.from('inventory_items').select('*, inventory_categories(name,icon)').order('updated_at', { ascending: false });
+  const items = (allItems || []).filter(i => !i.parent_id);
+  const variantsByParent = {};
+  (allItems || []).filter(i => i.parent_id).forEach(v => {
+    if(!variantsByParent[v.parent_id]) variantsByParent[v.parent_id] = [];
+    variantsByParent[v.parent_id].push(v);
+  });
+
+  // Stats roll up variants too — count what's actually trackable
+  const stats = { total: 0, in_stock: 0, assigned: 0, damaged: 0, lost: 0 };
+  (allItems || []).forEach(i => {
+    // Skip parent items that have variants — variants are the trackable units
+    if(!i.parent_id && variantsByParent[i.id]) return;
+    stats.total++;
+    if(stats[i.status] !== undefined) stats[i.status]++;
+  });
+  const filter = window._invFilter || 'all';
+
+  // Per-program quick drill-down
+  const activePrograms = allPrograms.filter(p => p.status !== 'archived');
+
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px;flex-wrap:wrap;gap:12px;">
+      <div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">📦 Inventory</h1>
+        <p style="font-size:14px;color:rgba(255,255,255,0.5);">All physical items the company owns. Click a program below to see its inventory broken down with available vs assigned counts.</p>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        ${currentProfile.role === 'owner' ? '<button class="bo-btn bo-btn-ghost" onclick="openCategoriesEditor()">📁 Categories</button>' : ''}
+        <button class="bo-btn bo-btn-ghost" onclick="openInventoryCsvImport()">📥 Bulk Import CSV</button>
+        <button class="bo-btn bo-btn-primary" onclick="openInventoryItemEditor()">+ Add Item</button>
+      </div>
+    </div>
+
+    <div style="margin-bottom:18px;">
+      <div style="font-size:11px;color:rgba(255,255,255,0.5);letter-spacing:1.5px;font-weight:700;margin-bottom:8px;">VIEW BY PROGRAM</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        ${activePrograms.map(p => `
+          <button class="bo-btn bo-btn-ghost" style="padding:8px 14px;font-size:12.5px;border-color:${p.color}55;color:${p.color};" onclick="openProgramInventoryView('${p.id}')">${p.icon} ${escapeHtml(p.name.split(' ')[0])}</button>
+        `).join('')}
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:18px;">
+      <div class="stat-card" style="cursor:pointer;${filter==='all'?'border-color:#FF6B00;':''}" onclick="setInvFilter('all')"><div class="stat-num" style="color:#FFD700;">${stats.total}</div><div class="stat-lbl">Total Items</div></div>
+      <div class="stat-card" style="cursor:pointer;${filter==='in_stock'?'border-color:#FF6B00;':''}" onclick="setInvFilter('in_stock')"><div class="stat-num" style="color:#00FF88;">${stats.in_stock}</div><div class="stat-lbl">In Stock</div></div>
+      <div class="stat-card" style="cursor:pointer;${filter==='assigned'?'border-color:#FF6B00;':''}" onclick="setInvFilter('assigned')"><div class="stat-num" style="color:#00C6FF;">${stats.assigned}</div><div class="stat-lbl">Assigned</div></div>
+      <div class="stat-card" style="cursor:pointer;${filter==='damaged'?'border-color:#FF6B00;':''}" onclick="setInvFilter('damaged')"><div class="stat-num" style="color:#FFD700;">${stats.damaged}</div><div class="stat-lbl">Damaged</div></div>
+      <div class="stat-card" style="cursor:pointer;${filter==='lost'?'border-color:#FF6B00;':''}" onclick="setInvFilter('lost')"><div class="stat-num" style="color:#F87171;">${stats.lost}</div><div class="stat-lbl">Lost</div></div>
+    </div>
+    ${(items || []).length === 0 ? `
+      <div class="bo-card" style="text-align:center;padding:40px;">
+        <div style="font-size:42px;margin-bottom:10px;">📦</div>
+        <div style="color:rgba(255,255,255,0.5);font-size:14px;">No inventory yet. Click <strong>+ Add Item</strong> to start.</div>
+      </div>
+    ` : `
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        ${items.filter(i => {
+          if(filter === 'all') return true;
+          // For parents with variants, include if any variant matches filter
+          const v = variantsByParent[i.id];
+          if(v && v.length > 0) return v.some(x => x.status === filter);
+          return i.status === filter;
+        }).map(i => renderInventoryRow(i, variantsByParent[i.id])).join('') || '<div style="text-align:center;padding:30px;color:rgba(255,255,255,0.4);font-size:13px;">No items match this filter.</div>'}
+      </div>
+    `}`;
+
+  // Hydrate assigned-to names asynchronously (top-level + variants)
+  const userIds = [...new Set((allItems || []).filter(i => i.assigned_to_user).map(i => i.assigned_to_user))];
+  const mktIds = [...new Set((allItems || []).filter(i => i.assigned_to_market).map(i => i.assigned_to_market))];
+  if(userIds.length > 0){
+    const { data: users } = await sb.from('profiles').select('id,full_name,email').in('id', userIds);
+    (users || []).forEach(u => {
+      document.querySelectorAll('[data-au="' + u.id + '"]').forEach(n => { n.textContent = u.full_name || u.email; });
+    });
+  }
+  if(mktIds.length > 0){
+    const { data: mkts } = await sb.from('markets').select('id,name').in('id', mktIds);
+    (mkts || []).forEach(m => {
+      document.querySelectorAll('[data-am="' + m.id + '"]').forEach(n => { n.textContent = m.name; });
+    });
+  }
+}
+
+function renderInventoryRow(i, variants){
+  const cat = i.inventory_categories;
+  const hasVariants = variants && variants.length > 0;
+  const sc = {
+    in_stock: { bg:'rgba(0,255,136,0.12)', fg:'#00FF88', l:'IN STOCK' },
+    assigned: { bg:'rgba(0,198,255,0.12)', fg:'#00C6FF', l:'ASSIGNED' },
+    damaged:  { bg:'rgba(255,193,7,0.12)', fg:'#FFD700', l:'DAMAGED' },
+    lost:     { bg:'rgba(248,113,113,0.12)', fg:'#F87171', l:'LOST' },
+    returned: { bg:'rgba(168,85,247,0.12)', fg:'#A855F7', l:'RETURNED' },
+    retired:  { bg:'rgba(255,255,255,0.08)', fg:'rgba(255,255,255,0.5)', l:'RETIRED' }
+  }[i.status] || { bg:'rgba(0,255,136,0.12)', fg:'#00FF88', l:'IN STOCK' };
+  const prog = i.program_id ? allPrograms.find(p => p.id === i.program_id) : null;
+
+  // Variant rollup
+  let variantRollup = '';
+  if(hasVariants){
+    const totalQty = variants.reduce((s, v) => s + (v.quantity || 0), 0);
+    const availQty = variants.filter(v => v.status === 'in_stock').reduce((s, v) => s + (v.quantity || 0), 0);
+    const assignedQty = variants.filter(v => v.status === 'assigned').reduce((s, v) => s + (v.quantity || 0), 0);
+    variantRollup = `
+      <div style="margin-top:8px;display:flex;gap:10px;flex-wrap:wrap;font-size:11.5px;">
+        <span style="color:rgba(255,255,255,0.5);">Total: <strong style="color:#fff;">${totalQty}</strong></span>
+        <span style="color:#00FF88;">Available: <strong>${availQty}</strong></span>
+        <span style="color:#00C6FF;">Assigned: <strong>${assignedQty}</strong></span>
+        <span style="color:rgba(255,255,255,0.5);">·  ${variants.length} variant${variants.length === 1 ? '' : 's'}</span>
+      </div>`;
+  }
+
+  return `
+    <div class="bo-card" style="padding:14px 16px;">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;">
+        <div style="display:flex;gap:14px;align-items:flex-start;flex:1;min-width:0;">
+          <div style="font-size:30px;flex-shrink:0;line-height:1;">${cat?.icon || '📦'}</div>
+          <div style="flex:1;min-width:0;">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <div style="font-size:14px;font-weight:600;color:#fff;">${escapeHtml(i.name)}</div>
+              ${hasVariants ? '<span style="background:rgba(168,85,247,0.15);color:#A855F7;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">📐 HAS VARIANTS</span>' : `<span style="background:${sc.bg};color:${sc.fg};padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">${sc.l}</span>`}
+              ${prog ? `<span style="background:${prog.color}22;color:${prog.color};padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;">${prog.icon} ${escapeHtml(prog.name.split(' ')[0])}</span>` : ''}
+              ${!hasVariants && i.quantity > 1 ? `<span style="background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.65);padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;">×${i.quantity}</span>` : ''}
+            </div>
+            <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-top:3px;">
+              ${cat?.name ? escapeHtml(cat.name) : ''}
+              ${i.sku ? ' · SKU: ' + escapeHtml(i.sku) : ''}
+              ${i.serial_number ? ' · S/N: ' + escapeHtml(i.serial_number) : ''}
+              ${!hasVariants && i.condition ? ' · ' + escapeHtml(i.condition) : ''}
+            </div>
+            ${variantRollup}
+            ${!hasVariants && i.assigned_to_user ? `<div style="font-size:11.5px;color:#00C6FF;margin-top:3px;">→ Assigned to: <span data-au="${i.assigned_to_user}" style="font-weight:600;">loading…</span></div>` : ''}
+            ${!hasVariants && i.assigned_to_market ? `<div style="font-size:11.5px;color:#A855F7;margin-top:3px;">→ Market: <span data-am="${i.assigned_to_market}" style="font-weight:600;">loading…</span></div>` : ''}
+            ${i.notes ? `<div style="font-size:11.5px;color:rgba(255,255,255,0.4);margin-top:3px;font-style:italic;">${escapeHtml(i.notes)}</div>` : ''}
+          </div>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          ${hasVariants ? `<button class="bo-btn bo-btn-primary" style="padding:5px 12px;font-size:11px;" onclick="openVariantsEditor('${i.id}')">📐 Manage Variants</button>` : ''}
+          ${!hasVariants && i.status === 'in_stock' ? `<button class="bo-btn bo-btn-primary" style="padding:5px 12px;font-size:11px;" onclick="openAssignInventoryModal('${i.id}')">📤 Assign</button>` : ''}
+          ${!hasVariants && i.status === 'assigned' ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="returnInventoryItem('${i.id}')">↶ Return</button>` : ''}
+          ${!hasVariants ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="openVariantsEditor('${i.id}')" title="Add size/variant breakdown">📐</button>` : ''}
+          <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="openInventoryItemEditor('${i.id}')">✏️</button>
+          <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="viewInventoryHistory('${i.id}')">📜</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function setInvFilter(f){ window._invFilter = f; renderMainContent(); }
+
+async function openInventoryItemEditor(itemId){
+  const isEdit = !!itemId;
+  let i = { id:'', name:'', sku:'', serial_number:'', quantity:1, condition:'new', status:'in_stock', program_id:null, category_id:null, photo_url:null, notes:'' };
+  if(isEdit){
+    const { data } = await sb.from('inventory_items').select('*').eq('id', itemId).single();
+    if(data) i = { ...i, ...data };
+  }
+  const { data: cats } = await sb.from('inventory_categories').select('*').order('display_order');
+
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#fff;margin-bottom:14px;letter-spacing:1px;">${isEdit ? 'Edit' : 'New'} Inventory Item</h2>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <div class="form-group">
+        <label class="form-label">Category *</label>
+        <select id="ie-cat" class="form-input">
+          <option value="">— Select —</option>
+          ${(cats || []).map(c => `<option value="${c.id}" ${i.category_id === c.id ? 'selected' : ''}>${c.icon} ${escapeHtml(c.name)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-group"><label class="form-label">Quantity</label><input id="ie-qty" class="form-input" type="number" min="1" value="${i.quantity || 1}"/></div>
+    </div>
+    <div class="form-group"><label class="form-label">Item Name *</label><input id="ie-name" class="form-input" value="${escapeHtml(i.name)}" placeholder="e.g. Samsung Tab A8 Tablet"/></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <div class="form-group"><label class="form-label">SKU</label><input id="ie-sku" class="form-input" value="${escapeHtml(i.sku || '')}"/></div>
+      <div class="form-group"><label class="form-label">Serial Number</label><input id="ie-serial" class="form-input" value="${escapeHtml(i.serial_number || '')}"/></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <div class="form-group">
+        <label class="form-label">Condition</label>
+        <select id="ie-cond" class="form-input">
+          ${['new','good','fair','damaged','retired'].map(c => `<option value="${c}" ${i.condition === c ? 'selected' : ''}>${c.charAt(0).toUpperCase() + c.slice(1)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Program</label>
+        <select id="ie-prog" class="form-input">
+          <option value="">— Any —</option>
+          ${allPrograms.filter(p => p.status !== 'archived').map(p => `<option value="${p.id}" ${i.program_id === p.id ? 'selected' : ''}>${p.icon} ${escapeHtml(p.name)}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Photo (optional)</label>
+      <input id="ie-photo" type="file" class="form-input" accept="image/*"/>
+      ${i.photo_url ? `<div style="margin-top:8px;"><img src="${escapeHtml(i.photo_url)}" style="max-width:160px;border-radius:6px;"/></div>` : ''}
+    </div>
+    <div class="form-group"><label class="form-label">Notes</label><textarea id="ie-notes" class="form-input" rows="2">${escapeHtml(i.notes || '')}</textarea></div>
+    <div style="display:flex;gap:10px;margin-top:14px;">
+      <button class="bo-btn bo-btn-primary" onclick="saveInventoryItem(${isEdit ? `'${i.id}'` : 'null'})">${isEdit ? 'Save' : 'Create Item'}</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="ie-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-box').style.maxWidth = '560px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function saveInventoryItem(existingId){
+  const msg = document.getElementById('ie-msg');
+  const name = document.getElementById('ie-name').value.trim();
+  const cat = document.getElementById('ie-cat').value;
+  if(!name){ msg.innerHTML = '<span style="color:#F87171;">Name required.</span>'; return; }
+  if(!cat){ msg.innerHTML = '<span style="color:#F87171;">Category required.</span>'; return; }
+
+  const payload = {
+    name, category_id: cat,
+    sku: document.getElementById('ie-sku').value.trim() || null,
+    serial_number: document.getElementById('ie-serial').value.trim() || null,
+    quantity: parseInt(document.getElementById('ie-qty').value) || 1,
+    condition: document.getElementById('ie-cond').value,
+    program_id: document.getElementById('ie-prog').value || null,
+    notes: document.getElementById('ie-notes').value.trim() || null,
+    updated_at: new Date().toISOString()
+  };
+  const fileInput = document.getElementById('ie-photo');
+  const file = fileInput?.files?.[0];
+  if(file){
+    msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Uploading photo…</span>';
+    const path = 'inventory/' + Date.now() + '-' + file.name.replace(/[^a-zA-Z0-9.]/g,'_');
+    const { error: uploadErr } = await sb.storage.from('avatars').upload(path, file);
+    if(!uploadErr){
+      const { data } = sb.storage.from('avatars').getPublicUrl(path);
+      payload.photo_url = data?.publicUrl || null;
+    }
+  }
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Saving…</span>';
+  if(existingId){
+    const { error } = await sb.from('inventory_items').update(payload).eq('id', existingId);
+    if(error){ msg.innerHTML = '<span style="color:#F87171;">' + error.message + '</span>'; return; }
+  } else {
+    payload.created_by = currentProfile.id;
+    payload.status = 'in_stock';
+    const { error } = await sb.from('inventory_items').insert(payload);
+    if(error){ msg.innerHTML = '<span style="color:#F87171;">' + error.message + '</span>'; return; }
+  }
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Saved.</span>';
+  setTimeout(() => { closeAllModals(); renderMainContent(); }, 700);
+}
+
+async function openAssignInventoryModal(itemId){
+  const { data: item } = await sb.from('inventory_items').select('*').eq('id', itemId).single();
+  const myRole = currentProfile.role;
+  let assignableUsers = [];
+  let assignableMarkets = [];
+  const { data: allUsers } = await sb.from('profiles').select('id,full_name,email,role,reports_to').eq('active', true).order('full_name');
+  const { data: allMkts } = await sb.from('markets').select('id,name').order('name');
+
+  if(myRole === 'owner' || currentProfile.is_inventory_manager){
+    assignableUsers = (allUsers || []).filter(u => u.role !== 'owner');
+    assignableMarkets = allMkts || [];
+  } else if(myRole === 'admin'){
+    assignableUsers = (allUsers || []).filter(u => !['owner','admin'].includes(u.role));
+    assignableMarkets = allMkts || [];
+  } else if(myRole === 'manager'){
+    assignableUsers = (allUsers || []).filter(u => u.reports_to === currentProfile.id);
+  }
+
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;margin-bottom:6px;letter-spacing:1px;">📤 Assign Inventory</h2>
+    <div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-bottom:14px;"><strong style="color:#fff;">${escapeHtml(item.name)}</strong>${item.serial_number ? ' (S/N: ' + escapeHtml(item.serial_number) + ')' : ''}</div>
+    <div class="form-group">
+      <label class="form-label">Assign to</label>
+      <select id="ai-target" class="form-input" onchange="onAssignTargetChange()">
+        <option value="user">A specific person</option>
+        ${assignableMarkets.length > 0 ? '<option value="market">A whole market/team</option>' : ''}
+      </select>
+    </div>
+    <div class="form-group" id="ai-user-wrap">
+      <label class="form-label">Person *</label>
+      <select id="ai-user" class="form-input">
+        <option value="">— Pick a person —</option>
+        ${assignableUsers.map(u => `<option value="${u.id}">${escapeHtml(u.full_name || u.email)} (${roleLabel(u.role)})</option>`).join('')}
+      </select>
+      ${assignableUsers.length === 0 ? '<div style="font-size:11.5px;color:#FFD700;margin-top:4px;">No assignable people. Managers can only assign to people who report to them.</div>' : ''}
+    </div>
+    <div class="form-group" id="ai-market-wrap" style="display:none;">
+      <label class="form-label">Market *</label>
+      <select id="ai-market" class="form-input">
+        <option value="">— Pick a market —</option>
+        ${assignableMarkets.map(m => `<option value="${m.id}">${escapeHtml(m.name)}</option>`).join('')}
+      </select>
+    </div>
+    <div class="form-group"><label class="form-label">Notes</label><textarea id="ai-notes" class="form-input" rows="2" placeholder="Any handover notes"></textarea></div>
+    <div style="display:flex;gap:10px;margin-top:14px;">
+      <button class="bo-btn bo-btn-primary" onclick="confirmAssignInventory('${itemId}')">Assign</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="ai-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-box').style.maxWidth = '500px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+function onAssignTargetChange(){
+  const t = document.getElementById('ai-target').value;
+  document.getElementById('ai-user-wrap').style.display = t === 'user' ? '' : 'none';
+  document.getElementById('ai-market-wrap').style.display = t === 'market' ? '' : 'none';
+}
+
+async function confirmAssignInventory(itemId){
+  const target = document.getElementById('ai-target').value;
+  const userId = target === 'user' ? document.getElementById('ai-user').value : null;
+  const marketId = target === 'market' ? document.getElementById('ai-market').value : null;
+  const notes = document.getElementById('ai-notes').value.trim() || null;
+  const msg = document.getElementById('ai-msg');
+  if(target === 'user' && !userId){ msg.innerHTML = '<span style="color:#F87171;">Pick a person.</span>'; return; }
+  if(target === 'market' && !marketId){ msg.innerHTML = '<span style="color:#F87171;">Pick a market.</span>'; return; }
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Assigning…</span>';
+  const { error: upErr } = await sb.from('inventory_items').update({
+    status: 'assigned', assigned_to_user: userId, assigned_to_market: marketId,
+    assigned_at: new Date().toISOString(), updated_at: new Date().toISOString()
+  }).eq('id', itemId);
+  if(upErr){ msg.innerHTML = '<span style="color:#F87171;">' + upErr.message + '</span>'; return; }
+  await sb.from('inventory_assignments').insert({
+    item_id: itemId, assigned_to_user: userId, assigned_to_market: marketId,
+    assigned_by: currentProfile.id, notes
+  });
+  if(userId){
+    try {
+      const { data: it } = await sb.from('inventory_items').select('name').eq('id', itemId).single();
+      await notifyUser(userId, {
+        type: 'generic',
+        title: '📦 Inventory assigned: ' + (it?.name || 'item'),
+        body: 'You\'ve been assigned an inventory item. Check 📦 My Inventory for details.'
+      });
+    } catch(_){}
+  }
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Assigned.</span>';
+  setTimeout(() => { closeAllModals(); renderMainContent(); }, 700);
+}
+
+async function returnInventoryItem(itemId){
+  const condition = prompt('Return this item — what condition is it in?\n\nOptions: new, good, fair, damaged, lost\n\n(Type one)');
+  if(!condition) return;
+  const valid = ['new','good','fair','damaged','lost'];
+  if(!valid.includes(condition)){ alert('Invalid. Use: ' + valid.join(', ')); return; }
+  const newStatus = condition === 'lost' ? 'lost' : (condition === 'damaged' ? 'damaged' : 'in_stock');
+  await sb.from('inventory_items').update({
+    status: newStatus, assigned_to_user: null, assigned_to_market: null,
+    assigned_at: null, condition: condition === 'lost' ? 'fair' : condition,
+    updated_at: new Date().toISOString()
+  }).eq('id', itemId);
+  const { data: openA } = await sb.from('inventory_assignments').select('id').eq('item_id', itemId).is('returned_at', null);
+  if(openA && openA.length > 0){
+    await sb.from('inventory_assignments').update({
+      returned_at: new Date().toISOString(), return_condition: condition
+    }).in('id', openA.map(x => x.id));
+  }
+  renderMainContent();
+}
+
+async function viewInventoryHistory(itemId){
+  const { data: item } = await sb.from('inventory_items').select('name,serial_number').eq('id', itemId).single();
+  const { data: history } = await sb.from('inventory_assignments').select('*').eq('item_id', itemId).order('assigned_at', { ascending: false });
+  const userIds = [...new Set((history || []).flatMap(h => [h.assigned_to_user, h.assigned_by]).filter(Boolean))];
+  const { data: users } = userIds.length > 0 ? await sb.from('profiles').select('id,full_name,email').in('id', userIds) : { data: [] };
+  const usersById = {};
+  (users || []).forEach(u => usersById[u.id] = u);
+  const nameOf = uid => uid ? (usersById[uid]?.full_name || usersById[uid]?.email || 'unknown') : '—';
+
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#fff;margin-bottom:6px;letter-spacing:1px;">📜 Assignment History</h2>
+    <div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-bottom:14px;"><strong style="color:#fff;">${escapeHtml(item?.name || 'Item')}</strong>${item?.serial_number ? ' (S/N: ' + escapeHtml(item.serial_number) + ')' : ''}</div>
+    ${(history || []).length === 0 ? '<div style="text-align:center;color:rgba(255,255,255,0.4);padding:30px;">No history.</div>' : `
+      <div style="display:flex;flex-direction:column;gap:6px;max-height:420px;overflow-y:auto;">
+        ${history.map(h => `
+          <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:8px;padding:10px 12px;">
+            <div style="font-size:13px;color:#fff;font-weight:600;">${escapeHtml(nameOf(h.assigned_to_user))}</div>
+            <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-top:2px;">
+              Assigned ${new Date(h.assigned_at).toLocaleDateString()} by ${escapeHtml(nameOf(h.assigned_by))}
+              ${h.returned_at ? ' · Returned ' + new Date(h.returned_at).toLocaleDateString() + (h.return_condition ? ' (' + escapeHtml(h.return_condition) + ')' : '') : ' · <span style="color:#00C6FF;">Currently held</span>'}
+            </div>
+            ${h.notes ? `<div style="font-size:11.5px;color:rgba(255,255,255,0.4);margin-top:4px;font-style:italic;">${escapeHtml(h.notes)}</div>` : ''}
+          </div>
+        `).join('')}
+      </div>
+    `}
+    <div style="margin-top:14px;text-align:right;"><button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Close</button></div>`;
+  document.getElementById('modal-box').style.maxWidth = '560px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function openCategoriesEditor(){
+  const { data: cats } = await sb.from('inventory_categories').select('*').order('display_order');
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;margin-bottom:14px;letter-spacing:1px;">📁 Inventory Categories</h2>
+    <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px;max-height:280px;overflow-y:auto;">
+      ${(cats || []).map(c => `
+        <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:rgba(255,255,255,0.04);border-radius:8px;">
+          <div style="font-size:20px;">${c.icon}</div>
+          <div style="flex:1;font-size:13px;color:#fff;">${escapeHtml(c.name)}</div>
+          <button class="bo-btn bo-btn-danger" style="padding:4px 10px;font-size:11px;" onclick="deleteCategory('${c.id}', this.dataset.n)" data-n="${escapeHtml(c.name).replace(/"/g,'&quot;')}">🗑️</button>
+        </div>
+      `).join('')}
+    </div>
+    <div class="form-group" style="display:grid;grid-template-columns:60px 1fr auto;gap:8px;align-items:end;">
+      <input id="cat-new-icon" class="form-input" maxlength="3" placeholder="📦"/>
+      <input id="cat-new-name" class="form-input" placeholder="Category name"/>
+      <button class="bo-btn bo-btn-primary" onclick="addCategory()">+ Add</button>
+    </div>
+    <div style="margin-top:14px;text-align:right;"><button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Close</button></div>`;
+  document.getElementById('modal-box').style.maxWidth = '480px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function addCategory(){
+  const name = document.getElementById('cat-new-name').value.trim();
+  const icon = (document.getElementById('cat-new-icon').value || '📦').trim();
+  if(!name) return;
+  await sb.from('inventory_categories').insert({ name, icon, display_order: 99 });
+  openCategoriesEditor();
+}
+
+async function deleteCategory(catId, name){
+  if(!confirm('Delete category "' + name + '"? Items in this category will block the delete.')) return;
+  const { error } = await sb.from('inventory_categories').delete().eq('id', catId);
+  if(error){ alert('Could not delete: ' + error.message + '\n\nLikely items still use this category.'); return; }
+  openCategoriesEditor();
+}
+
+async function renderMyInventory(el){
+  const { data: items } = await sb.from('inventory_items')
+    .select('*, inventory_categories(name,icon)')
+    .eq('assigned_to_user', currentProfile.id).eq('status', 'assigned')
+    .order('assigned_at', { ascending: false });
+
+  el.innerHTML = `
+    <div style="margin-bottom:24px;">
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">📦 My Inventory</h1>
+      <p style="font-size:14px;color:rgba(255,255,255,0.5);">Equipment and materials currently checked out to you.</p>
+    </div>
+    ${(items || []).length === 0 ? `
+      <div class="bo-card" style="text-align:center;padding:40px;">
+        <div style="font-size:42px;margin-bottom:10px;">📦</div>
+        <div style="color:rgba(255,255,255,0.5);font-size:14px;">Nothing currently assigned to you.</div>
+      </div>
+    ` : `
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        ${items.map(i => `
+          <div class="bo-card" style="padding:14px 16px;">
+            <div style="display:flex;gap:14px;align-items:flex-start;">
+              <div style="font-size:30px;">${i.inventory_categories?.icon || '📦'}</div>
+              <div style="flex:1;">
+                <div style="font-size:14px;font-weight:600;color:#fff;">${escapeHtml(i.name)}${i.quantity > 1 ? ' ×' + i.quantity : ''}</div>
+                <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-top:3px;">
+                  ${i.inventory_categories?.name || ''}
+                  ${i.serial_number ? ' · S/N: ' + escapeHtml(i.serial_number) : ''}
+                  ${i.condition ? ' · ' + escapeHtml(i.condition) : ''}
+                </div>
+                <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:3px;">Assigned ${new Date(i.assigned_at).toLocaleDateString()}</div>
+                ${i.notes ? `<div style="font-size:11.5px;color:rgba(255,255,255,0.6);margin-top:6px;font-style:italic;">${escapeHtml(i.notes)}</div>` : ''}
+              </div>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    `}`;
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// PHOTO AUDIT — Daily check-in/out with live camera + geofencing
+// ═══════════════════════════════════════════════════════════════════════
+function haversineDistance(lat1, lon1, lat2, lon2){
+  const R = 6371000;
+  const toRad = d => d * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+let _paPhotoBlob = null;
+
+async function renderPhotoAuditCheckin(el){
+  const { data: assignments } = await sb.from('agent_stores').select('store_id, stores(*)').eq('user_id', currentProfile.id);
+  const stores = (assignments || []).map(a => a.stores).filter(s => s && s.active);
+  if(stores.length === 0){
+    el.innerHTML = `
+      <div class="bo-card" style="text-align:center;padding:40px;">
+        <div style="font-size:42px;margin-bottom:10px;">🏪</div>
+        <div style="color:rgba(255,255,255,0.5);font-size:14px;">You're not assigned to any stores yet.</div>
+        <div style="color:rgba(255,255,255,0.4);font-size:12.5px;margin-top:6px;">Ask your manager to assign you to your store(s) so you can check in.</div>
+      </div>`;
+    return;
+  }
+
+  const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+  const { data: todayAudits } = await sb.from('photo_audits')
+    .select('audit_type,store_id,created_at')
+    .eq('user_id', currentProfile.id)
+    .gte('created_at', todayStart.toISOString())
+    .order('created_at', { ascending: false });
+  const latest = (todayAudits || [])[0];
+  const suggested = (latest && latest.audit_type === 'check_in') ? 'check_out' : 'check_in';
+
+  el.innerHTML = `
+    <div style="margin-bottom:18px;">
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:42px;color:#fff;margin-bottom:6px;">📸 Daily Check-In</h1>
+      <p style="font-size:13.5px;color:rgba(255,255,255,0.55);line-height:1.55;">Take a live photo at your assigned store to log your shift. GPS is verified — fraud attempts trigger an immediate alert to your manager and the owner.</p>
+    </div>
+    ${(todayAudits || []).length > 0 ? `
+      <div class="bo-card" style="margin-bottom:14px;">
+        <div style="font-size:12px;color:rgba(255,255,255,0.55);letter-spacing:1.5px;font-weight:700;margin-bottom:8px;">TODAY'S ACTIVITY</div>
+        ${todayAudits.map(a => {
+          const s = stores.find(x => x.id === a.store_id);
+          return `<div style="font-size:12.5px;color:rgba(255,255,255,0.7);padding:3px 0;">${a.audit_type === 'check_in' ? '✓ Checked in' : '✓ Checked out'} at ${escapeHtml(s?.name || 'unknown')} · ${new Date(a.created_at).toLocaleTimeString()}</div>`;
+        }).join('')}
+      </div>
+    ` : ''}
+    <div class="bo-card">
+      <div class="form-group">
+        <label class="form-label">Action</label>
+        <div style="display:flex;gap:8px;">
+          <label style="flex:1;display:flex;align-items:center;gap:8px;padding:14px;background:rgba(0,255,136,0.05);border:2px solid ${suggested === 'check_in' ? '#00FF88' : 'rgba(255,255,255,0.1)'};border-radius:10px;cursor:pointer;">
+            <input type="radio" name="pa-type" value="check_in" ${suggested === 'check_in' ? 'checked' : ''} style="width:18px;height:18px;accent-color:#00FF88;"/>
+            <div><div style="font-size:14px;color:#00FF88;font-weight:700;">CHECK IN</div><div style="font-size:11px;color:rgba(255,255,255,0.5);">Starting my shift</div></div>
+          </label>
+          <label style="flex:1;display:flex;align-items:center;gap:8px;padding:14px;background:rgba(0,198,255,0.05);border:2px solid ${suggested === 'check_out' ? '#00C6FF' : 'rgba(255,255,255,0.1)'};border-radius:10px;cursor:pointer;">
+            <input type="radio" name="pa-type" value="check_out" ${suggested === 'check_out' ? 'checked' : ''} style="width:18px;height:18px;accent-color:#00C6FF;"/>
+            <div><div style="font-size:14px;color:#00C6FF;font-weight:700;">CHECK OUT</div><div style="font-size:11px;color:rgba(255,255,255,0.5);">Ending my shift</div></div>
+          </label>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Store *</label>
+        <select id="pa-store" class="form-input">
+          ${stores.map(s => `<option value="${s.id}" data-lat="${s.latitude}" data-lng="${s.longitude}" data-radius="${s.geofence_radius_meters || 100}">${escapeHtml(s.name)}${s.store_number ? ' #' + escapeHtml(s.store_number) : ''}${s.city ? ' — ' + escapeHtml(s.city) : ''}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Live Photo *</label>
+        <div style="background:rgba(255,193,7,0.06);border:1px solid rgba(255,193,7,0.25);border-radius:8px;padding:10px 14px;margin-bottom:8px;font-size:11.5px;color:rgba(255,255,255,0.7);line-height:1.55;">
+          <strong style="color:#FFD700;">⚠️ Live camera only.</strong> The camera will open automatically. Older gallery photos will be rejected.
+        </div>
+        <input id="pa-photo" type="file" accept="image/*" capture="environment" class="form-input" onchange="paOnPhotoSelected(this)"/>
+        <div id="pa-photo-preview" style="margin-top:8px;"></div>
+      </div>
+      <div class="form-group"><label class="form-label">Notes (optional)</label><textarea id="pa-notes" class="form-input" rows="2" placeholder="Anything to log? Issues, observations, etc."></textarea></div>
+      <div id="pa-status" style="margin:10px 0;font-size:12.5px;color:rgba(255,255,255,0.5);"></div>
+      <button class="bo-btn bo-btn-primary" style="width:100%;padding:14px;font-size:14px;" onclick="submitPhotoAudit()">📸 Submit</button>
+      <div id="pa-msg" style="margin-top:12px;font-size:13px;text-align:center;"></div>
+    </div>`;
+}
+
+function paOnPhotoSelected(input){
+  const file = input.files?.[0];
+  const preview = document.getElementById('pa-photo-preview');
+  if(!file){ preview.innerHTML = ''; _paPhotoBlob = null; return; }
+  const ageSeconds = (Date.now() - file.lastModified) / 1000;
+  if(ageSeconds > 120){
+    preview.innerHTML = '<div style="color:#F87171;font-size:12.5px;padding:8px;background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.3);border-radius:6px;">⛔ This photo was taken more than 2 minutes ago. Live camera capture only — please use the camera now.</div>';
+    input.value = '';
+    _paPhotoBlob = null;
+    return;
+  }
+  _paPhotoBlob = file;
+  const url = URL.createObjectURL(file);
+  preview.innerHTML = `<img src="${url}" style="max-width:200px;border-radius:8px;border:2px solid #00FF88;"/><div style="font-size:11px;color:#00FF88;margin-top:4px;">✓ Photo captured</div>`;
+}
+
+async function submitPhotoAudit(){
+  const msg = document.getElementById('pa-msg');
+  const status = document.getElementById('pa-status');
+  const auditType = document.querySelector('input[name="pa-type"]:checked')?.value;
+  const storeSelect = document.getElementById('pa-store');
+  const storeId = storeSelect.value;
+  const storeOpt = storeSelect.options[storeSelect.selectedIndex];
+  const storeLat = parseFloat(storeOpt.dataset.lat);
+  const storeLng = parseFloat(storeOpt.dataset.lng);
+  const radius = parseInt(storeOpt.dataset.radius) || 100;
+  const notes = document.getElementById('pa-notes').value.trim() || null;
+
+  if(!auditType){ msg.innerHTML = '<span style="color:#F87171;">Pick check-in or check-out.</span>'; return; }
+  if(!storeId){ msg.innerHTML = '<span style="color:#F87171;">Pick a store.</span>'; return; }
+  if(!_paPhotoBlob){ msg.innerHTML = '<span style="color:#F87171;">Take a live photo first.</span>'; return; }
+  if(isNaN(storeLat) || isNaN(storeLng)){ msg.innerHTML = '<span style="color:#F87171;">This store has no GPS set. Ask your manager.</span>'; return; }
+
+  // ─── 40hr weekly cap enforcement ───
+  // Block check-ins (not check-outs) if agent has hit the cap this week
+  if(auditType === 'check_in'){
+    try {
+      const hoursThisWeek = await calculateAgentWeekHours(currentProfile.id);
+      const cap = await getAgentWeeklyHourCap(currentProfile.id);
+      if(hoursThisWeek >= cap){
+        msg.innerHTML = '<div style="background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.4);border-radius:8px;padding:14px;color:#F87171;font-size:13px;line-height:1.5;text-align:left;">⛔ <strong>WEEKLY CAP REACHED</strong><br><br>You have logged ' + hoursThisWeek.toFixed(1) + ' hours this week (cap: ' + cap + ').<br><br>No additional check-ins are allowed until Monday. If you believe this is in error, contact your manager or payroll department.</div>';
+        return;
+      }
+      // Approaching cap: friendly nudge
+      if(hoursThisWeek >= cap - 2){
+        const remaining = (cap - hoursThisWeek).toFixed(1);
+        if(!confirm('⚠️ You have only ' + remaining + ' hours left this week before hitting the ' + cap + 'hr cap. Continue check-in?')) return;
+      }
+    } catch(e){ console.warn('Cap check failed (allowing check-in):', e); }
+  }
+
+  status.innerHTML = '<span style="color:rgba(255,255,255,0.6);">📍 Checking your location…</span>';
+  if(!navigator.geolocation){
+    msg.innerHTML = '<span style="color:#F87171;">Your browser does not support geolocation.</span>';
+    return;
+  }
+  let pos;
+  try {
+    pos = await new Promise((resolve, reject) => {
+      navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 15000 });
+    });
+  } catch(e){
+    msg.innerHTML = '<span style="color:#F87171;">Could not get your location: ' + e.message + '. Make sure GPS is enabled and you allowed permission.</span>';
+    return;
+  }
+  const myLat = pos.coords.latitude;
+  const myLng = pos.coords.longitude;
+  const accuracy = pos.coords.accuracy;
+  const distance = haversineDistance(myLat, myLng, storeLat, storeLng);
+  const passed = distance <= radius;
+
+  status.innerHTML = `<span style="color:${passed ? '#00FF88' : '#F87171'};">📍 You are <strong>${Math.round(distance)}m</strong> from the store (limit: ${radius}m). GPS accuracy: ±${Math.round(accuracy)}m.</span>`;
+
+  status.innerHTML += '<br><span style="color:rgba(255,255,255,0.6);">⬆️ Uploading photo…</span>';
+  const photoPath = currentProfile.id + '/' + Date.now() + '.jpg';
+  const { error: upErr } = await sb.storage.from('photo-audits').upload(photoPath, _paPhotoBlob);
+  if(upErr){
+    msg.innerHTML = '<span style="color:#F87171;">Photo upload failed: ' + upErr.message + '</span>';
+    return;
+  }
+  const { data: audit, error: insertErr } = await sb.from('photo_audits').insert({
+    user_id: currentProfile.id, store_id: storeId, audit_type: auditType,
+    reported_latitude: myLat, reported_longitude: myLng, reported_accuracy_meters: accuracy,
+    distance_from_store_meters: distance, geofence_passed: passed,
+    photo_path: photoPath, notes, user_agent: navigator.userAgent
+  }).select().single();
+  if(insertErr){ msg.innerHTML = '<span style="color:#F87171;">' + insertErr.message + '</span>'; return; }
+
+  await notifyAuditSubmitted(audit, passed, storeOpt.text);
+
+  if(passed){
+    let extras = '';
+    // Schedule reminder (non-blocking nag)
+    try {
+      const scheduleNote = await checkScheduleReminder(currentProfile.id, auditType);
+      if(scheduleNote) extras += '<div style="background:rgba(255,193,7,0.08);border:1px solid rgba(255,193,7,0.3);border-radius:8px;padding:10px 14px;margin-top:10px;color:#FFD700;font-size:12.5px;text-align:left;">⏰ ' + scheduleNote + '</div>';
+    } catch(_){}
+    // End-of-shift nag for check-in only: warn if approaching cap after this check-in
+    if(auditType === 'check_in'){
+      try {
+        const hoursWeek = await calculateAgentWeekHours(currentProfile.id);
+        const cap = await getAgentWeeklyHourCap(currentProfile.id);
+        const remaining = cap - hoursWeek;
+        if(remaining > 0 && remaining < 8){
+          extras += '<div style="background:rgba(0,198,255,0.08);border:1px solid rgba(0,198,255,0.3);border-radius:8px;padding:10px 14px;margin-top:10px;color:#00C6FF;font-size:12.5px;text-align:left;">💡 You have <strong>' + remaining.toFixed(1) + ' hours</strong> left this week before the ' + cap + 'hr cap. Plan to check out in time so you don\'t lose pay.</div>';
+        }
+      } catch(_){}
+    }
+    msg.innerHTML = '<span style="color:#00FF88;font-size:14px;">✓ ' + (auditType === 'check_in' ? 'Checked in' : 'Checked out') + ' successfully.</span>' + extras;
+  } else {
+    msg.innerHTML = '<div style="background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.4);border-radius:8px;padding:14px;color:#F87171;font-size:13px;line-height:1.5;text-align:left;">⛔ <strong>FRAUD ALERT TRIGGERED</strong><br><br>You were ' + Math.round(distance) + 'm from the store (allowed: ' + radius + 'm). The submission has been logged and your manager + the owner have been notified immediately.</div>';
+  }
+  setTimeout(() => renderMainContent(), 3500);
+}
+
+async function notifyAuditSubmitted(audit, passed, storeName){
+  const { data: agent } = await sb.from('profiles').select('full_name,email,reports_to').eq('id', currentProfile.id).single();
+  const recipientIds = new Set();
+  if(agent?.reports_to) recipientIds.add(agent.reports_to);
+  const { data: owners } = await sb.from('profiles').select('id').eq('role', 'owner').eq('active', true);
+  (owners || []).forEach(o => recipientIds.add(o.id));
+
+  const agentName = agent?.full_name || agent?.email || 'agent';
+  const distance = Math.round(audit.distance_from_store_meters);
+  const action = audit.audit_type === 'check_in' ? 'checked IN' : 'checked OUT';
+
+  if(passed){
+    if(agent?.reports_to){
+      try {
+        const { data: mgr } = await sb.from('profiles').select('id,email,full_name').eq('id', agent.reports_to).single();
+        if(mgr){
+          await notifyUser(mgr.id, {
+            type: 'generic',
+            title: '✓ ' + agentName + ' ' + action,
+            body: storeName + ' · ' + distance + 'm from store · ' + new Date().toLocaleTimeString()
+          });
+          try {
+            await sendEmailViaFunction('announcement', mgr.email, {
+              title: '✓ ' + agentName + ' ' + action,
+              body: storeName + '\nDistance from store: ' + distance + 'm\nTime: ' + new Date().toLocaleString(),
+              posted_by: 'Circle Solutions Audit System'
+            });
+          } catch(_){}
+        }
+      } catch(_){}
+    }
+  } else {
+    for(const rid of recipientIds){
+      try {
+        const { data: r } = await sb.from('profiles').select('email,full_name,phone,phone_carrier,sms_opt_in').eq('id', rid).single();
+        if(!r) continue;
+        await notifyUser(rid, {
+          type: 'urgent',
+          title: '🚨 GEOFENCE FAIL: ' + agentName,
+          body: agentName + ' tried to ' + action.toUpperCase() + ' at ' + storeName + ' but was ' + distance + 'm away. Possible fraud.',
+          link_view: 'photo-audits-review'
+        });
+        try {
+          await sendEmailViaFunction('urgent_custom', r.email, {
+            full_name: r.full_name,
+            subject_line: '🚨 GEOFENCE FAIL: ' + agentName,
+            message: agentName + ' attempted to ' + action + ' at ' + storeName + ' but their GPS shows them ' + distance + ' meters from the store.\n\nThis may indicate the agent is not actually at the store. The photo and GPS data are saved for review under "Photo Audits".\n\nTime: ' + new Date().toLocaleString(),
+            action_required: 'Review the audit immediately and contact the agent.',
+            sent_by: 'Circle Solutions Audit System'
+          });
+        } catch(_){}
+        if(r.phone && r.phone_carrier && r.sms_opt_in !== false){
+          try {
+            await sendSmsViaFunction({
+              to_phone: r.phone, carrier: r.phone_carrier,
+              message: 'CSI ALERT: ' + agentName + ' geofence FAIL at ' + storeName + ' (' + distance + 'm away). Check back office.'
+            });
+          } catch(_){}
+        }
+      } catch(e){ console.warn('Audit alert failed for', rid, e); }
+    }
+  }
+}
+
+async function renderPhotoAuditsReview(el){
+  const canView = ['owner','admin','manager','team_lead'].includes(currentProfile.role);
+  if(!canView){ el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied.</div>'; return; }
+
+  const filter = window._auditFilter || 'all';
+  const { data: audits } = await sb.from('photo_audits')
+    .select('*, stores(name,city), profiles!photo_audits_user_id_fkey(full_name,email,avatar_url)')
+    .order('created_at', { ascending: false }).limit(200);
+
+  const failed = (audits || []).filter(a => !a.geofence_passed);
+  const today = new Date(); today.setHours(0,0,0,0);
+  const todayAudits = (audits || []).filter(a => new Date(a.created_at) >= today);
+
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px;flex-wrap:wrap;gap:12px;">
+      <div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">📸 Photo Audits</h1>
+        <p style="font-size:14px;color:rgba(255,255,255,0.5);">Daily check-in / check-out submissions with photo + GPS verification.</p>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:18px;">
+      <div class="stat-card" style="cursor:pointer;${filter==='all'?'border-color:#FF6B00;':''}" onclick="setAuditFilter('all')"><div class="stat-num" style="color:#FFD700;">${(audits || []).length}</div><div class="stat-lbl">Total (recent)</div></div>
+      <div class="stat-card" style="cursor:pointer;${filter==='today'?'border-color:#FF6B00;':''}" onclick="setAuditFilter('today')"><div class="stat-num" style="color:#00FF88;">${todayAudits.length}</div><div class="stat-lbl">Today</div></div>
+      <div class="stat-card" style="cursor:pointer;${filter==='failed'?'border-color:#FF6B00;':''}" onclick="setAuditFilter('failed')"><div class="stat-num" style="color:#F87171;">${failed.length}</div><div class="stat-lbl">⚠️ Geofence Fails</div></div>
+    </div>
+    ${(audits || []).length === 0 ? `
+      <div class="bo-card" style="text-align:center;padding:40px;">
+        <div style="font-size:42px;margin-bottom:10px;">📸</div>
+        <div style="color:rgba(255,255,255,0.5);font-size:14px;">No photo audits submitted yet.</div>
+      </div>
+    ` : `
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        ${(audits || []).filter(a => {
+          if(filter === 'today') return new Date(a.created_at) >= today;
+          if(filter === 'failed') return !a.geofence_passed;
+          return true;
+        }).map(a => renderAuditRow(a)).join('') || '<div style="text-align:center;padding:30px;color:rgba(255,255,255,0.4);">No audits match this filter.</div>'}
+      </div>
+    `}`;
+}
+
+function renderAuditRow(a){
+  const passed = a.geofence_passed;
+  const dist = Math.round(a.distance_from_store_meters || 0);
+  const acc = Math.round(a.reported_accuracy_meters || 0);
+  const avatarHtml = a.profiles?.avatar_url
+    ? `<img src="${a.profiles.avatar_url}" style="width:32px;height:32px;border-radius:50%;object-fit:cover;"/>`
+    : `<div style="width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,0.08);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;">${(a.profiles?.full_name || a.profiles?.email || '?').substring(0,1).toUpperCase()}</div>`;
+
+  return `
+    <div class="bo-card" style="padding:12px 14px;${!passed ? 'border-left:3px solid #F87171;' : 'border-left:3px solid #00FF88;'}">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
+        <div style="display:flex;gap:10px;align-items:center;flex:1;min-width:0;">
+          ${avatarHtml}
+          <div style="flex:1;min-width:0;">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <div style="font-size:13px;font-weight:600;color:#fff;">${escapeHtml(a.profiles?.full_name || a.profiles?.email || 'Unknown')}</div>
+              <span style="background:${a.audit_type === 'check_in' ? 'rgba(0,255,136,0.12)' : 'rgba(0,198,255,0.12)'};color:${a.audit_type === 'check_in' ? '#00FF88' : '#00C6FF'};padding:1px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">${a.audit_type === 'check_in' ? 'CHECK IN' : 'CHECK OUT'}</span>
+              ${passed
+                ? `<span style="background:rgba(0,255,136,0.12);color:#00FF88;padding:1px 8px;border-radius:50px;font-size:10px;font-weight:700;">✓ ${dist}m (ok)</span>`
+                : `<span style="background:rgba(248,113,113,0.12);color:#F87171;padding:1px 8px;border-radius:50px;font-size:10px;font-weight:700;">⛔ ${dist}m (FAIL)</span>`}
+            </div>
+            <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-top:3px;">
+              ${escapeHtml(a.stores?.name || 'Unknown store')}${a.stores?.city ? ' — ' + escapeHtml(a.stores.city) : ''}
+              · ${new Date(a.created_at).toLocaleString()}
+              · GPS ±${acc}m
+            </div>
+            ${a.notes ? `<div style="font-size:11.5px;color:rgba(255,255,255,0.4);margin-top:3px;font-style:italic;">"${escapeHtml(a.notes)}"</div>` : ''}
+          </div>
+        </div>
+        <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="viewAuditPhoto('${a.id}','${a.photo_path}')">🖼 View Photo</button>
+      </div>
+    </div>`;
+}
+
+function setAuditFilter(f){ window._auditFilter = f; renderMainContent(); }
+
+async function viewAuditPhoto(auditId, photoPath){
+  const { data: audit } = await sb.from('photo_audits').select('*, stores(name,latitude,longitude), profiles!photo_audits_user_id_fkey(full_name,email)').eq('id', auditId).single();
+  if(!audit){ alert('Audit not found'); return; }
+  const { data: sig } = await sb.storage.from('photo-audits').createSignedUrl(photoPath, 300);
+  const photoUrl = sig?.signedUrl || '';
+  const passed = audit.geofence_passed;
+  const dist = Math.round(audit.distance_from_store_meters || 0);
+  const mapLink = `https://www.google.com/maps?q=${audit.reported_latitude},${audit.reported_longitude}`;
+  const storeMapLink = audit.stores?.latitude && audit.stores?.longitude
+    ? `https://www.google.com/maps?q=${audit.stores.latitude},${audit.stores.longitude}` : null;
+
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;margin-bottom:6px;letter-spacing:1px;">📸 Audit Detail</h2>
+    <div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-bottom:14px;">${escapeHtml(audit.profiles?.full_name || audit.profiles?.email || '')} · ${new Date(audit.created_at).toLocaleString()}</div>
+
+    <div style="background:#000;border-radius:10px;overflow:hidden;margin-bottom:14px;text-align:center;">
+      ${photoUrl ? `<img src="${photoUrl}" style="max-width:100%;max-height:400px;display:block;margin:0 auto;"/>` : '<div style="padding:40px;color:#F87171;">Photo could not be loaded.</div>'}
+    </div>
+
+    <div style="background:${passed ? 'rgba(0,255,136,0.06)' : 'rgba(248,113,113,0.08)'};border:1px solid ${passed ? 'rgba(0,255,136,0.3)' : 'rgba(248,113,113,0.4)'};border-radius:10px;padding:14px;margin-bottom:14px;">
+      <div style="font-size:14px;font-weight:700;color:${passed ? '#00FF88' : '#F87171'};margin-bottom:6px;">${passed ? '✓ GEOFENCE PASSED' : '⛔ GEOFENCE FAILED'}</div>
+      <div style="font-size:12.5px;color:rgba(255,255,255,0.75);line-height:1.7;">
+        <strong>Action:</strong> ${audit.audit_type === 'check_in' ? 'CHECK IN' : 'CHECK OUT'}<br/>
+        <strong>Store:</strong> ${escapeHtml(audit.stores?.name || 'Unknown')}<br/>
+        <strong>Distance from store:</strong> ${dist}m<br/>
+        <strong>GPS accuracy:</strong> ±${Math.round(audit.reported_accuracy_meters || 0)}m<br/>
+        <strong>Reported coords:</strong> <a href="${mapLink}" target="_blank" style="color:#00C6FF;">${audit.reported_latitude}, ${audit.reported_longitude} →</a><br/>
+        ${storeMapLink ? `<strong>Store coords:</strong> <a href="${storeMapLink}" target="_blank" style="color:#00C6FF;">${audit.stores.latitude}, ${audit.stores.longitude} →</a><br/>` : ''}
+        ${audit.notes ? `<strong>Notes:</strong> ${escapeHtml(audit.notes)}<br/>` : ''}
+        <strong>Submitted:</strong> ${new Date(audit.created_at).toLocaleString()}
+      </div>
+    </div>
+
+    <div style="text-align:right;"><button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Close</button></div>`;
+  document.getElementById('modal-box').style.maxWidth = '600px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════
+
 async function renderProgramsAdmin(el){
   const isOwner = currentProfile.role === 'owner';
   if(!isOwner){
@@ -9308,6 +11298,32 @@ window.setProgramStatus = setProgramStatus;
 window.deleteProgramPermanent = deleteProgramPermanent;
 window.toggleShowArchived = toggleShowArchived;
 window.onPeResetChange = onPeResetChange;
+window.renderStoresAdmin = renderStoresAdmin;
+window.openStoreEditor = openStoreEditor;
+window.seUseMyLocation = seUseMyLocation;
+window.saveStore = saveStore;
+window.deleteStore = deleteStore;
+window.openStoreAssignAgents = openStoreAssignAgents;
+window.saveStoreAssignments = saveStoreAssignments;
+window.renderInventory = renderInventory;
+window.setInvFilter = setInvFilter;
+window.openInventoryItemEditor = openInventoryItemEditor;
+window.saveInventoryItem = saveInventoryItem;
+window.openAssignInventoryModal = openAssignInventoryModal;
+window.onAssignTargetChange = onAssignTargetChange;
+window.confirmAssignInventory = confirmAssignInventory;
+window.returnInventoryItem = returnInventoryItem;
+window.viewInventoryHistory = viewInventoryHistory;
+window.openCategoriesEditor = openCategoriesEditor;
+window.addCategory = addCategory;
+window.deleteCategory = deleteCategory;
+window.renderMyInventory = renderMyInventory;
+window.renderPhotoAuditCheckin = renderPhotoAuditCheckin;
+window.paOnPhotoSelected = paOnPhotoSelected;
+window.submitPhotoAudit = submitPhotoAudit;
+window.renderPhotoAuditsReview = renderPhotoAuditsReview;
+window.setAuditFilter = setAuditFilter;
+window.viewAuditPhoto = viewAuditPhoto;
 </script>
 
 </body>
