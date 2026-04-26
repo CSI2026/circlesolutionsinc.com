@@ -3005,12 +3005,23 @@ async function launchTool(toolId){
   const { data: tool, error } = await sb.from('tools').select('*').eq('id', toolId).single();
   if(error || !tool){ alert('Could not load this tool: ' + (error?.message || 'not found')); return; }
 
-  // Determine the user's role inside the tool. Owner+admin+can_manage_rates → owner mode.
-  // Everyone else → agent mode.
+  // Determine the user's role inside the tool. Owner+admin+can_manage_rates → owner mode by default.
+  // Owner/admin/can_manage_rates can toggle to agent view to actually use the bill scanner
+  // themselves (e.g. owner walking up to a customer at a kiosk).
   const isOwner = currentProfile.role === 'owner';
   const isAdmin = currentProfile.role === 'admin';
   const canManageRates = isOwner || isAdmin || currentProfile.can_manage_rates === true;
-  const innerRole = canManageRates ? 'owner' : 'agent';
+  // Read session-level override. Only honored if user actually CAN manage rates.
+  // Agents who try to flip the storage manually still get locked to agent view.
+  const overrideKey = 'csi_tool_view_' + toolId;
+  const sessionOverride = sessionStorage.getItem(overrideKey);
+  let innerRole;
+  if(!canManageRates){
+    innerRole = 'agent'; // agents are always agents — no override possible
+  } else {
+    // Manager-level user: defaults to owner view, but can flip to agent
+    innerRole = sessionOverride === 'agent' ? 'agent' : 'owner';
+  }
   const userName = currentProfile.full_name || currentProfile.email || 'User';
   const userEmail = currentProfile.email || '';
 
@@ -3144,15 +3155,21 @@ async function launchTool(toolId){
   box.style.borderRadius = '0';
   box.innerHTML = `
     <div style="display:flex;flex-direction:column;height:100vh;background:#000;">
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 14px;background:linear-gradient(135deg,#0a0a0a,#141414);border-bottom:1px solid rgba(255,255,255,0.08);flex-shrink:0;">
-        <div style="display:flex;align-items:center;gap:10px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 14px;background:linear-gradient(135deg,#0a0a0a,#141414);border-bottom:1px solid rgba(255,255,255,0.08);flex-shrink:0;gap:10px;">
+        <div style="display:flex;align-items:center;gap:10px;min-width:0;">
           <div style="font-size:20px;">${tool.icon || '🧰'}</div>
-          <div>
+          <div style="min-width:0;">
             <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#fff;letter-spacing:1px;line-height:1;">${escapeHtml(tool.name)}</div>
             <div style="font-size:10px;color:rgba(255,255,255,0.4);margin-top:2px;">CSI Tool · ${innerRole === 'owner' ? 'Manager view' : 'Agent view'}</div>
           </div>
         </div>
-        <button class="bo-btn bo-btn-ghost" style="padding:6px 14px;font-size:12px;" onclick="closeToolView('${blobUrl}')">✕ Close</button>
+        <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
+          ${canManageRates ? `
+          <button class="bo-btn bo-btn-ghost" style="padding:6px 12px;font-size:11px;background:${innerRole === 'owner' ? 'rgba(255,200,0,0.1)' : 'rgba(0,255,136,0.1)'};border-color:${innerRole === 'owner' ? '#FFC800' : '#00FF88'};color:${innerRole === 'owner' ? '#FFC800' : '#00FF88'};" onclick="toggleToolView('${toolId}')" title="Switch between manager view (rate setup) and agent view (scan bills)">
+            ${innerRole === 'owner' ? '🛠 Manager → Switch to Agent' : '⚡ Agent → Switch to Manager'}
+          </button>` : ''}
+          <button class="bo-btn bo-btn-ghost" style="padding:6px 14px;font-size:12px;" onclick="closeToolView('${blobUrl}')">✕ Close</button>
+        </div>
       </div>
       <iframe id="csi-tool-iframe" src="${blobUrl}" style="flex:1;width:100%;border:0;background:#000;" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
     </div>`;
@@ -3308,9 +3325,24 @@ async function deleteTool(toolId, name){
   renderMainContent();
 }
 
+// Toggle between Manager view (rate management) and Agent view (bill scanner)
+// for users who have can_manage_rates. Persists in sessionStorage so it survives
+// the iframe rebuild but resets on page close.
+function toggleToolView(toolId){
+  const key = 'csi_tool_view_' + toolId;
+  const current = sessionStorage.getItem(key);
+  // If currently owner, switch to agent. Otherwise back to owner.
+  const next = current === 'agent' ? 'owner' : 'agent';
+  sessionStorage.setItem(key, next);
+  // Close current view and re-launch
+  closeToolView();
+  setTimeout(() => launchTool(toolId), 100);
+}
+
 window.renderToolBox = renderToolBox;
 window.launchTool = launchTool;
 window.closeToolView = closeToolView;
+window.toggleToolView = toggleToolView;
 window.openToolBuilder = openToolBuilder;
 window.saveTool = saveTool;
 window.deleteTool = deleteTool;
