@@ -1189,26 +1189,12 @@ footer{
   <div id="bo-sidebar-backdrop" onclick="closeBoSidebar()" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:998;backdrop-filter:blur(2px);"></div>
 
   <div style="display:flex;min-height:calc(100vh - 76px);">
-    <!-- Sidebar: programs + admin nav -->
-    <aside id="bo-sidebar" style="width:260px;background:#0D0D0D;border-right:1px solid rgba(255,255,255,0.06);padding:24px 0;flex-shrink:0;overflow-y:auto;">
-      <div style="padding:0 24px 14px;font-size:10.5px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:rgba(255,255,255,0.35);">My Programs</div>
-      <div id="bo-program-list"></div>
-
-      <div style="padding:24px 24px 14px 24px;margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);font-size:10.5px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:rgba(255,255,255,0.35);">Company</div>
-      <button class="bo-nav-item" id="nav-global-docs" onclick="boShowAdmin('global-docs')">📁 Company Library</button>
-      <button class="bo-nav-item" id="nav-my-forms" onclick="boShowAdmin('my-forms')">📋 My Forms</button>
-      <button class="bo-nav-item" id="nav-my-contracts" onclick="boShowAdmin('my-contracts')">📄 My Contracts</button>
-      <button class="bo-nav-item" id="nav-photo-checkin" onclick="boShowAdmin('photo-audit-checkin')" style="display:none;">📸 Daily Check-In</button>
-      <button class="bo-nav-item" id="nav-my-inventory" onclick="boShowAdmin('my-inventory')" style="display:none;">📦 My Inventory</button>
-
-      <div id="bo-admin-nav-wrap" style="display:none;">
-        <div style="padding:24px 24px 14px 24px;margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);font-size:10.5px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:rgba(255,255,255,0.35);">Administration</div>
-        <div id="bo-admin-nav"></div>
-      </div>
-
-      <div style="padding:24px 24px 14px 24px;margin-top:10px;border-top:1px solid rgba(255,255,255,0.06);font-size:10.5px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:rgba(255,255,255,0.35);">Account</div>
-      <button class="bo-nav-item" onclick="boShowView('profile')">👤 My Profile</button>
-      <button class="bo-nav-item" onclick="boShowView('credentials')">🔐 Change Password</button>
+    <!-- Sidebar: programs + admin nav (built dynamically as accordion by renderSidebar()) -->
+    <aside id="bo-sidebar" style="width:260px;background:#0D0D0D;border-right:1px solid rgba(255,255,255,0.06);padding:18px 0;flex-shrink:0;overflow-y:auto;">
+      <div id="bo-sidebar-content"></div>
+      <!-- Hidden buttons for show/hide visibility checks (kept for backward compat with renderSidebar logic) -->
+      <button id="nav-photo-checkin" onclick="boShowAdmin('photo-audit-checkin')" style="display:none;"></button>
+      <button id="nav-my-inventory" onclick="boShowAdmin('my-inventory')" style="display:none;"></button>
     </aside>
 
     <!-- Main content area -->
@@ -1238,6 +1224,90 @@ footer{
 .bo-program-tab:hover{background:rgba(255,255,255,0.04);color:#fff;}
 .bo-program-tab.active{background:rgba(255,255,255,0.05);border-left-color:var(--prog-color,#FF6B00);color:#fff;}
 .bo-prog-icon{font-size:18px;width:22px;text-align:center;}
+
+/* ─── Accordion sidebar sections ─────────────────────────────────────── */
+.bo-accord-section{
+  border-bottom:1px solid rgba(255,255,255,0.05);
+}
+.bo-accord-header{
+  width:100%;text-align:left;padding:14px 24px;
+  background:none;border:none;color:rgba(255,255,255,0.55);
+  font-family:'Outfit',sans-serif;font-size:11px;font-weight:700;
+  letter-spacing:2.5px;text-transform:uppercase;
+  cursor:pointer;transition:all 0.15s;
+  display:flex;align-items:center;justify-content:space-between;gap:8px;
+}
+.bo-accord-header:hover{background:rgba(255,255,255,0.04);color:#fff;}
+.bo-accord-header.open{color:#FF6B00;}
+.bo-accord-chevron{
+  font-size:10px;transition:transform 0.2s;color:rgba(255,255,255,0.4);
+  display:inline-block;
+}
+.bo-accord-header.open .bo-accord-chevron{transform:rotate(90deg);color:#FF6B00;}
+.bo-accord-body{
+  display:none;padding:6px 0 14px;
+  animation:slideDown 0.2s ease;
+}
+.bo-accord-body.open{display:block;}
+@keyframes slideDown{
+  from{opacity:0;transform:translateY(-6px);}
+  to{opacity:1;transform:translateY(0);}
+}
+
+/* ─── Program tiles inside the My Programs accordion ─────────────── */
+.bo-prog-tile{
+  display:flex;align-items:center;gap:12px;
+  margin:6px 14px;padding:12px 14px;
+  background:linear-gradient(135deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));
+  border:1px solid rgba(255,255,255,0.08);
+  border-radius:10px;
+  cursor:pointer;transition:all 0.18s;
+  font-family:'Outfit',sans-serif;
+  width:calc(100% - 28px);
+  text-align:left;
+}
+.bo-prog-tile:hover{
+  background:linear-gradient(135deg, rgba(255,255,255,0.06), rgba(255,255,255,0.02));
+  border-color:var(--prog-color, #FF6B00);
+  transform:translateY(-1px);
+  box-shadow:0 4px 14px rgba(0,0,0,0.4);
+}
+.bo-prog-tile.active{
+  background:linear-gradient(135deg, var(--prog-color)22, rgba(255,255,255,0.02));
+  border-color:var(--prog-color, #FF6B00);
+}
+.bo-prog-tile-icon{
+  font-size:24px;width:38px;height:38px;
+  border-radius:8px;
+  background:var(--prog-color, #FF6B00)18;
+  display:flex;align-items:center;justify-content:center;
+  flex-shrink:0;
+}
+.bo-prog-tile-name{
+  font-size:13.5px;font-weight:600;color:#fff;
+  line-height:1.2;
+}
+.bo-prog-tile-status{
+  font-size:10px;color:rgba(255,255,255,0.45);
+  letter-spacing:1px;text-transform:uppercase;font-weight:600;margin-top:2px;
+}
+
+/* ─── Mobile back button ─────────────────────────────────────────────── */
+.bo-back-btn{
+  display:none;
+  align-items:center;gap:6px;
+  background:rgba(255,107,0,0.1);
+  border:1px solid rgba(255,107,0,0.3);
+  color:#FF6B00;
+  padding:8px 14px;border-radius:50px;
+  font-family:'Outfit',sans-serif;font-size:12px;font-weight:600;
+  cursor:pointer;margin-bottom:14px;
+  transition:all 0.15s;
+}
+.bo-back-btn:hover{background:rgba(255,107,0,0.18);}
+@media (max-width: 700px){
+  .bo-back-btn.show-on-mobile{display:inline-flex;}
+}
 .bo-sub-tab{
   padding:10px 18px;border-radius:50px;border:1px solid rgba(255,255,255,0.1);
   background:rgba(255,255,255,0.03);color:rgba(255,255,255,0.6);
@@ -2121,7 +2191,8 @@ function enterBackOffice(){
 }
 
 function renderSidebar(){
-  const listEl = document.getElementById('bo-program-list');
+  const sidebarRoot = document.getElementById('bo-sidebar-content');
+  if(!sidebarRoot) return;
   const role = currentProfile.role;
   const isOwner = role === 'owner';
   const isAdmin = isOwner || role === 'admin';
@@ -2132,107 +2203,161 @@ function renderSidebar(){
   const userProgramIds = isAdmin ? allPrograms.map(p => p.id) : (currentProfile.programs || []);
   const visiblePrograms = allPrograms.filter(p => {
     if(!userProgramIds.includes(p.id)) return false;
-    // Hide archived from everyone (only Programs Manager shows them)
     if(p.status === 'archived') return false;
-    // Hide paused from non-owners (owner sees everything for management purposes)
     if(p.status === 'paused' && !isOwner) return false;
     return true;
   });
 
-  if(visiblePrograms.length === 0){
-    listEl.innerHTML = '<div style="padding:12px 24px;font-size:12.5px;color:rgba(255,255,255,0.4);line-height:1.6;">No programs assigned yet. Contact your manager or owner to gain access.</div>';
-  } else {
-    listEl.innerHTML = visiblePrograms.map(p => `
-      <button class="bo-program-tab ${activeProgramId === p.id && !activeAdminView ? 'active' : ''}"
-              style="--prog-color:${p.color};${p.status === 'paused' ? 'opacity:0.55;' : ''}"
-              onclick="boSelectProgram('${p.id}')"
-              ${p.status === 'paused' ? 'title="This program is paused — only owners can see it."' : ''}>
-        <span class="bo-prog-icon">${p.icon}</span>
-        <span>${p.name}${p.status === 'paused' ? ' ⏸' : ''}</span>
-      </button>
-    `).join('');
-  }
-
-  // Admin / management nav section
-  const adminWrap = document.getElementById('bo-admin-nav-wrap');
-  const adminNav = document.getElementById('bo-admin-nav');
-
-  // Nobody but manager+ sees admin nav
-  if(!isAdmin && !isManager && !isTeamLead){
-    adminWrap.style.display = 'none';
-    return;
-  }
-
-  adminWrap.style.display = 'block';
-  const navItems = [];
-
-  // Agents/Team management: visible to manager, team_lead, admin, owner
+  // Build admin nav items (only for those with admin/manager/team_lead access)
+  const adminNavItems = [];
   if(isAdmin || isManager || isTeamLead){
-    navItems.push({ id:'agents', label:'👥 Team' });
+    adminNavItems.push({ id:'agents', label:'👥 Team' });
   }
-
-  // Owner-only panel (locked from admins and below)
   if(isOwner){
-    navItems.push({ id:'owner-panel', label:'👑 Owner Panel' });
-    navItems.push({ id:'markets', label:'📍 Markets' });
-    navItems.push({ id:'stores', label:'🏪 Stores' });
-    navItems.push({ id:'contract-builder', label:'📄 Contract Builder' });
-    navItems.push({ id:'forms-admin', label:'📋 All Forms' });
-    navItems.push({ id:'applications', label:'📝 Applications' });
-    navItems.push({ id:'programs-admin', label:'🎯 Programs' });
+    adminNavItems.push({ id:'owner-panel', label:'👑 Owner Panel' });
+    adminNavItems.push({ id:'markets', label:'📍 Markets' });
+    adminNavItems.push({ id:'stores', label:'🏪 Stores' });
+    adminNavItems.push({ id:'contract-builder', label:'📄 Contract Builder' });
+    adminNavItems.push({ id:'forms-admin', label:'📋 All Forms' });
+    adminNavItems.push({ id:'applications', label:'📝 Applications' });
+    adminNavItems.push({ id:'programs-admin', label:'🎯 Programs' });
   } else if(isAdmin){
-    navItems.push({ id:'stores', label:'🏪 Stores' });
-    navItems.push({ id:'forms-admin', label:'📋 All Forms' });
-    navItems.push({ id:'applications', label:'📝 Applications' });
-    navItems.push({ id:'programs-admin', label:'🎯 Programs' });
+    adminNavItems.push({ id:'stores', label:'🏪 Stores' });
+    adminNavItems.push({ id:'forms-admin', label:'📋 All Forms' });
+    adminNavItems.push({ id:'applications', label:'📝 Applications' });
+    adminNavItems.push({ id:'programs-admin', label:'🎯 Programs' });
   }
-
-  // Inventory — owner, admin, OR users with is_inventory_manager flag, OR managers
   const canInventory = isOwner || isAdmin || isManager || currentProfile.is_inventory_manager;
-  if(canInventory){
-    navItems.push({ id:'inventory', label:'📦 Inventory' });
-  }
-
-  // Photo Audits review — owner, admin, manager, team_lead can see audits
+  if(canInventory){ adminNavItems.push({ id:'inventory', label:'📦 Inventory' }); }
   if(isOwner || isAdmin || isManager || isTeamLead){
-    navItems.push({ id:'photo-audits-review', label:'📸 Photo Audits' });
+    adminNavItems.push({ id:'photo-audits-review', label:'📸 Photo Audits' });
   }
-
-  // Payroll — owner, admin, OR users with is_payroll_manager flag
   if(isOwner || isAdmin || currentProfile.is_payroll_manager){
-    navItems.push({ id:'payroll', label:'💵 Payroll' });
+    adminNavItems.push({ id:'payroll', label:'💵 Payroll' });
   }
-
-  // Onboarding Center — owner OR users with master_center_access grant
   if(isOwner || currentProfile.has_master_center_access){
-    navItems.push({ id:'onboarding-master', label:'🎯 Onboarding Center' });
+    adminNavItems.push({ id:'onboarding-master', label:'🎯 Onboarding Center' });
   }
-
-  // Onboarding Status — owner + admin can view all in-progress agents + send packets
   if(isOwner || isAdmin){
-    navItems.push({ id:'onboarding-pending', label:'📋 Pending Onboarding' });
+    adminNavItems.push({ id:'onboarding-pending', label:'📋 Pending Onboarding' });
   }
 
-  // Show "Daily Check-In" only if agent is assigned to at least one store
-  // Show "My Inventory" only if agent has any inventory assigned
-  // (Both default hidden in HTML; we toggle here)
-  const checkinBtn = document.getElementById('nav-photo-checkin');
-  const myInvBtn = document.getElementById('nav-my-inventory');
-  if(checkinBtn || myInvBtn){
-    Promise.all([
-      sb.from('agent_stores').select('id', { count:'exact', head:true }).eq('user_id', currentProfile.id),
-      sb.from('inventory_items').select('id', { count:'exact', head:true }).eq('assigned_to_user', currentProfile.id).eq('status', 'assigned'),
-    ]).then(([{ count: storeCount }, { count: invCount }]) => {
-      if(checkinBtn) checkinBtn.style.display = (storeCount && storeCount > 0) ? 'flex' : 'none';
-      if(myInvBtn) myInvBtn.style.display = (invCount && invCount > 0) ? 'flex' : 'none';
-    }).catch(() => {});
+  // Determine which section should be open by default — the one matching current activeView
+  // OR fall back to "programs" section if user has any programs.
+  // Persist user's last expanded section in sessionStorage.
+  let openSection = sessionStorage.getItem('bo_open_section');
+  if(activeAdminView){
+    // If currently viewing an admin item, open the section that contains it
+    const inCompany = ['global-docs','my-forms','my-contracts','photo-audit-checkin','my-inventory'].includes(activeAdminView);
+    const inAccount = ['profile','credentials'].includes(activeAdminView);
+    if(inCompany) openSection = 'company';
+    else if(inAccount) openSection = 'account';
+    else if(adminNavItems.some(x => x.id === activeAdminView)) openSection = 'admin';
+  } else if(activeProgramId){
+    openSection = 'programs';
   }
+  if(!openSection) openSection = visiblePrograms.length > 0 ? 'programs' : 'company';
 
-  adminNav.innerHTML = navItems.map(it => `
+  // Helper to fetch async-shown buttons (Daily Check-In, My Inventory)
+  let showCheckin = false, showMyInv = false;
+  // We'll fill these in via async query below. For now build both as not-yet-shown.
+
+  const sectionHtml = (id, title, bodyHtml) => `
+    <div class="bo-accord-section">
+      <button class="bo-accord-header ${openSection === id ? 'open' : ''}" onclick="boToggleAccord('${id}')">
+        <span>${title}</span>
+        <span class="bo-accord-chevron">▶</span>
+      </button>
+      <div class="bo-accord-body ${openSection === id ? 'open' : ''}" id="bo-accord-body-${id}">
+        ${bodyHtml}
+      </div>
+    </div>`;
+
+  // 1. MY PROGRAMS section — tile cards
+  const programsBody = visiblePrograms.length === 0
+    ? '<div style="padding:12px 24px;font-size:12px;color:rgba(255,255,255,0.4);line-height:1.55;">No programs assigned yet. Contact your manager.</div>'
+    : visiblePrograms.map(p => `
+        <button class="bo-prog-tile ${activeProgramId === p.id && !activeAdminView ? 'active' : ''}"
+                style="--prog-color:${p.color};${p.status === 'paused' ? 'opacity:0.6;' : ''}"
+                onclick="boSelectProgram('${p.id}')">
+          <div class="bo-prog-tile-icon">${p.icon}</div>
+          <div style="flex:1;min-width:0;">
+            <div class="bo-prog-tile-name">${escapeHtml(p.name)}</div>
+            ${p.status === 'paused' ? '<div class="bo-prog-tile-status">⏸ paused</div>' : ''}
+          </div>
+        </button>
+      `).join('');
+
+  // 2. COMPANY section — common nav for all users
+  const companyItems = [
+    { id:'global-docs', label:'📁 Company Library', show:true },
+    { id:'my-forms', label:'📋 My Forms', show:true },
+    { id:'my-contracts', label:'📄 My Contracts', show:true },
+    { id:'photo-audit-checkin', label:'📸 Daily Check-In', show:'async-checkin' },
+    { id:'my-inventory', label:'📦 My Inventory', show:'async-myinv' }
+  ];
+  const companyBody = companyItems.map(it => `
     <button class="bo-nav-item ${activeAdminView === it.id ? 'active' : ''}"
+            data-conditional="${it.show === 'async-checkin' ? 'checkin' : it.show === 'async-myinv' ? 'myinv' : ''}"
+            ${(it.show === 'async-checkin' || it.show === 'async-myinv') ? 'style="display:none;"' : ''}
             onclick="boShowAdmin('${it.id}')">${it.label}</button>
   `).join('');
+
+  // 3. ADMINISTRATION section
+  const adminBody = adminNavItems.length === 0
+    ? ''
+    : adminNavItems.map(it => `
+        <button class="bo-nav-item ${activeAdminView === it.id ? 'active' : ''}"
+                onclick="boShowAdmin('${it.id}')">${it.label}</button>
+      `).join('');
+
+  // 4. ACCOUNT section
+  const accountBody = `
+    <button class="bo-nav-item ${activeAdminView === 'profile' ? 'active' : ''}" onclick="boShowView('profile')">👤 My Profile</button>
+    <button class="bo-nav-item ${activeAdminView === 'credentials' ? 'active' : ''}" onclick="boShowView('credentials')">🔐 Change Password</button>`;
+
+  // Compose
+  let html = '';
+  html += sectionHtml('programs', 'My Programs', programsBody);
+  html += sectionHtml('company',  'Company',     companyBody);
+  if(adminNavItems.length > 0){
+    html += sectionHtml('admin', isOwner ? 'Owner Panel' : 'Administration', adminBody);
+  }
+  html += sectionHtml('account',  'Account',     accountBody);
+
+  sidebarRoot.innerHTML = html;
+
+  // Async hydrate the conditional buttons
+  Promise.all([
+    sb.from('agent_stores').select('id', { count:'exact', head:true }).eq('user_id', currentProfile.id),
+    sb.from('inventory_items').select('id', { count:'exact', head:true }).eq('assigned_to_user', currentProfile.id).eq('status', 'assigned')
+  ]).then(([{ count: storeCount }, { count: invCount }]) => {
+    document.querySelectorAll('[data-conditional="checkin"]').forEach(b => { b.style.display = (storeCount && storeCount > 0) ? 'flex' : 'none'; });
+    document.querySelectorAll('[data-conditional="myinv"]').forEach(b => { b.style.display = (invCount && invCount > 0) ? 'flex' : 'none'; });
+  }).catch(() => {});
 }
+
+// Toggle which accordion section is open. Only one open at a time.
+function boToggleAccord(sectionId){
+  const allHeaders = document.querySelectorAll('.bo-accord-header');
+  const allBodies = document.querySelectorAll('.bo-accord-body');
+  // Find the body for this section. If it's already open, close all (collapsed view).
+  const targetBody = document.getElementById('bo-accord-body-' + sectionId);
+  const wasOpen = targetBody && targetBody.classList.contains('open');
+  // Close all
+  allHeaders.forEach(h => h.classList.remove('open'));
+  allBodies.forEach(b => b.classList.remove('open'));
+  if(!wasOpen){
+    // Open the clicked one
+    if(targetBody) targetBody.classList.add('open');
+    const targetHeader = document.querySelector(`[onclick="boToggleAccord('${sectionId}')"]`);
+    if(targetHeader) targetHeader.classList.add('open');
+    sessionStorage.setItem('bo_open_section', sectionId);
+  } else {
+    sessionStorage.removeItem('bo_open_section');
+  }
+}
+window.boToggleAccord = boToggleAccord;
 
 function boSelectProgram(programId){
   activeProgramId = programId;
@@ -2397,6 +2522,7 @@ function renderProgramView(el){
   ];
 
   el.innerHTML = `
+    ${activeSubView !== 'dashboard' ? `<button class="bo-back-btn show-on-mobile" onclick="boShowView('dashboard')">← Back to Dashboard</button>` : ''}
     <div style="margin-bottom:28px;">
       <div style="font-size:11px;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:${prog.color};margin-bottom:8px;">${prog.icon} Back Office</div>
       <h1 style="font-family:'Bebas Neue',sans-serif;font-size:56px;color:#fff;line-height:1;">${prog.name}</h1>
