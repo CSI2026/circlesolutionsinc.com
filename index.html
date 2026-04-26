@@ -746,7 +746,17 @@ footer{
 }
 
 @media(max-width:768px){
-  nav{padding:0 16px !important;} .nav-links{display:none;}
+  nav{padding:0 16px !important;justify-content:flex-start !important;gap:10px;} .nav-links{display:none;}
+  /* Hide the invisible logo placeholder on mobile so Agent Portal can take top-left */
+  nav > div:first-child{display:none;}
+  /* Agent Portal becomes the prominent top-left element on mobile */
+  .nav-cta-portal{
+    margin-left:0 !important;
+    font-size:14px !important;
+    padding:11px 22px !important;
+    font-weight:700 !important;
+    box-shadow:0 4px 14px rgba(255,107,0,0.35);
+  }
   /* Sub-page nav cleanup for mobile */
   .subpage-nav-links{display:none !important;}
   .subpage-nav-links.mobile-show{display:flex !important;flex-direction:column;position:absolute;top:76px;right:0;background:rgba(0,0,0,0.98);padding:16px;min-width:180px;border:1px solid rgba(255,255,255,0.1);border-top:none;}
@@ -785,13 +795,13 @@ footer{
 
 <!-- NAV -->
 <nav id="main-nav">
-  <div onclick="showPage(\'home\')" style="cursor:pointer;width:40px;height:40px;"></div>
+  <div onclick="showPage('home')" style="cursor:pointer;width:40px;height:40px;"></div>
   <div class="nav-links">
     <button class="nav-link" onclick="showPage('about-page')">About</button>
     <button class="nav-link" onclick="showPage('programs-page')">Programs</button>
     <button class="nav-link" onclick="showPage('careers-page')">Careers</button>
-    <button class="nav-cta" onclick="showPage('login')">Agent Portal →</button>
   </div>
+  <button class="nav-cta nav-cta-portal" onclick="showPage('login')">Agent Portal →</button>
 </nav>
 
 <!-- ════════════ HOME ════════════ -->
@@ -2304,6 +2314,7 @@ function renderProgramView(el){
     { id:'contracts',     label:'📄 Contracts' },
     { id:'codes',         label:'🔐 Codes' },
     { id:'forms',         label:'📋 Forms' },
+    { id:'toolbox',       label:'🧰 Tool Box' },
     { id:'leaderboard',   label:'🏆 Leaderboard' },
     { id:'announcements', label:'📢 Announcements' }
   ];
@@ -2348,6 +2359,7 @@ function renderProgramView(el){
   else if(activeSubView === 'contracts')     renderContracts(sub, prog, canManage);
   else if(activeSubView === 'codes')         renderCodes(sub, prog, canManage);
   else if(activeSubView === 'forms')         renderFormsTab(sub, prog, canManage);
+  else if(activeSubView === 'toolbox')       renderToolBox(sub, prog, canManage);
   else if(activeSubView === 'leaderboard')   renderLeaderboard(sub, prog);
   else if(activeSubView === 'announcements') renderAnnouncements(sub, prog, canManage);
 }
@@ -2911,6 +2923,384 @@ function lbShiftPeriod(direction){
 }
 
 // ─── Owner-only config modal ───
+
+// ═══════════════════════════════════════════════════════════════════════
+// TOOL BOX — per-program embedded tools (e.g. CSI Bill Scanner)
+// ═══════════════════════════════════════════════════════════════════════
+async function renderToolBox(el, prog, canManage){
+  const isOwner = currentProfile.role === 'owner';
+  const isAdmin = isOwner || currentProfile.role === 'admin';
+  const canBuild = isOwner || isAdmin || currentProfile.is_tool_builder;
+
+  el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading tools…</div>';
+
+  // Fetch tools for this program (RLS will filter to ones the user can see)
+  const { data: tools, error } = await sb.from('tools')
+    .select('*')
+    .or(`program_id.eq.${prog.id},program_id.is.null`)
+    .eq('active', true)
+    .order('sort_order', { ascending: true });
+
+  if(error){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Error loading tools: ' + escapeHtml(error.message) + '</div>';
+    return;
+  }
+
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px;flex-wrap:wrap;gap:12px;">
+      <div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:36px;color:#fff;letter-spacing:1px;line-height:1;">🧰 Tool Box</div>
+        <p style="font-size:13.5px;color:rgba(255,255,255,0.55);margin-top:6px;">Tools available for ${escapeHtml(prog.name)} agents.</p>
+      </div>
+      ${canBuild ? `<button class="bo-btn bo-btn-primary" onclick="openToolBuilder('${prog.id}')">+ Add Tool</button>` : ''}
+    </div>
+
+    ${(tools || []).length === 0 ? `
+      <div class="bo-card" style="text-align:center;padding:50px 30px;">
+        <div style="font-size:54px;margin-bottom:12px;">🧰</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#fff;letter-spacing:1px;margin-bottom:6px;">No tools yet</div>
+        <div style="color:rgba(255,255,255,0.5);font-size:13px;max-width:380px;margin:0 auto;">${canBuild ? 'Click <strong>+ Add Tool</strong> to put one in here.' : 'Check back soon — your manager will add tools as they become available.'}</div>
+      </div>
+    ` : `
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px;">
+        ${tools.map(t => renderToolCard(t, prog, canBuild)).join('')}
+      </div>
+    `}`;
+}
+
+function renderToolCard(t, prog, canBuild){
+  const color = t.color || prog.color || '#FF6B00';
+  return `
+    <div class="bo-card" style="padding:0;overflow:hidden;cursor:pointer;border:1px solid ${color}33;transition:transform 0.2s, box-shadow 0.2s, border-color 0.2s;" onclick="launchTool('${t.id}')" onmouseover="this.style.transform='translateY(-3px)';this.style.boxShadow='0 8px 24px ${color}33';this.style.borderColor='${color}88';" onmouseout="this.style.transform='';this.style.boxShadow='';this.style.borderColor='${color}33';">
+      <div style="background:linear-gradient(135deg,${color}22,${color}08);padding:24px 20px;text-align:center;border-bottom:1px solid ${color}22;">
+        <div style="font-size:48px;line-height:1;margin-bottom:4px;">${t.icon || '🧰'}</div>
+      </div>
+      <div style="padding:14px 16px;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#fff;letter-spacing:0.5px;line-height:1.1;">${escapeHtml(t.name)}</div>
+        ${t.description ? `<div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-top:4px;line-height:1.4;">${escapeHtml(t.description)}</div>` : ''}
+        ${canBuild ? `<div style="margin-top:10px;display:flex;gap:6px;" onclick="event.stopPropagation();">
+          <button class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:10.5px;flex:1;" onclick="openToolBuilder('${prog.id}','${t.id}')">✏️ Edit</button>
+          <button class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:10.5px;color:#F87171;border-color:rgba(248,113,113,0.3);" onclick="deleteTool('${t.id}','${escapeHtml(t.name).replace(/'/g, '')}')">🗑️</button>
+        </div>` : ''}
+      </div>
+    </div>`;
+}
+
+// Launch a tool in a fullscreen sandboxed iframe
+async function launchTool(toolId){
+  const { data: tool, error } = await sb.from('tools').select('*').eq('id', toolId).single();
+  if(error || !tool){ alert('Could not load this tool: ' + (error?.message || 'not found')); return; }
+
+  // Determine the user's role inside the tool. Owner+admin+can_manage_rates → owner mode.
+  // Everyone else → agent mode.
+  const isOwner = currentProfile.role === 'owner';
+  const isAdmin = currentProfile.role === 'admin';
+  const canManageRates = isOwner || isAdmin || currentProfile.can_manage_rates === true;
+  const innerRole = canManageRates ? 'owner' : 'agent';
+  const userName = currentProfile.full_name || currentProfile.email || 'User';
+  const userEmail = currentProfile.email || '';
+
+  // Build the iframe HTML. Inject:
+  //   1. sessionStorage csi_sess so login screen is bypassed
+  //   2. window.parent reference for /api/scan-bill re-routing
+  //   3. CSS to hide the login screen and (for non-owners) the agent management tab
+  //   4. A script that auto-shows the right portal
+  //   5. A subtle watermark
+  //   6. Right-click + F12 + Ctrl+S/U/P keyboard blocks
+  const injectedHead = `
+    <style id="csi-toolbox-injected">
+      /* Hide login screen entirely — we're auto-logged in */
+      #s-login{display:none !important;}
+      /* Hide the tool's own Agent management tab — back office is source of truth */
+      .onav-btn[onclick*="'agents'"]{display:none !important;}
+      #ot-agents{display:none !important;}
+      /* Watermark — bottom right, low opacity */
+      body::after{
+        content: "${userEmail.replace(/"/g, '\\"')} · CSI Tool · ${new Date().toLocaleDateString().replace(/"/g, '\\"')}";
+        position: fixed;
+        bottom: 6px;
+        right: 8px;
+        font-size: 9px;
+        color: rgba(255,255,255,0.18);
+        font-family: monospace;
+        pointer-events: none;
+        z-index: 9999;
+        letter-spacing: 0.5px;
+      }
+    </style>
+  `;
+
+  const injectedBodyEnd = `
+    <script>
+      // Auto-login as the back office user
+      (function(){
+        const sess = ${JSON.stringify({ role: innerRole, name: userName, id: 'bo-' + currentProfile.id })};
+        sessionStorage.setItem("csi_sess", JSON.stringify(sess));
+
+        // Wait for tool's main.js to have registered handlers, then route to portal
+        function tryShow(){
+          if(typeof showPortal === 'function'){
+            try { showPortal(sess); } catch(e){ console.warn('showPortal failed', e); }
+          } else {
+            setTimeout(tryShow, 30);
+          }
+        }
+        if(document.readyState === 'loading'){
+          document.addEventListener('DOMContentLoaded', tryShow);
+        } else { tryShow(); }
+
+        // Override logout — instead of clearing session, ask parent to close tool
+        window.logout = function(){
+          if(window.parent !== window){
+            window.parent.postMessage({type:'csi-tool-close'}, '*');
+          }
+        };
+
+        // Re-route /api/scan-bill to Supabase Edge Function via parent window
+        const _origFetch = window.fetch.bind(window);
+        window.fetch = function(input, init){
+          const url = (typeof input === 'string') ? input : (input && input.url) || '';
+          if(url === '/api/scan-bill' || url.endsWith('/api/scan-bill')){
+            // Send to parent for handling (parent has Supabase client + session token)
+            return new Promise((resolve, reject) => {
+              const reqId = 'r' + Date.now() + Math.random();
+              const handler = (ev) => {
+                if(!ev.data || ev.data.type !== 'csi-scan-bill-resp' || ev.data.reqId !== reqId) return;
+                window.removeEventListener('message', handler);
+                if(ev.data.error){
+                  resolve(new Response(JSON.stringify({error: ev.data.error}), {status: 500, headers:{'Content-Type':'application/json'}}));
+                } else {
+                  resolve(new Response(JSON.stringify(ev.data.payload), {status: 200, headers:{'Content-Type':'application/json'}}));
+                }
+              };
+              window.addEventListener('message', handler);
+              try {
+                const body = init && init.body ? JSON.parse(init.body) : {};
+                window.parent.postMessage({type:'csi-scan-bill-req', reqId, imageData: body.imageData}, '*');
+                // Timeout after 60s
+                setTimeout(() => {
+                  window.removeEventListener('message', handler);
+                  resolve(new Response(JSON.stringify({error:'OCR timed out. Try again or use Manual Entry.'}), {status:500, headers:{'Content-Type':'application/json'}}));
+                }, 60000);
+              } catch(e){
+                window.removeEventListener('message', handler);
+                reject(e);
+              }
+            });
+          }
+          return _origFetch(input, init);
+        };
+
+        // Disable right-click + common dev shortcuts
+        document.addEventListener('contextmenu', e => e.preventDefault());
+        document.addEventListener('keydown', function(e){
+          if(e.key === 'F12') e.preventDefault();
+          if((e.ctrlKey || e.metaKey) && ['s','u','p'].includes(e.key.toLowerCase())) e.preventDefault();
+          if((e.ctrlKey || e.metaKey) && e.shiftKey && ['i','j','c'].includes(e.key.toLowerCase())) e.preventDefault();
+        });
+      })();
+    </script>
+  `;
+
+  // Splice injected head + body content into the tool's HTML
+  let html = tool.html_content || '';
+  if(html.includes('</head>')){
+    html = html.replace('</head>', injectedHead + '</head>');
+  } else {
+    html = injectedHead + html;
+  }
+  if(html.includes('</body>')){
+    html = html.replace('</body>', injectedBodyEnd + '</body>');
+  } else {
+    html = html + injectedBodyEnd;
+  }
+
+  // Build a Blob URL — same-origin sandbox so iframe can use sessionStorage
+  const blob = new Blob([html], { type: 'text/html' });
+  const blobUrl = URL.createObjectURL(blob);
+
+  // Show modal full-screen with iframe
+  const modal = document.getElementById('modal-backdrop');
+  const box = document.getElementById('modal-box');
+  box.style.maxWidth = '100%';
+  box.style.width = '100%';
+  box.style.height = '100vh';
+  box.style.maxHeight = '100vh';
+  box.style.padding = '0';
+  box.style.borderRadius = '0';
+  box.innerHTML = `
+    <div style="display:flex;flex-direction:column;height:100vh;background:#000;">
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 14px;background:linear-gradient(135deg,#0a0a0a,#141414);border-bottom:1px solid rgba(255,255,255,0.08);flex-shrink:0;">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div style="font-size:20px;">${tool.icon || '🧰'}</div>
+          <div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#fff;letter-spacing:1px;line-height:1;">${escapeHtml(tool.name)}</div>
+            <div style="font-size:10px;color:rgba(255,255,255,0.4);margin-top:2px;">CSI Tool · ${innerRole === 'owner' ? 'Manager view' : 'Agent view'}</div>
+          </div>
+        </div>
+        <button class="bo-btn bo-btn-ghost" style="padding:6px 14px;font-size:12px;" onclick="closeToolView('${blobUrl}')">✕ Close</button>
+      </div>
+      <iframe id="csi-tool-iframe" src="${blobUrl}" style="flex:1;width:100%;border:0;background:#000;" sandbox="allow-scripts allow-same-origin allow-forms allow-popups"></iframe>
+    </div>`;
+  modal.style.display = 'flex';
+
+  // Listen for postMessages from iframe
+  if(!window._csiToolMsgHandler){
+    window._csiToolMsgHandler = async (ev) => {
+      if(!ev.data || !ev.data.type) return;
+      if(ev.data.type === 'csi-tool-close'){
+        closeToolView();
+      } else if(ev.data.type === 'csi-scan-bill-req'){
+        // Forward to Supabase Edge Function
+        try {
+          const { data, error } = await sb.functions.invoke('scan-bill', { body: { imageData: ev.data.imageData } });
+          const iframe = document.getElementById('csi-tool-iframe');
+          if(iframe && iframe.contentWindow){
+            if(error){
+              iframe.contentWindow.postMessage({ type:'csi-scan-bill-resp', reqId: ev.data.reqId, error: error.message || 'Edge function error' }, '*');
+            } else if(data && data.error){
+              iframe.contentWindow.postMessage({ type:'csi-scan-bill-resp', reqId: ev.data.reqId, error: data.error }, '*');
+            } else {
+              iframe.contentWindow.postMessage({ type:'csi-scan-bill-resp', reqId: ev.data.reqId, payload: data }, '*');
+            }
+          }
+        } catch(e){
+          const iframe = document.getElementById('csi-tool-iframe');
+          if(iframe && iframe.contentWindow){
+            iframe.contentWindow.postMessage({ type:'csi-scan-bill-resp', reqId: ev.data.reqId, error: e.message || 'OCR failed' }, '*');
+          }
+        }
+      }
+    };
+    window.addEventListener('message', window._csiToolMsgHandler);
+  }
+}
+
+function closeToolView(blobUrl){
+  if(blobUrl){ try { URL.revokeObjectURL(blobUrl); } catch(_){} }
+  const box = document.getElementById('modal-box');
+  box.style.padding = '';
+  box.style.borderRadius = '';
+  box.style.height = '';
+  box.style.maxHeight = '';
+  box.style.width = '';
+  closeAllModals();
+}
+
+// Tool Builder modal — owner/admin/tool_builder add or edit a tool
+async function openToolBuilder(programId, existingId){
+  const isEdit = !!existingId;
+  let t = {
+    id: '',
+    name: '',
+    description: '',
+    icon: '🧰',
+    color: '#FF6B00',
+    program_id: programId,
+    allowed_roles: ['agent','team_lead','manager'],
+    html_content: '',
+    sort_order: 0,
+    active: true
+  };
+  if(isEdit){
+    const { data } = await sb.from('tools').select('*').eq('id', existingId).single();
+    if(data) t = { ...t, ...data };
+  }
+
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#fff;margin-bottom:14px;letter-spacing:1px;">${isEdit ? 'Edit' : 'New'} Tool</h2>
+
+    <div style="display:grid;grid-template-columns:80px 1fr;gap:10px;">
+      <div class="form-group">
+        <label class="form-label">Icon</label>
+        <input id="tb-icon" class="form-input" maxlength="3" value="${escapeHtml(t.icon || '🧰')}" style="text-align:center;font-size:20px;"/>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Name *</label>
+        <input id="tb-name" class="form-input" value="${escapeHtml(t.name)}" placeholder="e.g. CSI Bill Scanner"/>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Short description</label>
+      <input id="tb-desc" class="form-input" value="${escapeHtml(t.description || '')}" placeholder="What does this tool do?"/>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Allowed roles</label>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;">
+        ${['agent','team_lead','manager'].map(r => `
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:rgba(255,255,255,0.8);cursor:pointer;">
+            <input type="checkbox" class="tb-role" value="${r}" ${(t.allowed_roles || []).includes(r) ? 'checked' : ''} style="width:16px;height:16px;accent-color:#FF6B00;"/>
+            ${roleLabel(r)}
+          </label>
+        `).join('')}
+      </div>
+      <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">Owner + admin can always access regardless of these checkboxes.</div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">HTML content *</label>
+      <textarea id="tb-html" class="form-input" rows="14" style="font-family:monospace;font-size:11px;line-height:1.4;" placeholder="<!DOCTYPE html>...">${escapeHtml(t.html_content || '')}</textarea>
+      <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">Paste a complete HTML document. CSS and JavaScript can be inline. The tool runs in a sandboxed iframe.</div>
+    </div>
+
+    <div style="display:flex;gap:10px;margin-top:14px;">
+      <button class="bo-btn bo-btn-primary" onclick="saveTool(${isEdit ? `'${t.id}'` : 'null'},'${programId}')">${isEdit ? 'Save' : 'Create Tool'}</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="tb-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-box').style.maxWidth = '720px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function saveTool(existingId, programId){
+  const name = document.getElementById('tb-name').value.trim();
+  const html = document.getElementById('tb-html').value;
+  const msg = document.getElementById('tb-msg');
+  if(!name){ msg.innerHTML = '<span style="color:#F87171;">Name required.</span>'; return; }
+  if(!html.trim()){ msg.innerHTML = '<span style="color:#F87171;">HTML content required.</span>'; return; }
+
+  const allowed = Array.from(document.querySelectorAll('.tb-role:checked')).map(cb => cb.value);
+  if(allowed.length === 0){ msg.innerHTML = '<span style="color:#F87171;">Pick at least one allowed role.</span>'; return; }
+
+  const payload = {
+    name,
+    description: document.getElementById('tb-desc').value.trim() || null,
+    icon: document.getElementById('tb-icon').value.trim() || '🧰',
+    program_id: programId,
+    allowed_roles: allowed,
+    html_content: html,
+    updated_at: new Date().toISOString()
+  };
+
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Saving…</span>';
+  if(existingId){
+    const { error } = await sb.from('tools').update(payload).eq('id', existingId);
+    if(error){ msg.innerHTML = '<span style="color:#F87171;">' + error.message + '</span>'; return; }
+  } else {
+    payload.created_by = currentProfile.id;
+    const { error } = await sb.from('tools').insert(payload);
+    if(error){ msg.innerHTML = '<span style="color:#F87171;">' + error.message + '</span>'; return; }
+  }
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Saved.</span>';
+  setTimeout(() => { closeAllModals(); renderMainContent(); }, 600);
+}
+
+async function deleteTool(toolId, name){
+  if(!confirm('Delete tool "' + name + '"? This cannot be undone.')) return;
+  const { error } = await sb.from('tools').delete().eq('id', toolId);
+  if(error){ alert('Error: ' + error.message); return; }
+  renderMainContent();
+}
+
+window.renderToolBox = renderToolBox;
+window.launchTool = launchTool;
+window.closeToolView = closeToolView;
+window.openToolBuilder = openToolBuilder;
+window.saveTool = saveTool;
+window.deleteTool = deleteTool;
+
 
 // ─── Announcements ───
 async function renderAnnouncements(el, prog, canManage){
@@ -3743,8 +4133,24 @@ function renderAgentModalUI(existing, editId, availablePrograms, isOwner, isAdmi
           <div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-top:2px;line-height:1.5;">Full access to the Payroll dashboard. Can enter sales counts, lock/unlock agents, view all hours. Bypasses account-locked state. Sees the 💵 Payroll nav item.</div>
         </div>
       </label>
+
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:10px 12px;background:rgba(255,200,0,0.05);border:1px solid rgba(255,200,0,0.2);border-radius:8px;margin-top:8px;">
+        <input type="checkbox" id="ag-rate-mgr" ${e.can_manage_rates ? 'checked' : ''} style="width:18px;height:18px;accent-color:#FFC800;flex-shrink:0;"/>
+        <div style="flex:1;">
+          <div style="font-weight:600;color:#FFC800;font-size:14px;">⚡ Rate Manager (CSI Bill Scanner)</div>
+          <div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-top:2px;line-height:1.5;">Sees the Owner Portal tab inside the CSI Bill Scanner tool — can update daily Reliant rates. Grant to a trusted MM who handles rate updates each day.</div>
+        </div>
+      </label>
+
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:10px 12px;background:rgba(168,85,247,0.05);border:1px solid rgba(168,85,247,0.2);border-radius:8px;margin-top:8px;">
+        <input type="checkbox" id="ag-tool-builder" ${e.is_tool_builder ? 'checked' : ''} style="width:18px;height:18px;accent-color:#A855F7;flex-shrink:0;"/>
+        <div style="flex:1;">
+          <div style="font-weight:600;color:#A855F7;font-size:14px;">🧰 Tool Builder</div>
+          <div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-top:2px;line-height:1.5;">Can add, edit, and remove tools in the Tool Box for any program. Grant to someone who builds custom HTML tools for the team.</div>
+        </div>
+      </label>
     </div>
-    ` : '<input type="hidden" id="ag-inv-mgr" value="' + (e.is_inventory_manager ? 'on' : '') + '"/><input type="hidden" id="ag-payroll-mgr" value="' + (e.is_payroll_manager ? 'on' : '') + '"/>'}
+    ` : '<input type="hidden" id="ag-inv-mgr" value="' + (e.is_inventory_manager ? 'on' : '') + '"/><input type="hidden" id="ag-payroll-mgr" value="' + (e.is_payroll_manager ? 'on' : '') + '"/><input type="hidden" id="ag-rate-mgr" value="' + (e.can_manage_rates ? 'on' : '') + '"/><input type="hidden" id="ag-tool-builder" value="' + (e.is_tool_builder ? 'on' : '') + '"/>'}
 
     <div class="form-group">
       <label class="form-label">Programs — check all that this user should access</label>
@@ -3859,6 +4265,10 @@ async function saveAgent(editId){
   const is_inventory_manager = invMgrEl ? (invMgrEl.type === 'checkbox' ? invMgrEl.checked : invMgrEl.value === 'on') : false;
   const payMgrEl = document.getElementById('ag-payroll-mgr');
   const is_payroll_manager = payMgrEl ? (payMgrEl.type === 'checkbox' ? payMgrEl.checked : payMgrEl.value === 'on') : false;
+  const rateMgrEl = document.getElementById('ag-rate-mgr');
+  const can_manage_rates = rateMgrEl ? (rateMgrEl.type === 'checkbox' ? rateMgrEl.checked : rateMgrEl.value === 'on') : false;
+  const toolBuilderEl = document.getElementById('ag-tool-builder');
+  const is_tool_builder = toolBuilderEl ? (toolBuilderEl.type === 'checkbox' ? toolBuilderEl.checked : toolBuilderEl.value === 'on') : false;
   const msg = document.getElementById('ag-msg');
 
   if(!full_name || !email){ msg.innerHTML = '<span style="color:#F87171;">Name and email are required.</span>'; return; }
@@ -3869,11 +4279,13 @@ async function saveAgent(editId){
       phone_carrier, sms_opt_in,
       updated_at: new Date().toISOString()
     };
-    // Only owners can change can_host_meetings + is_inventory_manager + is_payroll_manager
+    // Only owners can change can_host_meetings + is_inventory_manager + is_payroll_manager + can_manage_rates + is_tool_builder
     if(currentProfile.role === 'owner'){
       updateData.can_host_meetings = can_host_meetings;
       updateData.is_inventory_manager = is_inventory_manager;
       updateData.is_payroll_manager = is_payroll_manager;
+      updateData.can_manage_rates = can_manage_rates;
+      updateData.is_tool_builder = is_tool_builder;
     }
     const { error } = await sb.from('profiles').update(updateData).eq('id', editId);
     if(error){ msg.innerHTML = '<span style="color:#F87171;">'+error.message+'</span>'; return; }
