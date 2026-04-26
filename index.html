@@ -3039,7 +3039,7 @@ async function launchTool(toolId){
   `;
 
   const injectedBodyEnd = `
-    <script>
+    <` + `script>
       // Auto-login as the back office user
       (function(){
         const sess = ${JSON.stringify({ role: innerRole, name: userName, id: 'bo-' + currentProfile.id })};
@@ -3107,7 +3107,7 @@ async function launchTool(toolId){
           if((e.ctrlKey || e.metaKey) && e.shiftKey && ['i','j','c'].includes(e.key.toLowerCase())) e.preventDefault();
         });
       })();
-    </script>
+    <` + `/script>
   `;
 
   // Splice injected head + body content into the tool's HTML
