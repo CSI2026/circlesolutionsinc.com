@@ -1161,7 +1161,8 @@ footer{
 <div id="backoffice" class="page">
   <div class="portal-header">
     <div style="display:flex;align-items:center;gap:16px;">
-      <div onclick="showPage('home')" style="cursor:pointer;"><span style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:2px;">CIRCLE SOLUTIONS</span></div>
+      <button id="bo-hamburger" class="bo-hamburger" onclick="toggleBoSidebar()" aria-label="Open menu" style="display:none;background:none;border:none;color:#fff;font-size:24px;cursor:pointer;padding:6px 10px;border-radius:8px;line-height:1;flex-shrink:0;">☰</button>
+      <div onclick="showPage('home')" style="cursor:pointer;"><span class="bo-brand-text" style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:2px;">CIRCLE SOLUTIONS</span></div>
       <div id="bo-role-badge" class="role-badge role-agent" style="padding:5px 13px;font-size:11px;"></div>
     </div>
     <div style="display:flex;align-items:center;gap:14px;">
@@ -1183,6 +1184,9 @@ footer{
     </div>
     <div id="bo-notifications-list" style="flex:1;overflow-y:auto;max-height:520px;"></div>
   </div>
+
+  <!-- Mobile sidebar backdrop — covers content when drawer is open -->
+  <div id="bo-sidebar-backdrop" onclick="closeBoSidebar()" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:998;backdrop-filter:blur(2px);"></div>
 
   <div style="display:flex;min-height:calc(100vh - 76px);">
     <!-- Sidebar: programs + admin nav -->
@@ -1264,9 +1268,39 @@ footer{
   #bo-sidebar{width:200px;}
 }
 @media (max-width: 700px){
+  /* Show hamburger button on mobile */
+  .bo-hamburger{display:flex !important;align-items:center;justify-content:center;}
+  /* Shrink brand text to fit topbar */
+  .bo-brand-text{font-size:16px !important;letter-spacing:1.5px !important;}
+  /* Tighten topbar padding */
+  .portal-header{padding:10px 14px !important;gap:6px;}
+  /* Sidebar becomes off-canvas drawer */
+  #bo-sidebar{
+    position:fixed !important;
+    top:0; left:0; bottom:0;
+    width:280px !important;
+    max-width:85vw;
+    height:100vh;
+    z-index:999;
+    transform:translateX(-100%);
+    transition:transform 0.25s ease;
+    overflow-y:auto;
+    box-shadow:8px 0 30px rgba(0,0,0,0.5);
+    border-right:1px solid rgba(255,255,255,0.1);
+    padding-top:14px !important;
+  }
+  body.bo-sidebar-open #bo-sidebar{transform:translateX(0);}
+  body.bo-sidebar-open{overflow:hidden;}
+  body.bo-sidebar-open #bo-sidebar-backdrop{display:block !important;}
+  /* Main content full width */
   #backoffice > div:last-child{flex-direction:column;}
-  #bo-sidebar{width:100%;border-right:none;border-bottom:1px solid rgba(255,255,255,0.06);}
-  #backoffice main{padding:20px;}
+  #backoffice main{padding:18px 14px !important;width:100%;}
+  /* Smaller program subnav tabs */
+  .bo-sub-tab{font-size:12px !important;padding:7px 12px !important;}
+  /* Tighter cards */
+  .bo-card{padding:14px 14px !important;}
+  /* Smaller signout button */
+  .logout-btn{padding:5px 11px !important;font-size:11px !important;}
 }
 </style>
 
@@ -2206,6 +2240,8 @@ function boSelectProgram(programId){
   activeSubView = 'dashboard';
   renderSidebar();
   renderMainContent();
+  closeBoSidebar();
+  scrollMainToTop();
 }
 
 function boShowAdmin(view){
@@ -2213,6 +2249,8 @@ function boShowAdmin(view){
   activeProgramId = null;
   renderSidebar();
   renderMainContent();
+  closeBoSidebar();
+  scrollMainToTop();
 }
 
 // ─── Feature gating: agent must have codes_unlocked=true to access training calls ───
@@ -2248,7 +2286,32 @@ function boShowView(view){
     window._lbOffset = 0;
     renderMainContent();
   }
+  closeBoSidebar();
+  scrollMainToTop();
 }
+
+// ─── Mobile drawer controls ───
+function toggleBoSidebar(){
+  document.body.classList.toggle('bo-sidebar-open');
+}
+function closeBoSidebar(){
+  document.body.classList.remove('bo-sidebar-open');
+}
+function scrollMainToTop(){
+  // On mobile, after navigating, scroll the page to the top so the user
+  // immediately sees the new content instead of being mid-scroll.
+  try { window.scrollTo({ top: 0, behavior: 'instant' }); } catch(_){
+    window.scrollTo(0, 0);
+  }
+  const main = document.querySelector('#backoffice main');
+  if(main && typeof main.scrollTo === 'function'){
+    try { main.scrollTo({ top: 0, behavior: 'instant' }); } catch(_){
+      main.scrollTop = 0;
+    }
+  }
+}
+window.toggleBoSidebar = toggleBoSidebar;
+window.closeBoSidebar = closeBoSidebar;
 
 function renderMainContent(){
   const el = document.getElementById('bo-content');
