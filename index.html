@@ -3005,22 +3005,22 @@ async function launchTool(toolId){
   const { data: tool, error } = await sb.from('tools').select('*').eq('id', toolId).single();
   if(error || !tool){ alert('Could not load this tool: ' + (error?.message || 'not found')); return; }
 
-  // Determine the user's role inside the tool. Owner+admin+can_manage_rates → owner mode by default.
-  // Owner/admin/can_manage_rates can toggle to agent view to actually use the bill scanner
-  // themselves (e.g. owner walking up to a customer at a kiosk).
+  // Determine the user's role inside the tool.
+  // EVERYONE defaults to agent view (camera + bill scanner). That includes
+  // agents, team leads, managers, AND admins.
+  // Only the OWNER and people the owner explicitly grants can_manage_rates to
+  // get the toggle to switch into rate-management mode. Admins do NOT auto-elevate.
   const isOwner = currentProfile.role === 'owner';
-  const isAdmin = currentProfile.role === 'admin';
-  const canManageRates = isOwner || isAdmin || currentProfile.can_manage_rates === true;
-  // Read session-level override. Only honored if user actually CAN manage rates.
-  // Agents who try to flip the storage manually still get locked to agent view.
+  const canManageRates = isOwner || currentProfile.can_manage_rates === true;
+  // Read session-level override. Defaults to AGENT view for everyone.
   const overrideKey = 'csi_tool_view_' + toolId;
   const sessionOverride = sessionStorage.getItem(overrideKey);
   let innerRole;
   if(!canManageRates){
-    innerRole = 'agent'; // agents are always agents — no override possible
+    innerRole = 'agent'; // agents/managers/admins/etc. are locked to agent view
   } else {
-    // Manager-level user: defaults to owner view, but can flip to agent
-    innerRole = sessionOverride === 'agent' ? 'agent' : 'owner';
+    // Owner or rate-manager-flagged user: defaults to AGENT view, must explicitly toggle
+    innerRole = sessionOverride === 'owner' ? 'owner' : 'agent';
   }
   const userName = currentProfile.full_name || currentProfile.email || 'User';
   const userEmail = currentProfile.email || '';
@@ -3325,14 +3325,14 @@ async function deleteTool(toolId, name){
   renderMainContent();
 }
 
-// Toggle between Manager view (rate management) and Agent view (bill scanner)
-// for users who have can_manage_rates. Persists in sessionStorage so it survives
-// the iframe rebuild but resets on page close.
+// Toggle between Agent view (bill scanner — DEFAULT) and Manager view (rate setup).
+// Only available to users with can_manage_rates. Persists in sessionStorage so it
+// survives the iframe rebuild but resets when the browser tab fully closes.
 function toggleToolView(toolId){
   const key = 'csi_tool_view_' + toolId;
   const current = sessionStorage.getItem(key);
-  // If currently owner, switch to agent. Otherwise back to owner.
-  const next = current === 'agent' ? 'owner' : 'agent';
+  // Default is agent. So if no override OR override='agent', flip to owner. Otherwise flip to agent.
+  const next = current === 'owner' ? 'agent' : 'owner';
   sessionStorage.setItem(key, next);
   // Close current view and re-launch
   closeToolView();
