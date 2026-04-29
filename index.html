@@ -1334,6 +1334,128 @@ footer{
 .stat-card{background:linear-gradient(135deg,rgba(255,255,255,0.04),rgba(255,255,255,0.01));border:1px solid rgba(255,255,255,0.07);border-radius:14px;padding:22px;}
 .stat-num{font-family:'Bebas Neue',sans-serif;font-size:42px;line-height:1;margin-bottom:6px;}
 .stat-lbl{font-size:12px;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1.5px;}
+
+/* ─── Custom Date/Time Pickers ────────────────────────────────────────── */
+.csi-picker-trigger{
+  width:100%;
+  background:rgba(255,255,255,0.03);
+  border:1px solid rgba(255,255,255,0.1);
+  border-radius:10px;
+  padding:11px 14px;
+  color:#fff;
+  font-family:'Outfit',sans-serif;
+  font-size:14px;
+  cursor:pointer;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  transition:all 0.15s;
+}
+.csi-picker-trigger:hover{border-color:rgba(255,107,0,0.4);background:rgba(255,255,255,0.05);}
+.csi-picker-trigger.empty{color:rgba(255,255,255,0.4);}
+.csi-picker-trigger-icon{font-size:16px;color:#FF6B00;flex-shrink:0;}
+.csi-picker-popup{
+  position:fixed;
+  z-index:10000;
+  background:#0d0d0d;
+  border:1px solid rgba(255,255,255,0.12);
+  border-radius:12px;
+  padding:14px;
+  box-shadow:0 12px 40px rgba(0,0,0,0.6);
+  animation:csiPickerIn 0.15s ease;
+}
+@keyframes csiPickerIn{
+  from{opacity:0;transform:translateY(-4px);}
+  to{opacity:1;transform:translateY(0);}
+}
+/* Calendar */
+.csi-cal-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;}
+.csi-cal-title{font-family:'Bebas Neue',sans-serif;font-size:16px;color:#fff;letter-spacing:1px;}
+.csi-cal-nav-btn{
+  width:30px;height:30px;
+  background:rgba(255,255,255,0.05);
+  border:1px solid rgba(255,255,255,0.1);
+  border-radius:6px;
+  color:#fff;
+  cursor:pointer;
+  font-size:14px;
+  display:flex;align-items:center;justify-content:center;
+  transition:all 0.15s;
+}
+.csi-cal-nav-btn:hover{background:rgba(255,107,0,0.15);border-color:#FF6B00;color:#FF6B00;}
+.csi-cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:3px;}
+.csi-cal-dow{
+  font-size:10px;color:rgba(255,255,255,0.4);
+  text-align:center;padding:6px 0;
+  font-weight:700;letter-spacing:1px;
+}
+.csi-cal-day{
+  width:36px;height:36px;
+  display:flex;align-items:center;justify-content:center;
+  background:rgba(255,255,255,0.03);
+  border:1px solid transparent;
+  border-radius:8px;
+  color:#fff;
+  font-size:13px;
+  cursor:pointer;
+  transition:all 0.12s;
+}
+.csi-cal-day:hover{background:rgba(255,107,0,0.15);border-color:rgba(255,107,0,0.4);}
+.csi-cal-day.other-month{color:rgba(255,255,255,0.2);background:transparent;}
+.csi-cal-day.past{color:rgba(255,255,255,0.35);}
+.csi-cal-day.today{border-color:rgba(255,107,0,0.5);font-weight:700;}
+.csi-cal-day.selected{background:linear-gradient(135deg,#FF6B00,#FF0080);color:#fff;font-weight:700;border-color:transparent;}
+.csi-cal-day.selected:hover{background:linear-gradient(135deg,#FF6B00,#FF0080);}
+
+/* Time picker */
+.csi-time-wrap{display:flex;flex-direction:column;gap:12px;min-width:240px;}
+.csi-time-row{display:flex;align-items:center;justify-content:center;gap:6px;}
+.csi-time-section{flex:1;}
+.csi-time-section-lbl{font-size:9.5px;color:rgba(255,255,255,0.45);text-align:center;letter-spacing:1.5px;font-weight:700;margin-bottom:4px;}
+.csi-time-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;}
+.csi-time-grid.minutes{grid-template-columns:repeat(4,1fr);}
+.csi-time-btn{
+  background:rgba(255,255,255,0.05);
+  border:1px solid rgba(255,255,255,0.08);
+  color:#fff;
+  font-size:13px;
+  padding:8px 0;
+  border-radius:6px;
+  cursor:pointer;
+  transition:all 0.12s;
+  font-family:'Outfit',sans-serif;
+  font-weight:600;
+}
+.csi-time-btn:hover{background:rgba(255,107,0,0.15);border-color:rgba(255,107,0,0.4);}
+.csi-time-btn.selected{background:linear-gradient(135deg,#FF6B00,#FF0080);color:#fff;border-color:transparent;}
+.csi-time-ampm{display:flex;flex-direction:column;gap:4px;}
+.csi-time-ampm-btn{
+  background:rgba(255,255,255,0.05);
+  border:1px solid rgba(255,255,255,0.08);
+  color:#fff;
+  font-size:13px;
+  padding:8px 14px;
+  border-radius:6px;
+  cursor:pointer;
+  font-weight:700;
+  letter-spacing:1px;
+  transition:all 0.12s;
+}
+.csi-time-ampm-btn:hover{background:rgba(255,107,0,0.15);border-color:rgba(255,107,0,0.4);}
+.csi-time-ampm-btn.selected{background:linear-gradient(135deg,#FF6B00,#FF0080);color:#fff;border-color:transparent;}
+.csi-time-display{
+  font-family:'Bebas Neue',sans-serif;font-size:36px;color:#fff;
+  text-align:center;letter-spacing:2px;line-height:1;
+  margin-bottom:6px;
+}
+.csi-time-actions{display:flex;gap:6px;margin-top:6px;}
+.csi-time-actions .bo-btn{flex:1;padding:7px;font-size:12px;}
+@media (max-width: 700px){
+  .csi-picker-popup{position:fixed;left:8px !important;right:8px !important;width:auto !important;max-width:none;}
+  .csi-cal-day{width:auto;}
+}
+
 @media (max-width: 900px){
   #bo-sidebar{width:200px;}
 }
@@ -2230,6 +2352,9 @@ function renderSidebar(){
     // Onboarding department (non-owner, non-admin) gets stores access too
     adminNavItems.push({ id:'stores', label:'🏪 Stores' });
   }
+  if(isOwner || isAdmin || currentProfile.has_master_center_access){
+    adminNavItems.push({ id:'recruiting', label:'🎤 Recruiting' });
+  }
   // Weekly Schedule — MMs see this to assign their agents to stores each week
   // Owner + admin can also see it (oversight)
   if(isOwner || isAdmin || isManager){
@@ -2399,6 +2524,9 @@ function boSelectProgram(programId){
 function boShowAdmin(view){
   activeAdminView = view;
   activeProgramId = null;
+  // Reset recruiting sub-view when navigating into the recruiting nav so it
+  // always opens to the hub (not whatever sub-view it was in last time).
+  if(view === 'recruiting') window._recruitingView = 'hub';
   renderSidebar();
   renderMainContent();
   closeBoSidebar();
@@ -2500,6 +2628,7 @@ function renderMainContent(){
   if(activeAdminView === 'onboarding-pending'){ renderOnboardingPending(el); return; }
   if(activeAdminView === 'stores'){ renderStoresAdmin(el); return; }
   if(activeAdminView === 'weekly-schedule'){ renderWeeklySchedule(el); return; }
+  if(activeAdminView === 'recruiting'){ renderRecruiting(el); return; }
   if(activeAdminView === 'inventory'){ renderInventory(el); return; }
   if(activeAdminView === 'photo-audits-review'){ renderPhotoAuditsReview(el); return; }
   if(activeAdminView === 'payroll'){ renderPayroll(el); return; }
@@ -6417,6 +6546,948 @@ window.wsShiftWeek = wsShiftWeek;
 window.wsOpenAssignModal = wsOpenAssignModal;
 window.wsSaveAssignments = wsSaveAssignments;
 window.wsRemoveAssignment = wsRemoveAssignment;
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// RECRUITING — Pre-Screen Call + 2nd Round Interview forms
+// Replaces external Jotform. Owner / Admin / Onboarding only.
+// ═══════════════════════════════════════════════════════════════════════
+
+const INTERVIEW_LOCATIONS = ['Grand Prairie', 'Grapevine', 'Highland Village', 'Wylie'];
+
+function _recruitingAccessOk(){
+  return currentProfile.role === 'owner'
+      || currentProfile.role === 'admin'
+      || currentProfile.has_master_center_access === true;
+}
+
+async function renderRecruiting(el){
+  if(!_recruitingAccessOk()){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied. Recruiting is for Owner, Admin, and Onboarding department only.</div>';
+    return;
+  }
+
+  const view = window._recruitingView || 'hub';
+
+  if(view === 'prescreen-form'){ return renderPrescreenForm(el); }
+  if(view === 'interview-form'){ return renderInterviewForm(el); }
+  if(view === 'prescreen-list'){ return renderPrescreenList(el); }
+  if(view === 'interview-list'){ return renderInterviewList(el); }
+
+  // Hub view (default)
+  // Pull recent counts for at-a-glance
+  const [{ count: psCount }, { count: ivCount }, { data: upcomingIv }] = await Promise.all([
+    sb.from('prescreen_submissions').select('id', { count:'exact', head:true }),
+    sb.from('interview_submissions').select('id', { count:'exact', head:true }),
+    sb.from('interview_submissions').select('*, profiles!interview_submissions_interviewer_id_fkey(full_name,email)')
+      .gte('interview_date', new Date().toISOString().slice(0,10))
+      .eq('status', 'scheduled')
+      .order('interview_date', { ascending: true })
+      .order('start_time', { ascending: true })
+      .limit(5)
+  ]);
+
+  el.innerHTML = `
+    <div style="margin-bottom:24px;">
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;line-height:1;">🎤 Recruiting</h1>
+      <p style="font-size:14px;color:rgba(255,255,255,0.55);margin-top:6px;">Pre-screen candidates and schedule 2nd round interviews. All submissions saved + searchable.</p>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-bottom:28px;">
+      <!-- Pre-Screen card -->
+      <div class="bo-card" style="cursor:pointer;border:1px solid rgba(0,198,255,0.25);transition:all 0.18s;" onclick="recruitingGo('prescreen-form')" onmouseover="this.style.borderColor='#00C6FF';this.style.transform='translateY(-2px)';this.style.boxShadow='0 8px 24px rgba(0,198,255,0.25)';" onmouseout="this.style.borderColor='rgba(0,198,255,0.25)';this.style.transform='';this.style.boxShadow='';">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
+          <div style="font-size:36px;">📞</div>
+          <div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;line-height:1;">Pre-Screen Call</div>
+            <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-top:2px;">Reliant Energy — first contact</div>
+          </div>
+        </div>
+        <div style="font-size:13px;color:rgba(255,255,255,0.6);margin-top:10px;line-height:1.55;">Walk through 9 standard questions + comfort scale. Capture answers as you call.</div>
+        <div style="margin-top:12px;display:flex;justify-content:space-between;align-items:center;">
+          <span style="font-size:11px;color:rgba(255,255,255,0.4);font-weight:600;letter-spacing:1px;">${psCount || 0} TOTAL</span>
+          <span style="background:rgba(0,198,255,0.15);color:#00C6FF;padding:5px 12px;border-radius:50px;font-size:12px;font-weight:600;">Start →</span>
+        </div>
+      </div>
+
+      <!-- 2nd Round Interview card -->
+      <div class="bo-card" style="cursor:pointer;border:1px solid rgba(255,107,0,0.25);transition:all 0.18s;" onclick="recruitingGo('interview-form')" onmouseover="this.style.borderColor='#FF6B00';this.style.transform='translateY(-2px)';this.style.boxShadow='0 8px 24px rgba(255,107,0,0.25)';" onmouseout="this.style.borderColor='rgba(255,107,0,0.25)';this.style.transform='';this.style.boxShadow='';">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
+          <div style="font-size:36px;">📅</div>
+          <div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;line-height:1;">2nd Round Interview</div>
+            <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-top:2px;">Schedule + notify interviewer</div>
+          </div>
+        </div>
+        <div style="font-size:13px;color:rgba(255,255,255,0.6);margin-top:10px;line-height:1.55;">Pick location, date/time, and assign an interviewer. They'll get a notification + email.</div>
+        <div style="margin-top:12px;display:flex;justify-content:space-between;align-items:center;">
+          <span style="font-size:11px;color:rgba(255,255,255,0.4);font-weight:600;letter-spacing:1px;">${ivCount || 0} TOTAL</span>
+          <span style="background:rgba(255,107,0,0.15);color:#FF6B00;padding:5px 12px;border-radius:50px;font-size:12px;font-weight:600;">Schedule →</span>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-bottom:28px;">
+      <button class="bo-card" style="text-align:left;cursor:pointer;background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.1);" onclick="recruitingGo('prescreen-list')">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div style="font-size:24px;">📋</div>
+          <div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:17px;color:#fff;letter-spacing:1px;">Pre-Screen History</div>
+            <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-top:2px;">View, filter, mark pass/fail</div>
+          </div>
+        </div>
+      </button>
+      <button class="bo-card" style="text-align:left;cursor:pointer;background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.1);" onclick="recruitingGo('interview-list')">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div style="font-size:24px;">🗓</div>
+          <div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:17px;color:#fff;letter-spacing:1px;">Interview History</div>
+            <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-top:2px;">Past + upcoming interviews</div>
+          </div>
+        </div>
+      </button>
+    </div>
+
+    ${(upcomingIv || []).length > 0 ? `
+      <div class="bo-card" style="margin-bottom:14px;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#FF6B00;letter-spacing:1.5px;margin-bottom:10px;">📅 Upcoming Interviews</div>
+        ${upcomingIv.map(iv => `
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:rgba(255,255,255,0.03);border-radius:8px;margin-bottom:6px;flex-wrap:wrap;gap:8px;">
+            <div style="min-width:0;">
+              <div style="font-size:13.5px;color:#fff;font-weight:600;">${escapeHtml(iv.candidate_first_name + ' ' + iv.candidate_last_name)}</div>
+              <div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-top:2px;">${escapeHtml(iv.interview_location)} · ${escapeHtml(iv.interview_date)} ${iv.start_time?.substring(0,5) || ''}${iv.profiles ? ' · with ' + escapeHtml(iv.profiles.full_name || iv.profiles.email) : ''}</div>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    ` : ''}`;
+}
+
+function recruitingGo(view){
+  window._recruitingView = view;
+  renderMainContent();
+}
+
+// ─── PRE-SCREEN FORM ─────────────────────────────────────────────────
+function renderPrescreenForm(el){
+  const now = new Date();
+  const today = now.toISOString().slice(0,10);
+  const hh = String(now.getHours()).padStart(2,'0');
+  const mm = String(now.getMinutes()).padStart(2,'0');
+  el.innerHTML = `
+    <button class="bo-back-btn show-on-mobile" onclick="recruitingGo('hub')">← Back to Recruiting</button>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
+      <div>
+        <div style="font-size:11px;color:#00C6FF;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:6px;">Reliant Energy · Recruiting</div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:42px;color:#fff;line-height:1;">📞 Pre-Screen Call Script</h1>
+        <p style="font-size:13px;color:rgba(255,255,255,0.55);margin-top:6px;max-width:560px;line-height:1.55;">Walk through this script with the candidate live. Submit when done — saves to history and notifies the owner.</p>
+      </div>
+      <button class="bo-btn bo-btn-ghost" onclick="recruitingGo('hub')" style="padding:7px 14px;font-size:12px;">← Back</button>
+    </div>
+
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">📋 Call Info</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div class="form-group"><label class="form-label">Date</label><input id="ps-date" class="form-input" type="date" value="${today}"/></div>
+        <div class="form-group"><label class="form-label">Time</label><input id="ps-time" class="form-input" type="time" value="${hh}:${mm}"/></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div class="form-group"><label class="form-label">Candidate First Name *</label><input id="ps-first" class="form-input" placeholder="First"/></div>
+        <div class="form-group"><label class="form-label">Candidate Last Name *</label><input id="ps-last" class="form-input" placeholder="Last"/></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div class="form-group"><label class="form-label">Phone</label><input id="ps-phone" class="form-input" type="tel" placeholder="(000) 000-0000"/></div>
+        <div class="form-group"><label class="form-label">Email</label><input id="ps-email" class="form-input" type="email" placeholder="example@example.com"/></div>
+      </div>
+    </div>
+
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">❓ Pre-Screen Questions</div>
+      ${[
+        { id:'weekends', q:'Are you available to work weekends consistently?' },
+        { id:'standing', q:'This role does require standing on your feet for about 6–8 hours a day. Are you comfortable with that?' },
+        { id:'team_independent', q:'Are you comfortable working both in a team environment and independently when needed?' },
+        { id:'selling', q:'This position involves engaging with customers and presenting products or services. Are you comfortable talking to people and selling?' },
+        { id:'fast_paced', q:'It\u2019s a fast-paced environment. Are you comfortable working in that type of setting?' },
+        { id:'pay_structure', q:'This is an hourly + commission-based position. Are you comfortable with that type of pay structure?' },
+        { id:'background_check', q:'If we were to run a background check today, is there anything that would come up that we should be aware of?' },
+        { id:'drug_screen', q:'This role does require a drug screening (excluding marijuana). Would that be an issue for you?' }
+      ].map((q, idx) => `
+        <div style="background:rgba(0,0,0,0.18);border-radius:8px;padding:12px 14px;margin-bottom:10px;">
+          <div style="font-size:13px;color:#fff;line-height:1.55;margin-bottom:8px;"><span style="color:#FFC800;font-weight:700;margin-right:6px;">${idx + 1}.</span>${escapeHtml(q.q)}</div>
+          <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:#00FF88;">
+              <input type="radio" name="ps-q-${q.id}" value="yes" style="width:16px;height:16px;accent-color:#00FF88;"/>YES
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;color:#F87171;">
+              <input type="radio" name="ps-q-${q.id}" value="no" style="width:16px;height:16px;accent-color:#F87171;"/>NO
+            </label>
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:11.5px;color:rgba(255,255,255,0.45);">
+              <input type="radio" name="ps-q-${q.id}" value="" checked style="width:14px;height:14px;"/>(skip)
+            </label>
+          </div>
+          <input id="ps-detail-${q.id}" class="form-input" placeholder="Detail (optional)" style="font-size:12.5px;padding:7px 10px;"/>
+        </div>
+      `).join('')}
+
+      <!-- Comfort scale 1-10 -->
+      <div style="background:rgba(0,0,0,0.18);border-radius:8px;padding:12px 14px;margin-bottom:10px;">
+        <div style="font-size:13px;color:#fff;margin-bottom:10px;line-height:1.55;"><span style="color:#FFC800;font-weight:700;margin-right:6px;">9.</span>On a scale of 1–10, how comfortable are you talking to new people and selling something?</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
+          ${[1,2,3,4,5,6,7,8,9,10].map(n => `
+            <label style="cursor:pointer;">
+              <input type="radio" name="ps-comfort" value="${n}" style="display:none;" onchange="psHighlightComfort(${n})"/>
+              <span id="ps-comfort-${n}" style="display:inline-flex;width:38px;height:38px;align-items:center;justify-content:center;border:1.5px solid rgba(255,255,255,0.2);border-radius:8px;font-weight:700;font-size:14px;color:rgba(255,255,255,0.7);transition:all 0.15s;">${n}</span>
+            </label>
+          `).join('')}
+        </div>
+        <input id="ps-comfort-detail" class="form-input" placeholder="Why that number? (optional)" style="font-size:12.5px;padding:7px 10px;"/>
+      </div>
+    </div>
+
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">💬 Open Response</div>
+      <div class="form-group"><label class="form-label">Tell Me About Yourself</label><textarea id="ps-tell-me" class="form-input" rows="3" placeholder="Capture their answer in their own words..."></textarea></div>
+      <div class="form-group"><label class="form-label">If we were to ask your best friend about you, what would they say?</label><textarea id="ps-friend" class="form-input" rows="3"></textarea></div>
+      <div class="form-group"><label class="form-label">Detail About the Call (your impressions, red flags, anything notable)</label><textarea id="ps-friend-detail" class="form-input" rows="2"></textarea></div>
+    </div>
+
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">⚖️ Verdict</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;">
+        <label style="display:flex;align-items:center;gap:8px;padding:10px 16px;border:1.5px solid rgba(0,255,136,0.3);border-radius:8px;cursor:pointer;background:rgba(0,255,136,0.04);">
+          <input type="radio" name="ps-verdict" value="pass" style="width:16px;height:16px;accent-color:#00FF88;"/>
+          <span style="color:#00FF88;font-weight:600;">✓ PASS — schedule 2nd round</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;padding:10px 16px;border:1.5px solid rgba(255,200,0,0.3);border-radius:8px;cursor:pointer;background:rgba(255,200,0,0.04);">
+          <input type="radio" name="ps-verdict" value="maybe" style="width:16px;height:16px;accent-color:#FFC800;"/>
+          <span style="color:#FFC800;font-weight:600;">? MAYBE — review with team</span>
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;padding:10px 16px;border:1.5px solid rgba(248,113,113,0.3);border-radius:8px;cursor:pointer;background:rgba(248,113,113,0.04);">
+          <input type="radio" name="ps-verdict" value="fail" style="width:16px;height:16px;accent-color:#F87171;"/>
+          <span style="color:#F87171;font-weight:600;">✗ FAIL — pass</span>
+        </label>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+      <button class="bo-btn bo-btn-primary" onclick="submitPrescreen()">Submit Pre-Screen</button>
+      <button class="bo-btn bo-btn-ghost" onclick="recruitingGo('hub')">Cancel</button>
+    </div>
+    <div id="ps-msg" style="font-size:13px;"></div>`;
+}
+
+function psHighlightComfort(n){
+  for(let i = 1; i <= 10; i++){
+    const el = document.getElementById('ps-comfort-' + i);
+    if(!el) continue;
+    if(i <= n){
+      el.style.background = '#FFC800';
+      el.style.borderColor = '#FFC800';
+      el.style.color = '#000';
+    } else {
+      el.style.background = '';
+      el.style.borderColor = 'rgba(255,255,255,0.2)';
+      el.style.color = 'rgba(255,255,255,0.7)';
+    }
+  }
+}
+
+function _readYesNo(name){
+  const sel = document.querySelector('input[name="' + name + '"]:checked');
+  if(!sel || !sel.value) return null;
+  return sel.value === 'yes';
+}
+
+async function submitPrescreen(){
+  const msg = document.getElementById('ps-msg');
+  const first = document.getElementById('ps-first').value.trim();
+  const last  = document.getElementById('ps-last').value.trim();
+  if(!first || !last){ msg.innerHTML = '<span style="color:#F87171;">Candidate name (first + last) is required.</span>'; return; }
+
+  const verdictEl = document.querySelector('input[name="ps-verdict"]:checked');
+  const comfortEl = document.querySelector('input[name="ps-comfort"]:checked');
+
+  const payload = {
+    submitted_by: currentProfile.id,
+    call_date: document.getElementById('ps-date').value || null,
+    call_time: document.getElementById('ps-time').value || null,
+    candidate_first_name: first,
+    candidate_last_name: last,
+    candidate_phone: document.getElementById('ps-phone').value.trim() || null,
+    candidate_email: document.getElementById('ps-email').value.trim().toLowerCase() || null,
+
+    q_weekends:           _readYesNo('ps-q-weekends'),
+    q_weekends_detail:    document.getElementById('ps-detail-weekends').value.trim() || null,
+    q_standing:           _readYesNo('ps-q-standing'),
+    q_standing_detail:    document.getElementById('ps-detail-standing').value.trim() || null,
+    q_team_independent:        _readYesNo('ps-q-team_independent'),
+    q_team_independent_detail: document.getElementById('ps-detail-team_independent').value.trim() || null,
+    q_selling:            _readYesNo('ps-q-selling'),
+    q_selling_detail:     document.getElementById('ps-detail-selling').value.trim() || null,
+    q_fast_paced:         _readYesNo('ps-q-fast_paced'),
+    q_fast_paced_detail:  document.getElementById('ps-detail-fast_paced').value.trim() || null,
+    q_pay_structure:      _readYesNo('ps-q-pay_structure'),
+    q_pay_structure_detail:    document.getElementById('ps-detail-pay_structure').value.trim() || null,
+    q_background_check:   _readYesNo('ps-q-background_check'),
+    q_background_check_detail: document.getElementById('ps-detail-background_check').value.trim() || null,
+    q_drug_screen:        _readYesNo('ps-q-drug_screen'),
+    q_drug_screen_detail: document.getElementById('ps-detail-drug_screen').value.trim() || null,
+
+    comfort_scale: comfortEl ? parseInt(comfortEl.value) : null,
+    comfort_detail: document.getElementById('ps-comfort-detail').value.trim() || null,
+    tell_me_about_yourself: document.getElementById('ps-tell-me').value.trim() || null,
+    best_friend_response:  document.getElementById('ps-friend').value.trim() || null,
+    best_friend_detail:    document.getElementById('ps-friend-detail').value.trim() || null,
+    verdict: verdictEl ? verdictEl.value : null
+  };
+
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Submitting…</span>';
+  const { data: row, error } = await sb.from('prescreen_submissions').insert(payload).select().single();
+  if(error){ msg.innerHTML = '<span style="color:#F87171;">' + error.message + '</span>'; return; }
+
+  // Notify owner(s)
+  try { await notifyPrescreenSubmitted(row); } catch(_){}
+
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Saved. Owner has been notified.</span>';
+  setTimeout(() => { window._recruitingView = 'hub'; renderMainContent(); }, 900);
+}
+
+async function notifyPrescreenSubmitted(row){
+  const recruiterName = currentProfile.full_name || currentProfile.email || 'Recruiter';
+  const candidateName = row.candidate_first_name + ' ' + row.candidate_last_name;
+  const verdictLabel = row.verdict === 'pass' ? '✓ PASS' : row.verdict === 'fail' ? '✗ FAIL' : row.verdict === 'maybe' ? '? MAYBE' : '— UNDECIDED';
+  // Owners
+  const { data: owners } = await sb.from('profiles').select('id,email,full_name').eq('role', 'owner').eq('active', true);
+  for(const o of (owners || [])){
+    try {
+      await notifyUser(o.id, {
+        type: 'generic',
+        title: '📞 New pre-screen: ' + candidateName,
+        body: verdictLabel + ' · by ' + recruiterName + ' · ' + new Date().toLocaleString()
+      });
+      await sendEmailViaFunction('announcement', o.email, {
+        title: '📞 Pre-screen submitted: ' + candidateName,
+        body: 'Verdict: ' + verdictLabel + '\nRecruiter: ' + recruiterName + '\nCandidate phone: ' + (row.candidate_phone || '—') + '\nCandidate email: ' + (row.candidate_email || '—') + '\nSubmitted: ' + new Date().toLocaleString() + '\n\nView in back office: Recruiting → Pre-Screen History',
+        posted_by: 'Circle Solutions Recruiting'
+      });
+    } catch(_){}
+  }
+}
+
+// ─── 2nd ROUND INTERVIEW FORM ───────────────────────────────────────
+async function renderInterviewForm(el){
+  // Load candidates from prescreens (so the recruiter can pick a known candidate)
+  // and load possible interviewers (anyone with a profile — but typically managers/admin)
+  const [{ data: prescreens }, { data: people }] = await Promise.all([
+    sb.from('prescreen_submissions').select('id, candidate_first_name, candidate_last_name, candidate_email')
+      .order('submitted_at', { ascending: false })
+      .limit(100),
+    sb.from('profiles').select('id, full_name, email, role')
+      .eq('active', true)
+      .in('role', ['owner','admin','manager','team_lead'])
+      .order('full_name')
+  ]);
+
+  el.innerHTML = `
+    <button class="bo-back-btn show-on-mobile" onclick="recruitingGo('hub')">← Back to Recruiting</button>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
+      <div>
+        <div style="font-size:11px;color:#FF6B00;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:6px;">Recruiting · 2nd Round</div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:42px;color:#fff;line-height:1;">📅 Schedule 2nd Round Interview</h1>
+        <p style="font-size:13px;color:rgba(255,255,255,0.55);margin-top:6px;max-width:560px;line-height:1.55;">The selected interviewer + the owner will receive a high-priority notification + email.</p>
+      </div>
+      <button class="bo-btn bo-btn-ghost" onclick="recruitingGo('hub')" style="padding:7px 14px;font-size:12px;">← Back</button>
+    </div>
+
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">👤 Candidate</div>
+      <div class="form-group">
+        <label class="form-label">Quick-fill from a prior pre-screen (optional)</label>
+        <select id="iv-prescreen" class="form-input" onchange="ivPrefillFromPrescreen()">
+          <option value="">— Or fill in manually below —</option>
+          ${(prescreens || []).map(p => `<option value="${p.id}" data-first="${escapeHtml(p.candidate_first_name)}" data-last="${escapeHtml(p.candidate_last_name)}" data-email="${escapeHtml(p.candidate_email || '')}">${escapeHtml(p.candidate_first_name + ' ' + p.candidate_last_name)}${p.candidate_email ? ' · ' + escapeHtml(p.candidate_email) : ''}</option>`).join('')}
+        </select>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div class="form-group"><label class="form-label">First Name *</label><input id="iv-first" class="form-input" placeholder="First"/></div>
+        <div class="form-group"><label class="form-label">Last Name *</label><input id="iv-last" class="form-input" placeholder="Last"/></div>
+      </div>
+      <div class="form-group"><label class="form-label">Email</label><input id="iv-email" class="form-input" type="email" placeholder="example@example.com"/></div>
+    </div>
+
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">📍 Location &amp; Interviewer</div>
+      <div class="form-group">
+        <label class="form-label">Interview Location *</label>
+        <select id="iv-location" class="form-input">
+          <option value="">— Please Select —</option>
+          ${INTERVIEW_LOCATIONS.map(loc => `<option value="${escapeHtml(loc)}">${escapeHtml(loc)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Interviewer (gets a notification + email) *</label>
+        <select id="iv-interviewer" class="form-input">
+          <option value="">— Please Select —</option>
+          ${(people || []).map(p => `<option value="${p.id}">${escapeHtml(p.full_name || p.email)} (${p.role})</option>`).join('')}
+        </select>
+      </div>
+    </div>
+
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">🕒 Date &amp; Time</div>
+      <div class="form-group">
+        <label class="form-label">Date *</label>
+        <button type="button" id="iv-date-trigger" class="csi-picker-trigger empty" onclick="openDatePicker('iv-date', this)">
+          <span class="csi-picker-trigger-icon">📅</span>
+          <span id="iv-date-label" style="flex:1;text-align:left;">Pick a date…</span>
+          <span style="color:rgba(255,255,255,0.3);">▾</span>
+        </button>
+        <input type="hidden" id="iv-date" value=""/>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div class="form-group">
+          <label class="form-label">Start Time *</label>
+          <button type="button" id="iv-start-trigger" class="csi-picker-trigger empty" onclick="openTimePicker('iv-start', this)">
+            <span class="csi-picker-trigger-icon">🕒</span>
+            <span id="iv-start-label" style="flex:1;text-align:left;">Pick a time…</span>
+            <span style="color:rgba(255,255,255,0.3);">▾</span>
+          </button>
+          <input type="hidden" id="iv-start" value=""/>
+        </div>
+        <div class="form-group">
+          <label class="form-label">End Time</label>
+          <button type="button" id="iv-end-trigger" class="csi-picker-trigger empty" onclick="openTimePicker('iv-end', this)">
+            <span class="csi-picker-trigger-icon">🕒</span>
+            <span id="iv-end-label" style="flex:1;text-align:left;">Pick a time…</span>
+            <span style="color:rgba(255,255,255,0.3);">▾</span>
+          </button>
+          <input type="hidden" id="iv-end" value=""/>
+        </div>
+      </div>
+      <div class="form-group"><label class="form-label">Notes (optional)</label><textarea id="iv-notes" class="form-input" rows="2" placeholder="Anything the interviewer should know..."></textarea></div>
+    </div>
+
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+      <button class="bo-btn bo-btn-primary" onclick="submitInterview()">Schedule Interview</button>
+      <button class="bo-btn bo-btn-ghost" onclick="recruitingGo('hub')">Cancel</button>
+    </div>
+    <div id="iv-msg" style="font-size:13px;"></div>`;
+}
+
+function ivPrefillFromPrescreen(){
+  const sel = document.getElementById('iv-prescreen');
+  const opt = sel.options[sel.selectedIndex];
+  if(!opt || !opt.value) return;
+  document.getElementById('iv-first').value = opt.dataset.first || '';
+  document.getElementById('iv-last').value = opt.dataset.last || '';
+  document.getElementById('iv-email').value = opt.dataset.email || '';
+}
+
+async function submitInterview(){
+  const msg = document.getElementById('iv-msg');
+  const first = document.getElementById('iv-first').value.trim();
+  const last  = document.getElementById('iv-last').value.trim();
+  const location = document.getElementById('iv-location').value;
+  const interviewerId = document.getElementById('iv-interviewer').value;
+  const date = document.getElementById('iv-date').value;
+  const start = document.getElementById('iv-start').value;
+  const end = document.getElementById('iv-end').value || null;
+
+  if(!first || !last){ msg.innerHTML = '<span style="color:#F87171;">Candidate name (first + last) is required.</span>'; return; }
+  if(!location){ msg.innerHTML = '<span style="color:#F87171;">Pick an interview location.</span>'; return; }
+  if(!interviewerId){ msg.innerHTML = '<span style="color:#F87171;">Pick an interviewer — they need to be notified.</span>'; return; }
+  if(!date){ msg.innerHTML = '<span style="color:#F87171;">Pick a date.</span>'; return; }
+  if(!start){ msg.innerHTML = '<span style="color:#F87171;">Pick a start time.</span>'; return; }
+
+  const prescreenId = document.getElementById('iv-prescreen').value || null;
+
+  const payload = {
+    submitted_by: currentProfile.id,
+    candidate_first_name: first,
+    candidate_last_name: last,
+    candidate_email: document.getElementById('iv-email').value.trim().toLowerCase() || null,
+    interview_location: location,
+    interview_date: date,
+    start_time: start,
+    end_time: end,
+    interviewer_id: interviewerId,
+    prescreen_id: prescreenId,
+    notes: document.getElementById('iv-notes').value.trim() || null
+  };
+
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Saving…</span>';
+  const { data: row, error } = await sb.from('interview_submissions').insert(payload).select().single();
+  if(error){ msg.innerHTML = '<span style="color:#F87171;">' + error.message + '</span>'; return; }
+
+  try { await notifyInterviewScheduled(row); } catch(e){ console.warn('Notification failed:', e); }
+
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Interview scheduled. Interviewer + owner notified.</span>';
+  setTimeout(() => { window._recruitingView = 'hub'; renderMainContent(); }, 900);
+}
+
+async function notifyInterviewScheduled(row){
+  const recruiterName = currentProfile.full_name || currentProfile.email || 'Recruiter';
+  const candidateName = row.candidate_first_name + ' ' + row.candidate_last_name;
+  const dateLabel = new Date(row.interview_date + 'T00:00:00').toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric', year:'numeric' });
+  const timeLabel = row.start_time ? row.start_time.substring(0,5) + (row.end_time ? ' – ' + row.end_time.substring(0,5) : '') : '';
+
+  const recipientIds = new Set();
+  // 1. Owners
+  const { data: owners } = await sb.from('profiles').select('id,email,full_name').eq('role', 'owner').eq('active', true);
+  (owners || []).forEach(o => recipientIds.add(o.id));
+  // 2. The interviewer
+  if(row.interviewer_id) recipientIds.add(row.interviewer_id);
+
+  // Fire notifications + email
+  for(const rid of recipientIds){
+    try {
+      const { data: profile } = await sb.from('profiles').select('id,email,full_name').eq('id', rid).maybeSingle();
+      if(!profile) continue;
+      const isInterviewer = rid === row.interviewer_id;
+      const titlePrefix = isInterviewer ? '🚨 Interview assigned to YOU' : '📅 New interview scheduled';
+      await notifyUser(rid, {
+        type: 'generic',
+        title: titlePrefix + ': ' + candidateName,
+        body: row.interview_location + ' · ' + dateLabel + ' · ' + timeLabel
+      });
+      await sendEmailViaFunction('announcement', profile.email, {
+        title: titlePrefix + ': ' + candidateName,
+        body: 'Candidate: ' + candidateName + '\nLocation: ' + row.interview_location + '\nDate: ' + dateLabel + '\nTime: ' + (timeLabel || 'TBD') + (row.candidate_email ? '\nEmail: ' + row.candidate_email : '') + (row.notes ? '\n\nNotes: ' + row.notes : '') + '\n\nScheduled by: ' + recruiterName + (isInterviewer ? '\n\nYOU are the assigned interviewer.' : ''),
+        posted_by: 'Circle Solutions Recruiting'
+      });
+    } catch(_){}
+  }
+}
+
+// ─── PRE-SCREEN HISTORY LIST ────────────────────────────────────────
+async function renderPrescreenList(el){
+  const filter = window._psFilter || 'all';
+  let q = sb.from('prescreen_submissions')
+    .select('*, profiles!prescreen_submissions_submitted_by_fkey(full_name,email)')
+    .order('submitted_at', { ascending: false })
+    .limit(100);
+  if(filter !== 'all') q = q.eq('verdict', filter);
+  const { data: rows } = await q;
+
+  el.innerHTML = `
+    <button class="bo-back-btn show-on-mobile" onclick="recruitingGo('hub')">← Back to Recruiting</button>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
+      <div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:36px;color:#fff;line-height:1;">📋 Pre-Screen History</h1>
+        <p style="font-size:13px;color:rgba(255,255,255,0.55);margin-top:6px;">${rows?.length || 0} ${filter === 'all' ? 'total' : filter}</p>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="bo-btn bo-btn-ghost" onclick="recruitingGo('hub')" style="padding:7px 14px;font-size:12px;">← Back</button>
+        <button class="bo-btn bo-btn-primary" onclick="recruitingGo('prescreen-form')" style="padding:7px 14px;font-size:12px;">+ New</button>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;">
+      ${[
+        { id:'all', label:'All' },
+        { id:'pass', label:'✓ Pass' },
+        { id:'maybe', label:'? Maybe' },
+        { id:'fail', label:'✗ Fail' }
+      ].map(f => `
+        <button class="bo-btn ${filter === f.id ? 'bo-btn-primary' : 'bo-btn-ghost'}" style="padding:6px 12px;font-size:11.5px;" onclick="psSetFilter('${f.id}')">${f.label}</button>
+      `).join('')}
+    </div>
+
+    ${(rows || []).length === 0 ? `
+      <div class="bo-card" style="text-align:center;padding:40px;">
+        <div style="font-size:42px;margin-bottom:12px;">📞</div>
+        <div style="color:rgba(255,255,255,0.5);font-size:14px;">No pre-screens yet${filter !== 'all' ? ' matching this filter' : ''}.</div>
+      </div>
+    ` : `
+      <div style="display:grid;gap:10px;">
+        ${rows.map(r => {
+          const verdictColor = r.verdict === 'pass' ? '#00FF88' : r.verdict === 'fail' ? '#F87171' : r.verdict === 'maybe' ? '#FFC800' : 'rgba(255,255,255,0.4)';
+          const verdictLabel = r.verdict === 'pass' ? '✓ PASS' : r.verdict === 'fail' ? '✗ FAIL' : r.verdict === 'maybe' ? '? MAYBE' : '—';
+          return `
+            <div class="bo-card" style="cursor:pointer;" onclick="viewPrescreen('${r.id}')">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;">
+                <div>
+                  <div style="font-size:15px;color:#fff;font-weight:600;">${escapeHtml(r.candidate_first_name + ' ' + r.candidate_last_name)}</div>
+                  <div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-top:3px;">
+                    ${r.candidate_phone ? escapeHtml(r.candidate_phone) + ' · ' : ''}${r.candidate_email ? escapeHtml(r.candidate_email) + ' · ' : ''}by ${escapeHtml(r.profiles?.full_name || r.profiles?.email || 'unknown')}
+                  </div>
+                  <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:2px;">${new Date(r.submitted_at).toLocaleString()}</div>
+                </div>
+                <div style="background:${verdictColor}22;color:${verdictColor};padding:5px 12px;border-radius:50px;font-size:11px;font-weight:700;letter-spacing:1px;border:1px solid ${verdictColor}55;flex-shrink:0;">${verdictLabel}</div>
+              </div>
+            </div>`;
+        }).join('')}
+      </div>
+    `}`;
+}
+
+function psSetFilter(f){
+  window._psFilter = f;
+  renderMainContent();
+}
+
+async function viewPrescreen(id){
+  const { data: r } = await sb.from('prescreen_submissions').select('*, profiles!prescreen_submissions_submitted_by_fkey(full_name,email)').eq('id', id).single();
+  if(!r) return;
+  const yn = (v) => v === true ? '<span style="color:#00FF88;font-weight:700;">YES</span>' : v === false ? '<span style="color:#F87171;font-weight:700;">NO</span>' : '<span style="color:rgba(255,255,255,0.4);">—</span>';
+  const qBlock = (label, val, detail) => `
+    <div style="background:rgba(0,0,0,0.18);border-radius:6px;padding:8px 10px;margin-bottom:6px;">
+      <div style="font-size:12px;color:rgba(255,255,255,0.7);margin-bottom:3px;">${escapeHtml(label)}: ${yn(val)}</div>
+      ${detail ? `<div style="font-size:11.5px;color:rgba(255,255,255,0.5);font-style:italic;">"${escapeHtml(detail)}"</div>` : ''}
+    </div>`;
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#fff;margin-bottom:6px;letter-spacing:1px;">${escapeHtml(r.candidate_first_name + ' ' + r.candidate_last_name)}</h2>
+    <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-bottom:14px;">${r.candidate_phone || '—'} · ${r.candidate_email || '—'} · by ${escapeHtml(r.profiles?.full_name || r.profiles?.email || 'unknown')} · ${new Date(r.submitted_at).toLocaleString()}</div>
+    ${qBlock('Available weekends', r.q_weekends, r.q_weekends_detail)}
+    ${qBlock('Standing 6-8 hrs', r.q_standing, r.q_standing_detail)}
+    ${qBlock('Team + independent', r.q_team_independent, r.q_team_independent_detail)}
+    ${qBlock('Comfortable selling', r.q_selling, r.q_selling_detail)}
+    ${qBlock('Fast-paced env', r.q_fast_paced, r.q_fast_paced_detail)}
+    ${qBlock('Hourly + commission OK', r.q_pay_structure, r.q_pay_structure_detail)}
+    ${qBlock('Background check OK', r.q_background_check, r.q_background_check_detail)}
+    ${qBlock('Drug screen OK', r.q_drug_screen, r.q_drug_screen_detail)}
+    <div style="background:rgba(0,0,0,0.18);border-radius:6px;padding:8px 10px;margin-bottom:6px;">
+      <div style="font-size:12px;color:rgba(255,255,255,0.7);">Comfort selling (1-10): <span style="color:#FFC800;font-weight:700;">${r.comfort_scale ?? '—'}</span></div>
+      ${r.comfort_detail ? `<div style="font-size:11.5px;color:rgba(255,255,255,0.5);font-style:italic;margin-top:3px;">"${escapeHtml(r.comfort_detail)}"</div>` : ''}
+    </div>
+    ${r.tell_me_about_yourself ? `<div style="margin-top:10px;"><div style="font-size:11px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;margin-bottom:4px;">TELL ME ABOUT YOURSELF</div><div style="font-size:13px;color:rgba(255,255,255,0.85);background:rgba(0,0,0,0.18);padding:8px 10px;border-radius:6px;line-height:1.5;">${escapeHtml(r.tell_me_about_yourself)}</div></div>` : ''}
+    ${r.best_friend_response ? `<div style="margin-top:10px;"><div style="font-size:11px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;margin-bottom:4px;">BEST FRIEND WOULD SAY</div><div style="font-size:13px;color:rgba(255,255,255,0.85);background:rgba(0,0,0,0.18);padding:8px 10px;border-radius:6px;line-height:1.5;">${escapeHtml(r.best_friend_response)}</div></div>` : ''}
+    ${r.best_friend_detail ? `<div style="margin-top:10px;"><div style="font-size:11px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;margin-bottom:4px;">CALL NOTES</div><div style="font-size:13px;color:rgba(255,255,255,0.85);background:rgba(0,0,0,0.18);padding:8px 10px;border-radius:6px;line-height:1.5;">${escapeHtml(r.best_friend_detail)}</div></div>` : ''}
+    <div style="margin-top:14px;">
+      <div style="font-size:11px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;margin-bottom:6px;">VERDICT</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        ${[{ id:'pass', l:'✓ PASS', c:'#00FF88' }, { id:'maybe', l:'? MAYBE', c:'#FFC800' }, { id:'fail', l:'✗ FAIL', c:'#F87171' }].map(v => `
+          <button class="bo-btn" style="padding:6px 12px;font-size:11.5px;background:${r.verdict === v.id ? v.c : 'transparent'};color:${r.verdict === v.id ? '#000' : v.c};border:1px solid ${v.c}55;" onclick="updatePrescreenVerdict('${r.id}', '${v.id}')">${v.l}</button>
+        `).join('')}
+      </div>
+    </div>
+    <div style="margin-top:14px;display:flex;gap:8px;">
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Close</button>
+    </div>`;
+  document.getElementById('modal-box').style.maxWidth = '600px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function updatePrescreenVerdict(id, verdict){
+  await sb.from('prescreen_submissions').update({ verdict }).eq('id', id);
+  closeAllModals();
+  renderMainContent();
+}
+
+// ─── INTERVIEW HISTORY LIST ────────────────────────────────────────
+async function renderInterviewList(el){
+  const { data: rows } = await sb.from('interview_submissions')
+    .select('*, profiles!interview_submissions_interviewer_id_fkey(full_name,email), submitter:profiles!interview_submissions_submitted_by_fkey(full_name,email)')
+    .order('interview_date', { ascending: false })
+    .order('start_time', { ascending: false })
+    .limit(100);
+
+  el.innerHTML = `
+    <button class="bo-back-btn show-on-mobile" onclick="recruitingGo('hub')">← Back to Recruiting</button>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
+      <div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:36px;color:#fff;line-height:1;">🗓 Interview History</h1>
+        <p style="font-size:13px;color:rgba(255,255,255,0.55);margin-top:6px;">${rows?.length || 0} total · most recent first</p>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="bo-btn bo-btn-ghost" onclick="recruitingGo('hub')" style="padding:7px 14px;font-size:12px;">← Back</button>
+        <button class="bo-btn bo-btn-primary" onclick="recruitingGo('interview-form')" style="padding:7px 14px;font-size:12px;">+ New</button>
+      </div>
+    </div>
+
+    ${(rows || []).length === 0 ? `
+      <div class="bo-card" style="text-align:center;padding:40px;">
+        <div style="font-size:42px;margin-bottom:12px;">📅</div>
+        <div style="color:rgba(255,255,255,0.5);font-size:14px;">No interviews scheduled yet.</div>
+      </div>
+    ` : `
+      <div style="display:grid;gap:10px;">
+        ${rows.map(r => {
+          const statusColor = r.status === 'completed' ? '#00FF88' : r.status === 'no_show' ? '#F87171' : r.status === 'canceled' ? 'rgba(255,255,255,0.4)' : '#FF6B00';
+          const statusLabel = (r.status || 'scheduled').toUpperCase().replace('_',' ');
+          const dateLabel = new Date(r.interview_date + 'T00:00:00').toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric' });
+          const timeLabel = r.start_time?.substring(0,5) || '';
+          return `
+            <div class="bo-card">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;">
+                <div style="min-width:0;">
+                  <div style="font-size:15px;color:#fff;font-weight:600;">${escapeHtml(r.candidate_first_name + ' ' + r.candidate_last_name)}</div>
+                  <div style="font-size:11.5px;color:rgba(255,255,255,0.65);margin-top:3px;">📍 ${escapeHtml(r.interview_location)} · 📅 ${dateLabel} · ${timeLabel}${r.end_time ? '–' + r.end_time.substring(0,5) : ''}</div>
+                  <div style="font-size:11.5px;color:rgba(255,255,255,0.45);margin-top:2px;">with <strong>${escapeHtml(r.profiles?.full_name || r.profiles?.email || 'unknown')}</strong> · scheduled by ${escapeHtml(r.submitter?.full_name || r.submitter?.email || 'unknown')}</div>
+                </div>
+                <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
+                  <div style="background:${statusColor}22;color:${statusColor};padding:4px 10px;border-radius:50px;font-size:10.5px;font-weight:700;letter-spacing:1px;border:1px solid ${statusColor}55;">${statusLabel}</div>
+                  <select onchange="updateInterviewStatus('${r.id}', this.value)" style="background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.15);color:#fff;font-size:10.5px;border-radius:6px;padding:3px 6px;cursor:pointer;">
+                    <option value="">change status…</option>
+                    <option value="scheduled">Scheduled</option>
+                    <option value="completed">Completed</option>
+                    <option value="no_show">No-show</option>
+                    <option value="canceled">Canceled</option>
+                  </select>
+                </div>
+              </div>
+              ${r.notes ? `<div style="font-size:12px;color:rgba(255,255,255,0.6);font-style:italic;margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.06);">${escapeHtml(r.notes)}</div>` : ''}
+            </div>`;
+        }).join('')}
+      </div>
+    `}`;
+}
+
+async function updateInterviewStatus(id, status){
+  if(!status) return;
+  await sb.from('interview_submissions').update({ status }).eq('id', id);
+  renderMainContent();
+}
+
+window.renderRecruiting = renderRecruiting;
+window.recruitingGo = recruitingGo;
+window.psHighlightComfort = psHighlightComfort;
+window.submitPrescreen = submitPrescreen;
+window.psSetFilter = psSetFilter;
+window.viewPrescreen = viewPrescreen;
+window.updatePrescreenVerdict = updatePrescreenVerdict;
+window.ivPrefillFromPrescreen = ivPrefillFromPrescreen;
+window.submitInterview = submitInterview;
+window.updateInterviewStatus = updateInterviewStatus;
+
+// ═══════════════════════════════════════════════════════════════════════
+// CUSTOM DATE + TIME PICKERS
+// Reusable widgets that look polished across mobile + desktop.
+// API:
+//   openDatePicker(targetInputId, triggerEl) — opens calendar dropdown
+//   openTimePicker(targetInputId, triggerEl) — opens time picker dropdown
+// Both write to a hidden <input> (id=targetInputId) AND update a label
+// element (id=targetInputId+'-label') with a friendly display string.
+// Calendar input writes ISO date (YYYY-MM-DD).
+// Time input writes 24-hour HH:MM (so it round-trips with database TIME columns).
+// ═══════════════════════════════════════════════════════════════════════
+
+function _csiClosePicker(){
+  const existing = document.getElementById('csi-picker-popup');
+  if(existing) existing.remove();
+  document.removeEventListener('click', _csiOutsidePickerHandler, true);
+  document.removeEventListener('keydown', _csiPickerEscHandler);
+}
+
+function _csiOutsidePickerHandler(e){
+  const popup = document.getElementById('csi-picker-popup');
+  if(!popup) return;
+  if(popup.contains(e.target)) return;
+  // Don't close if clicking the trigger that opened it (that would re-open then close)
+  if(e.target.closest('.csi-picker-trigger')) return;
+  _csiClosePicker();
+}
+
+function _csiPickerEscHandler(e){
+  if(e.key === 'Escape') _csiClosePicker();
+}
+
+function _csiPositionPopup(popup, triggerEl){
+  const rect = triggerEl.getBoundingClientRect();
+  const popupRect = popup.getBoundingClientRect();
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  // Default: just below the trigger, aligned to its left edge
+  let top = rect.bottom + 6;
+  let left = rect.left;
+  // If it would overflow right, align to right edge of trigger
+  if(left + popupRect.width > vw - 8){
+    left = Math.max(8, rect.right - popupRect.width);
+  }
+  // If it would overflow bottom, place above the trigger
+  if(top + popupRect.height > vh - 8){
+    top = Math.max(8, rect.top - popupRect.height - 6);
+  }
+  popup.style.top = top + 'px';
+  popup.style.left = left + 'px';
+}
+
+// ─── DATE PICKER ────────────────────────────────────────────────────
+function openDatePicker(targetInputId, triggerEl){
+  const existing = document.getElementById('csi-picker-popup');
+  if(existing){ _csiClosePicker(); return; }
+
+  const hiddenInput = document.getElementById(targetInputId);
+  const labelEl = document.getElementById(targetInputId + '-label');
+  const currentVal = hiddenInput?.value || '';
+
+  // Parse current value as Date, or default to today
+  const initialDate = currentVal ? new Date(currentVal + 'T00:00:00') : new Date();
+  let viewYear = initialDate.getFullYear();
+  let viewMonth = initialDate.getMonth(); // 0-11
+
+  const popup = document.createElement('div');
+  popup.id = 'csi-picker-popup';
+  popup.className = 'csi-picker-popup';
+  popup.style.minWidth = '280px';
+  document.body.appendChild(popup);
+
+  function render(){
+    const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    const dows = ['Su','Mo','Tu','We','Th','Fr','Sa'];
+    const firstOfMonth = new Date(viewYear, viewMonth, 1);
+    const startDow = firstOfMonth.getDay(); // 0 = Sun
+    const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
+    const daysInPrev = new Date(viewYear, viewMonth, 0).getDate();
+    const today = new Date();
+    today.setHours(0,0,0,0);
+    const selected = currentVal ? new Date(currentVal + 'T00:00:00') : null;
+
+    let html = `
+      <div class="csi-cal-header">
+        <button type="button" class="csi-cal-nav-btn" onclick="_csiCalShift(-1)">‹</button>
+        <div class="csi-cal-title">${monthNames[viewMonth]} ${viewYear}</div>
+        <button type="button" class="csi-cal-nav-btn" onclick="_csiCalShift(1)">›</button>
+      </div>
+      <div class="csi-cal-grid">
+        ${dows.map(d => `<div class="csi-cal-dow">${d}</div>`).join('')}
+    `;
+    // Lead-in days from previous month
+    for(let i = startDow - 1; i >= 0; i--){
+      const d = daysInPrev - i;
+      html += `<div class="csi-cal-day other-month">${d}</div>`;
+    }
+    // Current month days
+    for(let d = 1; d <= daysInMonth; d++){
+      const cellDate = new Date(viewYear, viewMonth, d);
+      cellDate.setHours(0,0,0,0);
+      const isPast = cellDate < today;
+      const isToday = cellDate.getTime() === today.getTime();
+      const isSelected = selected && cellDate.getTime() === new Date(selected.getFullYear(), selected.getMonth(), selected.getDate()).getTime();
+      const classes = ['csi-cal-day'];
+      if(isPast && !isSelected) classes.push('past');
+      if(isToday && !isSelected) classes.push('today');
+      if(isSelected) classes.push('selected');
+      const isoDate = viewYear + '-' + String(viewMonth + 1).padStart(2,'0') + '-' + String(d).padStart(2,'0');
+      html += `<div class="${classes.join(' ')}" onclick="_csiCalPick('${isoDate}','${targetInputId}')">${d}</div>`;
+    }
+    // Trail-out days to fill the grid (6 rows × 7 cols = 42 max)
+    const totalCells = startDow + daysInMonth;
+    const remaining = (7 - (totalCells % 7)) % 7;
+    for(let d = 1; d <= remaining; d++){
+      html += `<div class="csi-cal-day other-month">${d}</div>`;
+    }
+    html += '</div>';
+    popup.innerHTML = html;
+    _csiPositionPopup(popup, triggerEl);
+  }
+
+  // Stash callbacks so the buttons (which use inline onclick) can reach them
+  window._csiCalShift = (dir) => {
+    viewMonth += dir;
+    if(viewMonth < 0){ viewMonth = 11; viewYear--; }
+    else if(viewMonth > 11){ viewMonth = 0; viewYear++; }
+    render();
+  };
+  window._csiCalPick = (isoDate, targetId) => {
+    const hidden = document.getElementById(targetId);
+    if(hidden) hidden.value = isoDate;
+    const lbl = document.getElementById(targetId + '-label');
+    if(lbl){
+      const dt = new Date(isoDate + 'T00:00:00');
+      lbl.textContent = dt.toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric', year:'numeric' });
+    }
+    const trig = document.getElementById(targetId + '-trigger');
+    if(trig) trig.classList.remove('empty');
+    _csiClosePicker();
+  };
+
+  render();
+  // Defer the outside-click handler so the click that opened this doesn't trigger close
+  setTimeout(() => {
+    document.addEventListener('click', _csiOutsidePickerHandler, true);
+    document.addEventListener('keydown', _csiPickerEscHandler);
+  }, 10);
+}
+
+// ─── TIME PICKER ────────────────────────────────────────────────────
+function openTimePicker(targetInputId, triggerEl){
+  const existing = document.getElementById('csi-picker-popup');
+  if(existing){ _csiClosePicker(); return; }
+
+  const hiddenInput = document.getElementById(targetInputId);
+  const labelEl = document.getElementById(targetInputId + '-label');
+  const currentVal = hiddenInput?.value || ''; // 24h HH:MM
+
+  // Parse current val into hour12 + minute + ampm
+  let hour12 = 9, minute = 0, ampm = 'AM';
+  if(currentVal){
+    const [h24, m] = currentVal.split(':').map(Number);
+    if(!isNaN(h24)){
+      ampm = h24 >= 12 ? 'PM' : 'AM';
+      hour12 = h24 % 12 === 0 ? 12 : h24 % 12;
+      minute = m || 0;
+    }
+  }
+
+  const popup = document.createElement('div');
+  popup.id = 'csi-picker-popup';
+  popup.className = 'csi-picker-popup';
+  document.body.appendChild(popup);
+
+  function render(){
+    const hours = [12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+    const minutes = [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55];
+    const display = String(hour12) + ':' + String(minute).padStart(2,'0') + ' ' + ampm;
+    popup.innerHTML = `
+      <div class="csi-time-wrap">
+        <div class="csi-time-display">${display}</div>
+        <div class="csi-time-row">
+          <div class="csi-time-section">
+            <div class="csi-time-section-lbl">HOUR</div>
+            <div class="csi-time-grid">
+              ${hours.map(h => `<button type="button" class="csi-time-btn ${h === hour12 ? 'selected' : ''}" onclick="_csiTimeSetHour(${h})">${h}</button>`).join('')}
+            </div>
+          </div>
+        </div>
+        <div class="csi-time-row">
+          <div class="csi-time-section">
+            <div class="csi-time-section-lbl">MIN</div>
+            <div class="csi-time-grid">
+              ${minutes.map(m => `<button type="button" class="csi-time-btn ${m === minute ? 'selected' : ''}" onclick="_csiTimeSetMin(${m})">${String(m).padStart(2,'0')}</button>`).join('')}
+            </div>
+          </div>
+        </div>
+        <div class="csi-time-row" style="gap:10px;">
+          <button type="button" class="csi-time-ampm-btn ${ampm === 'AM' ? 'selected' : ''}" style="flex:1;" onclick="_csiTimeSetAmpm('AM')">AM</button>
+          <button type="button" class="csi-time-ampm-btn ${ampm === 'PM' ? 'selected' : ''}" style="flex:1;" onclick="_csiTimeSetAmpm('PM')">PM</button>
+        </div>
+        <div class="csi-time-actions">
+          <button type="button" class="bo-btn bo-btn-ghost" onclick="_csiClosePicker()">Cancel</button>
+          <button type="button" class="bo-btn bo-btn-primary" onclick="_csiTimeConfirm('${targetInputId}')">Set Time</button>
+        </div>
+      </div>`;
+    _csiPositionPopup(popup, triggerEl);
+  }
+
+  window._csiTimeSetHour  = (h) => { hour12 = h; render(); };
+  window._csiTimeSetMin   = (m) => { minute = m; render(); };
+  window._csiTimeSetAmpm  = (a) => { ampm = a; render(); };
+  window._csiClosePicker  = _csiClosePicker;
+  window._csiTimeConfirm  = (targetId) => {
+    // Convert to 24h
+    let h24 = hour12 % 12;
+    if(ampm === 'PM') h24 += 12;
+    const value = String(h24).padStart(2,'0') + ':' + String(minute).padStart(2,'0');
+    const hidden = document.getElementById(targetId);
+    if(hidden) hidden.value = value;
+    const lbl = document.getElementById(targetId + '-label');
+    if(lbl) lbl.textContent = String(hour12) + ':' + String(minute).padStart(2,'0') + ' ' + ampm;
+    const trig = document.getElementById(targetId + '-trigger');
+    if(trig) trig.classList.remove('empty');
+    _csiClosePicker();
+  };
+
+  render();
+  setTimeout(() => {
+    document.addEventListener('click', _csiOutsidePickerHandler, true);
+    document.addEventListener('keydown', _csiPickerEscHandler);
+  }, 10);
+}
+
+window.openDatePicker = openDatePicker;
+window.openTimePicker = openTimePicker;
 
 
 async function renderStoresAdmin(el){
