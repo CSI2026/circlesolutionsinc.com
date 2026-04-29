@@ -2427,7 +2427,7 @@ function renderSidebar(){
     { id:'global-docs', label:'📁 Company Library', show:true },
     { id:'my-forms', label:'📋 My Forms', show:true },
     { id:'my-contracts', label:'📄 My Contracts', show:true },
-    { id:'photo-audit-checkin', label:'📸 Daily Check-In', show:'async-checkin' },
+    // Daily Check-In moved into Retail Energy → Tool Box (one-tap access alongside other daily tools)
     { id:'my-inventory', label:'📦 My Inventory', show:'async-myinv' }
   ];
   const companyBody = companyItems.map(it => `
@@ -3320,6 +3320,25 @@ async function renderToolBox(el, prog, canManage){
     return;
   }
 
+  // Built-in (non-DB) tools that should appear in specific program toolboxes.
+  // These are program features bolted into the tool box for one-tap access.
+  // They render as tool tiles but route to internal admin views instead of
+  // launching the tool iframe.
+  const builtInTiles = [];
+  if(prog.id === 'retail'){
+    // Daily Check-In is a Retail Energy tool. (Was previously in the sidebar
+    // Company section; now lives here for one-tap access.)
+    // Only show to users who can actually do a check-in (anyone with a store).
+    builtInTiles.push({
+      kind: 'builtin',
+      icon: '📸',
+      name: 'Daily Check-In',
+      description: 'Photo check-in/out at your assigned store',
+      color: '#00FF88',
+      onclick: "boShowAdmin('photo-audit-checkin')"
+    });
+  }
+
   el.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px;flex-wrap:wrap;gap:12px;">
       <div>
@@ -3329,7 +3348,7 @@ async function renderToolBox(el, prog, canManage){
       ${canBuild ? `<button class="bo-btn bo-btn-primary" onclick="openToolBuilder('${prog.id}')">+ Add Tool</button>` : ''}
     </div>
 
-    ${(tools || []).length === 0 ? `
+    ${(tools || []).length === 0 && builtInTiles.length === 0 ? `
       <div class="bo-card" style="text-align:center;padding:50px 30px;">
         <div style="font-size:54px;margin-bottom:12px;">🧰</div>
         <div style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#fff;letter-spacing:1px;margin-bottom:6px;">No tools yet</div>
@@ -3337,9 +3356,25 @@ async function renderToolBox(el, prog, canManage){
       </div>
     ` : `
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px;">
-        ${tools.map(t => renderToolCard(t, prog, canBuild)).join('')}
+        ${builtInTiles.map(t => renderBuiltInTile(t)).join('')}
+        ${(tools || []).map(t => renderToolCard(t, prog, canBuild)).join('')}
       </div>
     `}`;
+}
+
+// Render a built-in (non-DB) tile that maps to an internal admin view.
+function renderBuiltInTile(t){
+  const color = t.color || '#FF6B00';
+  return `
+    <div class="bo-card" style="padding:0;overflow:hidden;cursor:pointer;border:1px solid ${color}33;transition:transform 0.2s, box-shadow 0.2s, border-color 0.2s;" onclick="${t.onclick}" onmouseover="this.style.transform='translateY(-3px)';this.style.boxShadow='0 8px 24px ${color}33';this.style.borderColor='${color}88';" onmouseout="this.style.transform='';this.style.boxShadow='';this.style.borderColor='${color}33';">
+      <div style="background:linear-gradient(135deg,${color}22,${color}08);padding:24px 20px;text-align:center;border-bottom:1px solid ${color}22;">
+        <div style="font-size:48px;line-height:1;margin-bottom:4px;">${t.icon}</div>
+      </div>
+      <div style="padding:14px 16px;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#fff;letter-spacing:0.5px;line-height:1.1;">${escapeHtml(t.name)}</div>
+        ${t.description ? `<div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-top:4px;line-height:1.4;">${escapeHtml(t.description)}</div>` : ''}
+      </div>
+    </div>`;
 }
 
 function renderToolCard(t, prog, canBuild){
@@ -4018,7 +4053,15 @@ function roleBadgeColor(r){ return {owner:'#FFD700',admin:'#FF0080',manager:'#00
 // Action buttons: Send Packet, Send Contract, Edit, Manage Password, Resend Welcome.
 // ═══════════════════════════════════════════════════════════════════════
 async function openAgentProfile(userId){
-  const canManage = ['owner','admin'].includes(currentProfile.role);
+  // Define ALL needed permission flags up front. Previously isOwner was
+  // referenced below without being defined here, which threw a ReferenceError
+  // and left the page stuck on the "Loading agent profile..." spinner.
+  const role = currentProfile?.role;
+  const isOwner = role === 'owner';
+  const isAdmin = isOwner || role === 'admin';
+  const isOnboarding = currentProfile?.has_master_center_access === true;
+  const canManage = isAdmin;
+  const canViewOnboarding = isOwner || isOnboarding;
 
   const el = document.getElementById('bo-content');
   el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading agent profile…</div>';
@@ -4026,28 +4069,64 @@ async function openAgentProfile(userId){
   activeAdminView = 'agent-profile';
   renderSidebar();
 
-  // Fetch agent + related data in parallel
-  const [
-    { data: agent },
-    { data: packets },
-    { data: contracts },
-  ] = await Promise.all([
-    sb.from('profiles').select('*').eq('id', userId).single(),
-    sb.from('agent_onboarding').select('*').eq('user_id', userId).order('assigned_at', { ascending: false }),
-    sb.from('contract_assignments').select('*').eq('user_id', userId).order('assigned_at', { ascending: false }),
-  ]);
+  // Fetch agent + related data. Wrap each in try/catch so a single failed
+  // query doesn't break the whole page (e.g., RLS denial on a related table).
+  let agent = null;
+  let packets = [];
+  let contracts = [];
+  let intakeStatus = null; // Phase 3.5 onboarding status (only fetched if user can view)
+  let achStatus = null;
+  let queryErrors = [];
+
+  try {
+    const r = await sb.from('profiles').select('*').eq('id', userId).maybeSingle();
+    if(r.error) queryErrors.push('Profile: ' + r.error.message);
+    agent = r.data;
+  } catch(e){ queryErrors.push('Profile fetch failed: ' + e.message); }
+
+  try {
+    const r = await sb.from('agent_onboarding').select('*').eq('user_id', userId).order('assigned_at', { ascending: false });
+    if(!r.error) packets = r.data || [];
+  } catch(e){ /* table optional — silent */ }
+
+  try {
+    const r = await sb.from('contract_assignments').select('*').eq('user_id', userId).order('assigned_at', { ascending: false });
+    if(!r.error) contracts = r.data || [];
+  } catch(e){ /* silent */ }
+
+  // Phase 3.5: pull onboarding form-status rows for the summary card.
+  // Only fetched if current user can view onboarding (Owner + Onboarding).
+  if(canViewOnboarding){
+    try {
+      const [iRes, aRes] = await Promise.all([
+        sb.from('onboarding_intake').select('id, status, submitted_at, sent_to_reliant_at').eq('user_id', userId).maybeSingle(),
+        sb.from('onboarding_ach').select('id, status, submitted_at').eq('user_id', userId).maybeSingle()
+      ]);
+      intakeStatus = iRes?.data || null;
+      achStatus = aRes?.data || null;
+    } catch(e){ /* silent */ }
+  }
 
   if(!agent){
-    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Agent not found or access denied.</div>';
+    el.innerHTML = `
+      <div style="margin-bottom:16px;">
+        <button class="bo-btn bo-btn-ghost" style="padding:6px 14px;font-size:12px;" onclick="boShowAdmin('agents')">← Back to Team</button>
+      </div>
+      <div class="bo-card" style="color:#F87171;">
+        <div style="font-size:14px;font-weight:600;margin-bottom:6px;">Agent not found or access denied.</div>
+        ${queryErrors.length ? '<div style="font-size:11.5px;color:rgba(248,113,113,0.7);margin-top:8px;">' + queryErrors.map(e => escapeHtml(e)).join('<br/>') + '</div>' : ''}
+      </div>`;
     return;
   }
 
-  // Resolve lookup names
+  // Resolve lookup names — use maybeSingle to avoid throws on missing rows
   const market = agent.market_id ? allMarkets.find(m => m.id === agent.market_id) : null;
   let reportsTo = null;
   if(agent.reports_to){
-    const { data: rt } = await sb.from('profiles').select('id,full_name,email').eq('id', agent.reports_to).single();
-    reportsTo = rt;
+    try {
+      const { data: rt } = await sb.from('profiles').select('id,full_name,email').eq('id', agent.reports_to).maybeSingle();
+      reportsTo = rt;
+    } catch(_){}
   }
 
   const avatarHtml = agent.avatar_url
@@ -4117,6 +4196,41 @@ async function openAgentProfile(userId){
         </div>
       ` : ''}
     </div>
+
+    <!-- PHASE 3.5 HYBRID ONBOARDING SUMMARY (visible to Owner + Onboarding only) -->
+    ${canViewOnboarding ? `
+      <div class="bo-card" style="margin-bottom:18px;border:1px solid rgba(0,198,255,0.25);background:linear-gradient(135deg, rgba(0,198,255,0.04), rgba(0,198,255,0.0));">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#00C6FF;letter-spacing:1.5px;">📋 RELIANT ONBOARDING</div>
+          <button class="bo-btn bo-btn-primary" style="padding:6px 14px;font-size:12px;background:linear-gradient(135deg,#00C6FF,#0078D7);" onclick="openAgentOnboarding('${agent.id}')">View Full Onboarding →</button>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;">
+          ${(() => {
+            const intakeLabel = !intakeStatus ? { color:'rgba(255,255,255,0.4)', text:'NOT STARTED', sub:'Agent has not submitted intake yet' }
+              : intakeStatus.status === 'sent' ? { color:'#00FF88', text:'✓ SENT TO RELIANT', sub: 'Sent ' + new Date(intakeStatus.sent_to_reliant_at).toLocaleDateString() }
+              : intakeStatus.status === 'rejected' ? { color:'#F87171', text:'✗ REJECTED', sub:'Awaiting agent re-submission' }
+              : intakeStatus.status === 'reviewed' ? { color:'#00C6FF', text:'👁 REVIEWED', sub:'Ready to dispatch to Reliant' }
+              : { color:'#FFC800', text:'⏳ SUBMITTED', sub: 'Submitted ' + (intakeStatus.submitted_at ? new Date(intakeStatus.submitted_at).toLocaleDateString() : '—') };
+            const achLabel = !achStatus ? { color:'rgba(255,255,255,0.4)', text:'NOT STARTED', sub:'Agent has not submitted banking yet' }
+              : achStatus.status === 'approved' ? { color:'#00FF88', text:'✓ APPROVED', sub:'Internal use only' }
+              : achStatus.status === 'rejected' ? { color:'#F87171', text:'✗ REJECTED', sub:'Awaiting re-submission' }
+              : { color:'#FFC800', text:'⏳ SUBMITTED', sub: 'Submitted ' + (achStatus.submitted_at ? new Date(achStatus.submitted_at).toLocaleDateString() : '—') };
+            return `
+              <div style="padding:12px 14px;background:rgba(0,0,0,0.2);border-radius:8px;border:1px solid ${intakeLabel.color}33;">
+                <div style="font-size:11px;color:rgba(255,255,255,0.45);letter-spacing:1.5px;font-weight:700;margin-bottom:4px;">📝 INTAKE</div>
+                <div style="font-size:12.5px;color:${intakeLabel.color};font-weight:700;letter-spacing:0.5px;">${intakeLabel.text}</div>
+                <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:3px;">${intakeLabel.sub}</div>
+              </div>
+              <div style="padding:12px 14px;background:rgba(0,0,0,0.2);border-radius:8px;border:1px solid ${achLabel.color}33;">
+                <div style="font-size:11px;color:rgba(255,255,255,0.45);letter-spacing:1.5px;font-weight:700;margin-bottom:4px;">🏦 BANKING</div>
+                <div style="font-size:12.5px;color:${achLabel.color};font-weight:700;letter-spacing:0.5px;">${achLabel.text}</div>
+                <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:3px;">${achLabel.sub}</div>
+              </div>`;
+          })()}
+        </div>
+        <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:10px;font-style:italic;">SSN, photos, and banking details are visible on the full onboarding page.</div>
+      </div>
+    ` : ''}
 
     <!-- TWO-COLUMN LAYOUT: Onboarding | Contracts -->
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
@@ -7578,7 +7692,7 @@ async function renderOnboardingPacket(el){
           <div style="flex:1;min-width:200px;">
             <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#fff;letter-spacing:1px;line-height:1.1;">
               ${escapeHtml(f.label)}
-              ${isApproved ? '<span style="display:inline-block;margin-left:8px;color:#00FF88;font-size:18px;">✓</span>' : isDone ? '<span style="display:inline-block;margin-left:8px;color:#FFC800;font-size:14px;">⏳ submitted</span>' : ''}
+              ${isApproved ? '<span style="display:inline-block;margin-left:8px;color:#00FF88;font-size:18px;">✓</span>' : isDone ? '<span style="display:inline-block;margin-left:8px;background:rgba(0,255,136,0.15);color:#00FF88;font-size:11px;font-weight:700;letter-spacing:1px;padding:3px 10px;border-radius:50px;">✓ SUBMITTED</span>' : ''}
             </div>
             <div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-top:3px;">${escapeHtml(f.description)}</div>
             ${isRejected && s?.notes ? `<div style="font-size:12px;color:#F87171;margin-top:5px;">Rejected: ${escapeHtml(s.notes)} — please re-submit.</div>` : ''}
@@ -9303,9 +9417,14 @@ function haversineDistance(lat1, lon1, lat2, lon2){
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
-let _paPhotoBlob = null;
+let _paPhotoBlob = null;   // kiosk photo (existing)
+let _paSelfieBlob = null;  // selfie photo (new — check-in only)
 
 async function renderPhotoAuditCheckin(el){
+  // Reset photo blobs on every fresh render (e.g. "Submit Another" returns here)
+  _paPhotoBlob = null;
+  _paSelfieBlob = null;
+
   // NEW MODEL (Phase 3.2): An agent's available stores come from THEIR MM.
   // 1. Find the agent's MM via reports_to.
   // 2. Get all stores that MM manages (via store_managers).
@@ -9439,11 +9558,11 @@ async function renderPhotoAuditCheckin(el){
         <label class="form-label">Action</label>
         <div style="display:flex;gap:8px;">
           <label style="flex:1;display:flex;align-items:center;gap:8px;padding:14px;background:rgba(0,255,136,0.05);border:2px solid ${suggested === 'check_in' ? '#00FF88' : 'rgba(255,255,255,0.1)'};border-radius:10px;cursor:pointer;">
-            <input type="radio" name="pa-type" value="check_in" ${suggested === 'check_in' ? 'checked' : ''} style="width:18px;height:18px;accent-color:#00FF88;"/>
+            <input type="radio" name="pa-type" value="check_in" ${suggested === 'check_in' ? 'checked' : ''} onchange="paOnTypeChange()" style="width:18px;height:18px;accent-color:#00FF88;"/>
             <div><div style="font-size:14px;color:#00FF88;font-weight:700;">CHECK IN</div><div style="font-size:11px;color:rgba(255,255,255,0.5);">Starting my shift</div></div>
           </label>
           <label style="flex:1;display:flex;align-items:center;gap:8px;padding:14px;background:rgba(0,198,255,0.05);border:2px solid ${suggested === 'check_out' ? '#00C6FF' : 'rgba(255,255,255,0.1)'};border-radius:10px;cursor:pointer;">
-            <input type="radio" name="pa-type" value="check_out" ${suggested === 'check_out' ? 'checked' : ''} style="width:18px;height:18px;accent-color:#00C6FF;"/>
+            <input type="radio" name="pa-type" value="check_out" ${suggested === 'check_out' ? 'checked' : ''} onchange="paOnTypeChange()" style="width:18px;height:18px;accent-color:#00C6FF;"/>
             <div><div style="font-size:14px;color:#00C6FF;font-weight:700;">CHECK OUT</div><div style="font-size:11px;color:rgba(255,255,255,0.5);">Ending my shift</div></div>
           </label>
         </div>
@@ -9454,17 +9573,37 @@ async function renderPhotoAuditCheckin(el){
           ${stores.map(s => `<option value="${s.id}" data-lat="${s.latitude}" data-lng="${s.longitude}" data-radius="${s.geofence_radius_meters || 100}">${escapeHtml(s.name)}${s.store_number ? ' #' + escapeHtml(s.store_number) : ''}${s.city ? ' — ' + escapeHtml(s.city) : ''}</option>`).join('')}
         </select>
       </div>
+
+      <!-- Photo capture block — selfie shown on check-in only, kiosk shown always -->
+      <div style="background:rgba(255,193,7,0.06);border:1px solid rgba(255,193,7,0.25);border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:11.5px;color:rgba(255,255,255,0.7);line-height:1.55;">
+        <strong style="color:#FFD700;">⚠️ Live camera only.</strong> Tap "📸 Take Photo" — the camera will open. Older photos from your gallery will be rejected.
+      </div>
+
+      <!-- SELFIE — check-in only, front camera, head-to-waist with badge -->
+      <div id="pa-selfie-block" class="form-group" style="display:${suggested === 'check_in' ? 'block' : 'none'};">
+        <label class="form-label" style="display:flex;align-items:center;gap:8px;">
+          <span>🤳 Your Selfie *</span>
+          <span style="font-size:10.5px;color:rgba(255,255,255,0.4);font-weight:400;letter-spacing:0;">— show your badge, head to waist visible</span>
+        </label>
+        <input id="pa-selfie" type="file" accept="image/*" capture="user" onchange="paOnSelfieSelected(this)" style="display:none;"/>
+        <button type="button" class="bo-btn bo-btn-primary" style="width:100%;padding:14px;font-size:14px;background:linear-gradient(135deg,#FF6B00,#FF0080);" onclick="document.getElementById('pa-selfie').click()">📸 Take Photo</button>
+        <div id="pa-selfie-preview" style="margin-top:8px;"></div>
+      </div>
+
+      <!-- KIOSK PHOTO — both check-in and check-out, back camera -->
       <div class="form-group">
-        <label class="form-label">Live Photo *</label>
-        <div style="background:rgba(255,193,7,0.06);border:1px solid rgba(255,193,7,0.25);border-radius:8px;padding:10px 14px;margin-bottom:8px;font-size:11.5px;color:rgba(255,255,255,0.7);line-height:1.55;">
-          <strong style="color:#FFD700;">⚠️ Live camera only.</strong> The camera will open automatically. Older gallery photos will be rejected.
-        </div>
-        <input id="pa-photo" type="file" accept="image/*" capture="environment" class="form-input" onchange="paOnPhotoSelected(this)"/>
+        <label class="form-label" style="display:flex;align-items:center;gap:8px;">
+          <span>🖥️ Kiosk Display *</span>
+          <span style="font-size:10.5px;color:rgba(255,255,255,0.4);font-weight:400;letter-spacing:0;">— photo of your station / kiosk</span>
+        </label>
+        <input id="pa-photo" type="file" accept="image/*" capture="environment" onchange="paOnPhotoSelected(this)" style="display:none;"/>
+        <button type="button" class="bo-btn bo-btn-primary" style="width:100%;padding:14px;font-size:14px;background:linear-gradient(135deg,#FF6B00,#FF0080);" onclick="document.getElementById('pa-photo').click()">📸 Take Photo</button>
         <div id="pa-photo-preview" style="margin-top:8px;"></div>
       </div>
+
       <div class="form-group"><label class="form-label">Notes (optional)</label><textarea id="pa-notes" class="form-input" rows="2" placeholder="Anything to log? Issues, observations, etc."></textarea></div>
       <div id="pa-status" style="margin:10px 0;font-size:12.5px;color:rgba(255,255,255,0.5);"></div>
-      <button class="bo-btn bo-btn-primary" style="width:100%;padding:14px;font-size:14px;" onclick="submitPhotoAudit()">📸 Submit</button>
+      <button class="bo-btn bo-btn-primary" style="width:100%;padding:14px;font-size:14px;" onclick="submitPhotoAudit()">Submit Check-${suggested === 'check_out' ? 'Out' : 'In'}</button>
       <div id="pa-msg" style="margin-top:12px;font-size:13px;text-align:center;"></div>
     </div>`;
 }
@@ -9482,7 +9621,41 @@ function paOnPhotoSelected(input){
   }
   _paPhotoBlob = file;
   const url = URL.createObjectURL(file);
-  preview.innerHTML = `<img src="${url}" style="max-width:200px;border-radius:8px;border:2px solid #00FF88;"/><div style="font-size:11px;color:#00FF88;margin-top:4px;">✓ Photo captured</div>`;
+  preview.innerHTML = `<img src="${url}" style="max-width:200px;border-radius:8px;border:2px solid #00FF88;"/><div style="font-size:11px;color:#00FF88;margin-top:4px;">✓ Kiosk photo captured</div>`;
+}
+
+function paOnSelfieSelected(input){
+  const file = input.files?.[0];
+  const preview = document.getElementById('pa-selfie-preview');
+  if(!file){ preview.innerHTML = ''; _paSelfieBlob = null; return; }
+  const ageSeconds = (Date.now() - file.lastModified) / 1000;
+  if(ageSeconds > 120){
+    preview.innerHTML = '<div style="color:#F87171;font-size:12.5px;padding:8px;background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.3);border-radius:6px;">⛔ This selfie was taken more than 2 minutes ago. Live camera capture only — please use the camera now.</div>';
+    input.value = '';
+    _paSelfieBlob = null;
+    return;
+  }
+  _paSelfieBlob = file;
+  const url = URL.createObjectURL(file);
+  preview.innerHTML = `<img src="${url}" style="max-width:200px;border-radius:8px;border:2px solid #00FF88;"/><div style="font-size:11px;color:#00FF88;margin-top:4px;">✓ Selfie captured</div>`;
+}
+
+// Show/hide the selfie block based on check-in vs check-out radio.
+function paOnTypeChange(){
+  const auditType = document.querySelector('input[name="pa-type"]:checked')?.value;
+  const selfieBlock = document.getElementById('pa-selfie-block');
+  if(selfieBlock){
+    selfieBlock.style.display = (auditType === 'check_in') ? 'block' : 'none';
+  }
+  // If switching away from check-in, clear any captured selfie so we don't
+  // accidentally upload a stale one on check-out.
+  if(auditType !== 'check_in'){
+    _paSelfieBlob = null;
+    const inp = document.getElementById('pa-selfie');
+    if(inp) inp.value = '';
+    const preview = document.getElementById('pa-selfie-preview');
+    if(preview) preview.innerHTML = '';
+  }
 }
 
 async function submitPhotoAudit(){
@@ -9499,7 +9672,12 @@ async function submitPhotoAudit(){
 
   if(!auditType){ msg.innerHTML = '<span style="color:#F87171;">Pick check-in or check-out.</span>'; return; }
   if(!storeId){ msg.innerHTML = '<span style="color:#F87171;">Pick a store.</span>'; return; }
-  if(!_paPhotoBlob){ msg.innerHTML = '<span style="color:#F87171;">Take a live photo first.</span>'; return; }
+  if(!_paPhotoBlob){ msg.innerHTML = '<span style="color:#F87171;">Take the kiosk photo first.</span>'; return; }
+  // Selfie required on check-IN events only (anti-fraud verification of agent identity)
+  if(auditType === 'check_in' && !_paSelfieBlob){
+    msg.innerHTML = '<span style="color:#F87171;">Take your selfie first (with badge visible, head to waist).</span>';
+    return;
+  }
   if(isNaN(storeLat) || isNaN(storeLng)){ msg.innerHTML = '<span style="color:#F87171;">This store has no GPS set. Ask your manager.</span>'; return; }
 
   // ─── 40hr weekly cap enforcement ───
@@ -9550,6 +9728,18 @@ async function submitPhotoAudit(){
     return;
   }
 
+  // Upload selfie if present (check-in only)
+  let selfiePath = null;
+  if(_paSelfieBlob){
+    status.innerHTML += '<br><span style="color:rgba(255,255,255,0.6);">⬆️ Uploading selfie…</span>';
+    selfiePath = currentProfile.id + '/selfie-' + Date.now() + '.jpg';
+    const { error: selfieErr } = await sb.storage.from('photo-audits').upload(selfiePath, _paSelfieBlob);
+    if(selfieErr){
+      msg.innerHTML = '<span style="color:#F87171;">Selfie upload failed: ' + selfieErr.message + '</span>';
+      return;
+    }
+  }
+
   // Compute off-hours status BEFORE the insert so we can store it
   let offHoursCheck = false;
   let offHoursMinutes = 0;
@@ -9563,7 +9753,7 @@ async function submitPhotoAudit(){
     user_id: currentProfile.id, store_id: storeId, audit_type: auditType,
     reported_latitude: myLat, reported_longitude: myLng, reported_accuracy_meters: accuracy,
     distance_from_store_meters: distance, geofence_passed: passed,
-    photo_path: photoPath, notes, user_agent: navigator.userAgent,
+    photo_path: photoPath, selfie_path: selfiePath, notes, user_agent: navigator.userAgent,
     off_hours_check: offHoursCheck, off_hours_minutes: offHoursMinutes
   }).select().single();
   if(insertErr){ msg.innerHTML = '<span style="color:#F87171;">' + insertErr.message + '</span>'; return; }
@@ -9591,12 +9781,31 @@ async function submitPhotoAudit(){
         }
       } catch(_){}
     }
-    msg.innerHTML = '<span style="color:#00FF88;font-size:14px;">✓ ' + (auditType === 'check_in' ? 'Checked in' : 'Checked out') + ' successfully.</span>' + extras;
+    msg.innerHTML = '<span style="color:#00FF88;font-size:14px;">✓ ' + (auditType === 'check_in' ? 'Checked in' : 'Checked out') + ' successfully.</span>' + extras + `
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;justify-content:center;">
+        <button class="bo-btn bo-btn-primary" onclick="renderMainContent()" style="padding:10px 20px;font-size:13px;">📸 Submit Another</button>
+        <button class="bo-btn bo-btn-ghost" onclick="checkinGoHome()" style="padding:10px 20px;font-size:13px;">✓ Done</button>
+      </div>`;
   } else {
-    msg.innerHTML = '<div style="background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.4);border-radius:8px;padding:14px;color:#F87171;font-size:13px;line-height:1.5;text-align:left;">⛔ <strong>FRAUD ALERT TRIGGERED</strong><br><br>You were ' + Math.round(distance) + 'm from the store (allowed: ' + radius + 'm). The submission has been logged and your manager + the owner have been notified immediately.</div>';
+    msg.innerHTML = '<div style="background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.4);border-radius:8px;padding:14px;color:#F87171;font-size:13px;line-height:1.5;text-align:left;">⛔ <strong>FRAUD ALERT TRIGGERED</strong><br><br>You were ' + Math.round(distance) + 'm from the store (allowed: ' + radius + 'm). The submission has been logged and your manager + the owner have been notified immediately.</div>' + `
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;justify-content:center;">
+        <button class="bo-btn bo-btn-ghost" onclick="checkinGoHome()" style="padding:10px 20px;font-size:13px;">← Back to Dashboard</button>
+      </div>`;
   }
-  setTimeout(() => renderMainContent(), 3500);
+  // No auto-redirect — agent stays on this screen and uses the buttons above.
+  // (Previously a setTimeout auto-rendered after 3.5s, which could cause a session
+  //  refresh race during long uploads and bounce them to login.)
 }
+
+// Helper to return to backoffice home (clears active view + program)
+function checkinGoHome(){
+  activeAdminView = null;
+  activeProgramId = null;
+  renderSidebar();
+  renderMainContent();
+  scrollMainToTop();
+}
+window.checkinGoHome = checkinGoHome;
 
 async function notifyAuditSubmitted(audit, passed, storeName){
   const { data: agent } = await sb.from('profiles').select('full_name,email,reports_to').eq('id', currentProfile.id).single();
@@ -9773,6 +9982,12 @@ async function viewAuditPhoto(auditId, photoPath){
   if(!audit){ alert('Audit not found'); return; }
   const { data: sig } = await sb.storage.from('photo-audits').createSignedUrl(photoPath, 300);
   const photoUrl = sig?.signedUrl || '';
+  // Selfie URL (only present on check-in events from Phase 3.6+)
+  let selfieUrl = '';
+  if(audit.selfie_path){
+    const { data: ssig } = await sb.storage.from('photo-audits').createSignedUrl(audit.selfie_path, 300);
+    selfieUrl = ssig?.signedUrl || '';
+  }
   const passed = audit.geofence_passed;
   const dist = Math.round(audit.distance_from_store_meters || 0);
   const mapLink = `https://www.google.com/maps?q=${audit.reported_latitude},${audit.reported_longitude}`;
@@ -9783,6 +9998,14 @@ async function viewAuditPhoto(auditId, photoPath){
     <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;margin-bottom:6px;letter-spacing:1px;">📸 Audit Detail</h2>
     <div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-bottom:14px;">${escapeHtml(audit.profiles?.full_name || audit.profiles?.email || '')} · ${new Date(audit.created_at).toLocaleString()}</div>
 
+    ${selfieUrl ? `
+      <div style="font-size:11px;color:rgba(255,255,255,0.5);letter-spacing:1.5px;font-weight:700;margin-bottom:6px;">🤳 SELFIE (with badge)</div>
+      <div style="background:#000;border-radius:10px;overflow:hidden;margin-bottom:14px;text-align:center;">
+        <img src="${selfieUrl}" style="max-width:100%;max-height:300px;display:block;margin:0 auto;"/>
+      </div>
+    ` : ''}
+
+    <div style="font-size:11px;color:rgba(255,255,255,0.5);letter-spacing:1.5px;font-weight:700;margin-bottom:6px;">🖥️ KIOSK PHOTO</div>
     <div style="background:#000;border-radius:10px;overflow:hidden;margin-bottom:14px;text-align:center;">
       ${photoUrl ? `<img src="${photoUrl}" style="max-width:100%;max-height:400px;display:block;margin:0 auto;"/>` : '<div style="padding:40px;color:#F87171;">Photo could not be loaded.</div>'}
     </div>
@@ -10280,13 +10503,19 @@ async function saveProgram(existingId){
 // ═══════════════════════════════════════════════════════════════
 async function renderMyProfile(el){
   const p = currentProfile;
+  if(!p){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Not signed in.</div>';
+    return;
+  }
   const progs = (p.programs || []).map(pid => { const x = allPrograms.find(y=>y.id===pid); return x ? `<span style="background:${x.color}22;color:${x.color};padding:4px 12px;border-radius:50px;margin-right:6px;font-weight:600;font-size:12px;">${x.icon} ${x.name}</span>` : ''; }).join('');
   const market = allMarkets.find(m => m.id === p.market_id);
-  // Find who I report to
+  // Find who I report to. Use maybeSingle to avoid throws on missing rows.
   let reportsTo = null;
   if(p.reports_to){
-    const { data } = await sb.from('profiles').select('full_name,email,role').eq('id', p.reports_to).single();
-    reportsTo = data;
+    try {
+      const { data } = await sb.from('profiles').select('full_name,email,role').eq('id', p.reports_to).maybeSingle();
+      reportsTo = data;
+    } catch(_){}
   }
 
   const avatarHtml = p.avatar_url
@@ -14786,6 +15015,8 @@ window.deleteCategory = deleteCategory;
 window.renderMyInventory = renderMyInventory;
 window.renderPhotoAuditCheckin = renderPhotoAuditCheckin;
 window.paOnPhotoSelected = paOnPhotoSelected;
+window.paOnSelfieSelected = paOnSelfieSelected;
+window.paOnTypeChange = paOnTypeChange;
 window.submitPhotoAudit = submitPhotoAudit;
 window.renderPhotoAuditsReview = renderPhotoAuditsReview;
 window.setAuditFilter = setAuditFilter;
