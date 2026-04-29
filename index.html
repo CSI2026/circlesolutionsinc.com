@@ -2355,6 +2355,7 @@ function renderSidebar(){
   }
   if(isOwner || isAdmin || currentProfile.has_master_center_access){
     adminNavItems.push({ id:'recruiting', label:'🎤 Recruiting' });
+    adminNavItems.push({ id:'reliant-pipeline', label:'🎯 Reliant Pipeline' });
   }
   // Weekly Schedule — MMs see this to assign their agents to stores each week
   // Owner + admin can also see it (oversight)
@@ -2638,6 +2639,7 @@ function renderMainContent(){
   if(activeAdminView === 'stores'){ renderStoresAdmin(el); return; }
   if(activeAdminView === 'weekly-schedule'){ renderWeeklySchedule(el); return; }
   if(activeAdminView === 'recruiting'){ renderRecruiting(el); return; }
+  if(activeAdminView === 'reliant-pipeline'){ renderReliantPipeline(el); return; }
   if(activeAdminView === 'onboarding-packet'){ renderOnboardingPacket(el); return; }
   if(activeAdminView === 'onboarding-intake-form'){ renderOnboardingIntakeForm(el); return; }
   if(activeAdminView === 'onboarding-ach-form'){ renderOnboardingAchForm(el); return; }
@@ -3944,8 +3946,12 @@ async function renderAgents(el){
   const isTeamLead = role === 'team_lead';
   const myPrograms = currentProfile.programs || [];
 
-  // Build query with visibility rules
-  let query = sb.from('profiles').select('*').order('full_name');
+  // Build query with visibility rules.
+  // Pre-screening Reliant candidates (anyone NOT in 'coded' stage) live in the
+  // Reliant Pipeline view instead — they don't appear in the regular Team list
+  // until they're fully coded. (Owners + Onboarding can still see candidates
+  // via 🎯 Reliant Pipeline.) This keeps Team admin uncluttered.
+  let query = sb.from('profiles').select('*').eq('candidate_stage', 'coded').order('full_name');
   if(isManager && !isAdmin){
     // Managers see everyone in their assigned programs
     query = query.overlaps('programs', myPrograms);
@@ -7635,22 +7641,38 @@ window.openTimePicker = openTimePicker;
 // - Reliant email config (renderReliantEmailSettings)
 // ═══════════════════════════════════════════════════════════════════════
 
-// Sequential onboarding steps for Reliant Energy contractors.
-// MUST be done in this order — step 2 is locked until step 1 is signed, etc.
+// Sequential onboarding steps. The flow now spans TWO phases:
 //
-// Each entry: { id, label, icon, description, view, kind }
-//   kind = 'contract' (handled by the existing contract_assignments system),
-//          'reliant_intake' (Phase 3.5 form),
-//          'consent' (Phase 3.7 generic consent — uses consent_signatures table),
-//          'ach' (Phase 3.5 banking form, internal only)
+//   PRE-SCREENING (steps 1-4, while candidate_stage is invited/forms_pending/screening_review):
+//     1. Background Check Consent
+//     2. Drug Test Consent
+//     3. NRG Release Form
+//     4. CSI Personal Upload (ID + selfie)
+//
+//   POST-SCREENING (steps 5-6, unlocked once candidate_stage = bg_passed):
+//     5. Field Sales Agent Contract (CSI Independent Contractor Agreement)
+//     6. Direct Deposit (ACH banking)
+//
+// `requiresStage` controls when a step is permitted:
+//   - undefined  → always available subject to sequential order
+//   - 'bg_passed' → step is hidden/locked until candidate is bg_passed or beyond
 const ONBOARDING_FORMS = [
-  { id: 'agent_contract',    label: 'Field Sales Agent Contract', icon: '📜', description: 'Independent contractor agreement with CSI. Must be signed first.', view: 'onboarding-contract',     kind: 'contract' },
-  { id: 'reliant_intake',    label: 'CSI Personal Upload',         icon: '📝', description: 'Identity, address, photo IDs. Goes to Reliant.',                       view: 'onboarding-intake-form',  kind: 'reliant_intake' },
-  { id: 'nrg_release',       label: 'NRG Release Form',            icon: '📋', description: 'Authorize CSI to share background/drug results with Reliant/NRG.',     view: 'onboarding-consent-nrg_release',       kind: 'consent', consentType: 'nrg_release' },
-  { id: 'background_consent',label: 'Background Check Consent',    icon: '🔍', description: 'Authorize CSI to run a background check.',                              view: 'onboarding-consent-background_consent', kind: 'consent', consentType: 'background_consent' },
-  { id: 'drug_consent',      label: 'Drug Test Consent',           icon: '🧪', description: 'Authorize CSI to drug test you as a condition of engagement.',         view: 'onboarding-consent-drug_consent',       kind: 'consent', consentType: 'drug_consent' },
-  { id: 'ach_banking',       label: 'Direct Deposit',              icon: '🏦', description: 'Banking info for payroll. Internal only — never sent to Reliant.',     view: 'onboarding-ach-form',     kind: 'ach' }
+  { id: 'background_consent', label: 'Background Check Consent',  icon: '🔍', description: 'Authorize CSI to run a background check on you.',                   view: 'onboarding-consent-background_consent', kind: 'consent', consentType: 'background_consent' },
+  { id: 'drug_consent',       label: 'Drug Test Consent',          icon: '🧪', description: 'Authorize CSI to drug test you as a condition of engagement.',     view: 'onboarding-consent-drug_consent',       kind: 'consent', consentType: 'drug_consent' },
+  { id: 'nrg_release',        label: 'NRG Release Form',           icon: '📋', description: 'Authorize CSI to share screening results with NRG/Reliant.',      view: 'onboarding-consent-nrg_release',        kind: 'consent', consentType: 'nrg_release' },
+  { id: 'reliant_intake',     label: 'CSI Personal Upload',        icon: '📝', description: 'Identity, address, photo IDs, headshot. Goes to Reliant.',         view: 'onboarding-intake-form',                kind: 'reliant_intake' },
+  { id: 'agent_contract',     label: 'Field Sales Agent Contract', icon: '📜', description: 'Independent contractor agreement with CSI. Unlocks after BG passes.', view: 'onboarding-contract',                   kind: 'contract',       requiresStage: 'bg_passed' },
+  { id: 'ach_banking',        label: 'Direct Deposit',             icon: '🏦', description: 'Banking info for payroll. Internal only — never sent to Reliant.', view: 'onboarding-ach-form',                   kind: 'ach',            requiresStage: 'bg_passed' }
 ];
+
+// Order of stages — index into here lets us compare "is this stage at-or-after stage X"
+const _STAGE_ORDER = ['invited','forms_pending','screening_review','bg_passed','dt_passed','coded'];
+function _stageAtOrAfter(currentStage, requiredStage){
+  const ci = _STAGE_ORDER.indexOf(currentStage);
+  const ri = _STAGE_ORDER.indexOf(requiredStage);
+  if(ci < 0 || ri < 0) return false;
+  return ci >= ri;
+}
 
 // Helper: load all form-status rows for a user, return as { form_id: row }
 async function _loadFormStatuses(userId){
@@ -7691,6 +7713,8 @@ async function _loadStepStatuses(userId){
   // Build result for each step in ONBOARDING_FORMS
   const result = {};
   let priorComplete = true;
+  // Determine the agent's current candidate stage so we can honor requiresStage
+  const myStage = currentProfile?.candidate_stage || 'coded';
   for(const step of ONBOARDING_FORMS){
     let complete = false;
     let sourceRow = null;
@@ -7707,12 +7731,20 @@ async function _loadStepStatuses(userId){
       complete = s && (s.status === 'submitted' || s.status === 'approved');
       sourceRow = s;
     }
+    // Stage gate — if step requires a candidate stage, lock it until reached
+    let stageLocked = false;
+    if(step.requiresStage && !_stageAtOrAfter(myStage, step.requiresStage)){
+      stageLocked = true;
+    }
     result[step.id] = {
       complete,
-      locked: !priorComplete,  // gated by previous step
+      // Locked if the previous step isn't done OR the stage requirement isn't met
+      locked: !priorComplete || stageLocked,
+      stageLocked,
+      requiresStage: step.requiresStage || null,
       sourceRow
     };
-    if(!complete) priorComplete = false;  // anything after this is locked
+    if(!complete) priorComplete = false;  // anything after this is locked sequentially
   }
   return result;
 }
@@ -7730,22 +7762,35 @@ async function _markFormSubmitted(userId, formType, sourceRecordId){
 
 // ─── AGENT'S ONBOARDING PACKET DASHBOARD ─────────────────────────────
 async function renderOnboardingPacket(el){
+  // Auto-progress candidate stage based on what they're doing.
+  // - First visit while invited → bump to forms_pending
+  // - All 4 pre-screen forms done → bump to screening_review (alerts onboarding)
+  await _maybeAutoProgressCandidateStage();
+
+  // Re-load current profile so we have the latest candidate_stage
+  try {
+    const { data: refreshed } = await sb.from('profiles').select('candidate_stage').eq('id', currentProfile.id).maybeSingle();
+    if(refreshed) currentProfile.candidate_stage = refreshed.candidate_stage;
+  } catch(_){}
+
   // SEQUENTIAL flow: each step locked until the previous is complete.
-  // _loadStepStatuses returns { stepId: { complete, locked, sourceRow } }
   const stepStatuses = await _loadStepStatuses(currentProfile.id);
   const total = ONBOARDING_FORMS.length;
   const done = ONBOARDING_FORMS.filter(f => stepStatuses[f.id]?.complete).length;
   const pct = Math.round((done / total) * 100);
 
-  // Find the FIRST locked, NOT-complete step — that's the active "next up" step
-  const activeStep = ONBOARDING_FORMS.find(f => !stepStatuses[f.id]?.complete);
+  // Stage banner content
+  const myStage = currentProfile.candidate_stage || 'coded';
+  const stageBanner = _renderCandidateStageBanner(myStage);
 
   el.innerHTML = `
     <div style="margin-bottom:24px;">
       <div style="font-size:11px;color:#00C6FF;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:6px;">Welcome aboard 👋</div>
       <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;line-height:1;">📋 Your Onboarding Packet</h1>
-      <p style="font-size:14px;color:rgba(255,255,255,0.55);margin-top:8px;line-height:1.55;max-width:600px;">Complete each step IN ORDER. The next step unlocks once the previous one is signed/submitted. Your manager and the office team see your progress as you go.</p>
+      <p style="font-size:14px;color:rgba(255,255,255,0.55);margin-top:8px;line-height:1.55;max-width:600px;">Complete each step IN ORDER. The next step unlocks once the previous one is signed/submitted.</p>
     </div>
+
+    ${stageBanner}
 
     <div class="bo-card" style="margin-bottom:18px;">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
@@ -7761,13 +7806,19 @@ async function renderOnboardingPacket(el){
       const status = stepStatuses[f.id] || { complete:false, locked:true, sourceRow:null };
       const isComplete = status.complete;
       const isLocked = status.locked;
-      const isActive = !isComplete && !isLocked;  // the one they should be doing right now
+      const isStageLocked = status.stageLocked;
+      const isActive = !isComplete && !isLocked;
       const stepNum = idx + 1;
-      // Visual color
       const borderColor = isComplete ? 'rgba(0,255,136,0.35)' : isActive ? 'rgba(255,107,0,0.5)' : 'rgba(255,255,255,0.06)';
       const bgGradient = isComplete ? 'linear-gradient(135deg,rgba(0,255,136,0.04),rgba(0,255,136,0))' : isActive ? 'linear-gradient(135deg,rgba(255,107,0,0.06),rgba(255,107,0,0))' : 'rgba(255,255,255,0.02)';
       const opacity = isLocked ? '0.5' : '1';
       const stepBadgeColor = isComplete ? '#00FF88' : isActive ? '#FF6B00' : 'rgba(255,255,255,0.4)';
+      // Lock message — different for stage-locked vs sequence-locked
+      const lockMsg = isStageLocked
+        ? `🔒 Unlocks once your background check passes.`
+        : isLocked && !isStageLocked
+          ? `🔒 Complete step ${stepNum - 1} first to unlock.`
+          : '';
       return `
         <div class="bo-card" style="margin-bottom:10px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;border:1px solid ${borderColor};background:${bgGradient};opacity:${opacity};${isActive ? 'box-shadow:0 0 0 1px rgba(255,107,0,0.3),0 4px 16px rgba(255,107,0,0.1);' : ''}">
           <div style="display:flex;align-items:center;gap:14px;flex-shrink:0;">
@@ -7780,7 +7831,7 @@ async function renderOnboardingPacket(el){
               ${isComplete ? '<span style="display:inline-block;margin-left:8px;background:rgba(0,255,136,0.15);color:#00FF88;font-size:11px;font-weight:700;letter-spacing:1px;padding:3px 10px;border-radius:50px;">✓ COMPLETE</span>' : isActive ? '<span style="display:inline-block;margin-left:8px;background:rgba(255,107,0,0.15);color:#FF6B00;font-size:11px;font-weight:700;letter-spacing:1px;padding:3px 10px;border-radius:50px;">⏰ NEXT UP</span>' : isLocked ? '<span style="display:inline-block;margin-left:8px;color:rgba(255,255,255,0.35);font-size:11px;font-weight:700;letter-spacing:1px;">🔒 LOCKED</span>' : ''}
             </div>
             <div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-top:3px;">${escapeHtml(f.description)}</div>
-            ${isLocked ? `<div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;font-style:italic;">Complete step ${stepNum - 1} first to unlock.</div>` : ''}
+            ${lockMsg ? `<div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;font-style:italic;">${lockMsg}</div>` : ''}
           </div>
           <div style="flex-shrink:0;">
             ${isComplete ? `
@@ -7801,6 +7852,102 @@ async function renderOnboardingPacket(el){
         <div style="font-size:13px;color:rgba(255,255,255,0.7);margin-top:6px;">Your manager and the office team have been notified. They'll review and finalize your onboarding shortly.</div>
       </div>
     ` : ''}`;
+}
+
+// Auto-progress the candidate's stage based on form completion. Called whenever
+// they open the packet view.
+async function _maybeAutoProgressCandidateStage(){
+  const stage = currentProfile?.candidate_stage;
+  if(!stage || stage === 'coded') return;  // not a candidate, nothing to do
+
+  // Step 1: invited → forms_pending the first time they view the packet
+  if(stage === 'invited'){
+    const nowIso = new Date().toISOString();
+    await sb.from('profiles').update({
+      candidate_stage: 'forms_pending',
+      candidate_stage_changed_at: nowIso
+    }).eq('id', currentProfile.id);
+    await sb.from('candidate_stage_log').insert({
+      user_id: currentProfile.id, from_stage: 'invited', to_stage: 'forms_pending',
+      changed_by: currentProfile.id, notes: 'Candidate logged in and opened packet'
+    });
+    currentProfile.candidate_stage = 'forms_pending';
+    return;  // give them this turn to see the dashboard
+  }
+
+  // Step 2: forms_pending → screening_review when all 4 PRE-SCREEN forms are done
+  if(stage === 'forms_pending'){
+    const stepStatuses = await _loadStepStatuses(currentProfile.id);
+    const preScreenSteps = ['background_consent','drug_consent','nrg_release','reliant_intake'];
+    const allPreDone = preScreenSteps.every(id => stepStatuses[id]?.complete);
+    if(allPreDone){
+      const nowIso = new Date().toISOString();
+      await sb.from('profiles').update({
+        candidate_stage: 'screening_review',
+        candidate_stage_changed_at: nowIso
+      }).eq('id', currentProfile.id);
+      await sb.from('candidate_stage_log').insert({
+        user_id: currentProfile.id, from_stage: 'forms_pending', to_stage: 'screening_review',
+        changed_by: currentProfile.id, notes: 'All 4 pre-screen forms submitted — auto-advanced'
+      });
+      currentProfile.candidate_stage = 'screening_review';
+      // Notify Owner + Onboarding so they know to review
+      try {
+        const { data: recipients } = await sb.from('profiles').select('id,email').or('role.eq.owner,has_master_center_access.eq.true').eq('active', true);
+        for(const r of (recipients || [])){
+          await notifyUser(r.id, {
+            type:'generic',
+            title:'🔍 Candidate ready for screening review',
+            body:(currentProfile.full_name || currentProfile.email) + ' completed all 4 pre-screen forms. Run the background check and use the Pass/Fail buttons in the Reliant Pipeline.'
+          });
+        }
+      } catch(_){}
+    }
+  }
+}
+
+// Big colored banner explaining where the candidate is in their journey
+function _renderCandidateStageBanner(stage){
+  if(!stage || stage === 'coded') return '';
+  const meta = _candidateStageMeta(stage);
+  let body = '';
+  let extras = '';
+  switch(stage){
+    case 'invited':
+      body = 'Welcome! Get started by completing the first 4 forms below.';
+      break;
+    case 'forms_pending':
+      body = 'Work through the pre-screening forms below. Once all 4 are submitted, we will review your background.';
+      break;
+    case 'screening_review':
+      body = 'All 4 pre-screen forms submitted. Our team is now running your background check. Sit tight — we will email you the results within 1-3 business days.';
+      extras = '<div style="margin-top:8px;font-size:12px;color:rgba(255,255,255,0.6);">📌 The remaining forms (contract + direct deposit) will unlock once your background check passes.</div>';
+      break;
+    case 'bg_passed':
+      body = '🎉 Your background check passed! Watch for an email from <strong>protectionplussolutions@protectionplussolutions.com</strong> with subject <strong>"Drug-screen registration"</strong>. You have 5 days to complete it (walk-ins welcome).';
+      extras = '<div style="margin-top:8px;font-size:12px;color:rgba(255,255,255,0.7);">📋 In the meantime, sign your <strong>Field Sales Agent Contract</strong> and complete <strong>Direct Deposit</strong> below.</div>';
+      break;
+    case 'bg_failed':
+      body = 'Your background check did not meet our requirements for this position. Check your email for details.';
+      break;
+    case 'dt_passed':
+      body = 'Your drug test cleared. Your packet has been submitted to Reliant for Trakstar coding. Watch for emails from <strong>trainer@learn.trakstar.com</strong> for next steps.';
+      break;
+    case 'dt_failed':
+      body = 'Your drug test did not meet our requirements. Check your email for details.';
+      break;
+  }
+  return `
+    <div class="bo-card" style="margin-bottom:18px;background:linear-gradient(135deg,${meta.color}15,${meta.color}03);border:1px solid ${meta.color}66;">
+      <div style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;">
+        <div style="width:54px;height:54px;border-radius:50%;background:${meta.color}22;color:${meta.color};display:flex;align-items:center;justify-content:center;font-size:30px;flex-shrink:0;">${meta.icon}</div>
+        <div style="flex:1;min-width:240px;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:${meta.color};letter-spacing:1.5px;line-height:1;margin-bottom:6px;">${escapeHtml(meta.label)}</div>
+          <div style="font-size:13.5px;color:rgba(255,255,255,0.85);line-height:1.6;">${body}</div>
+          ${extras}
+        </div>
+      </div>
+    </div>`;
 }
 
 // ─── RELIANT INTAKE FORM ────────────────────────────────────────────
@@ -9172,6 +9319,410 @@ window.onbToggleReveal = onbToggleReveal;
 window.confirmSendToReliant = confirmSendToReliant;
 window.rejectIntake = rejectIntake;
 window.saveReliantEmail = saveReliantEmail;
+
+// ═══════════════════════════════════════════════════════════════════════
+// RELIANT CANDIDATE PIPELINE (Phase 3.8)
+// ═══════════════════════════════════════════════════════════════════════
+// Tracks candidates through:
+//   invited → forms_pending → screening_review → bg_passed → dt_passed → coded
+//                                              ↘ bg_failed (terminal)
+//                                                          ↘ dt_failed (terminal)
+//
+// Owner + Onboarding can:
+//   • Invite a new Reliant candidate (creates account + emails them)
+//   • View pipeline grouped by stage
+//   • Click a candidate → see their onboarding profile
+//   • Pass / Fail buttons at each gate (background, drug test)
+//   • Mark as Coded (final activation)
+// ═══════════════════════════════════════════════════════════════════════
+
+const CANDIDATE_STAGES = [
+  { id:'invited',          label:'INVITED',           color:'#A0A0A0', icon:'📧', description:'Email sent — waiting for them to log in' },
+  { id:'forms_pending',    label:'FORMS PENDING',     color:'#00C6FF', icon:'📝', description:'Working through pre-screen forms' },
+  { id:'screening_review', label:'SCREENING REVIEW',  color:'#FFC800', icon:'🔍', description:'All 4 forms submitted — needs CSI background review' },
+  { id:'bg_passed',        label:'BG PASSED · WAITING DT', color:'#FF6B00', icon:'✅', description:'Background clear — drug test in progress, contract+ACH unlocked' },
+  { id:'bg_failed',        label:'BG FAILED · REJECTED', color:'#F87171', icon:'❌', description:'Background failed — terminal' },
+  { id:'dt_passed',        label:'DT PASSED · AWAITING CODING', color:'#A855F7', icon:'🎯', description:'Drug test clear — submit to Reliant for Trakstar coding' },
+  { id:'dt_failed',        label:'DT FAILED · REJECTED', color:'#F87171', icon:'❌', description:'Drug test failed — terminal' },
+  { id:'coded',            label:'CODED · ACTIVE',     color:'#00FF88', icon:'⭐', description:'Fully active retail agent' }
+];
+
+function _candidateStageMeta(stageId){
+  return CANDIDATE_STAGES.find(s => s.id === stageId) || CANDIDATE_STAGES[0];
+}
+
+function _canPipelineAccess(){
+  return currentProfile.role === 'owner'
+      || currentProfile.role === 'admin'
+      || currentProfile.has_master_center_access === true;
+}
+
+// ─── PIPELINE VIEW ─────────────────────────────────────────────────
+async function renderReliantPipeline(el){
+  if(!_canPipelineAccess()){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied. Owner + Admin + Onboarding only.</div>';
+    return;
+  }
+  el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading candidates…</div>';
+
+  // Pull all candidates (everyone NOT in 'coded' stage). Coded agents go to
+  // the regular Team admin view.
+  const { data: candidates, error } = await sb.from('profiles')
+    .select('id, full_name, email, phone, candidate_stage, candidate_stage_changed_at, candidate_invited_at, programs, created_at, active')
+    .neq('candidate_stage', 'coded')
+    .order('candidate_stage_changed_at', { ascending: false, nullsFirst: false })
+    .order('candidate_invited_at', { ascending: false, nullsFirst: false });
+  if(error){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Error loading candidates: ' + escapeHtml(error.message) + '</div>';
+    return;
+  }
+
+  // Group by stage
+  const byStage = {};
+  CANDIDATE_STAGES.forEach(s => byStage[s.id] = []);
+  (candidates || []).forEach(c => {
+    if(byStage[c.candidate_stage]) byStage[c.candidate_stage].push(c);
+  });
+
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:24px;">
+      <div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;line-height:1;">🎯 Reliant Pipeline</h1>
+        <p style="font-size:14px;color:rgba(255,255,255,0.55);margin-top:8px;line-height:1.55;max-width:600px;">Reliant Energy candidates moving through pre-screening, background, drug test, and Trakstar coding.</p>
+      </div>
+      <button class="bo-btn bo-btn-primary" onclick="openInviteCandidateModal()" style="padding:10px 20px;font-size:13px;">+ Invite Reliant Candidate</button>
+    </div>
+
+    <!-- Funnel summary at top — count per stage -->
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:24px;">
+      ${CANDIDATE_STAGES.filter(s => s.id !== 'coded').map(s => `
+        <div style="background:rgba(255,255,255,0.025);border:1px solid ${s.color}22;border-left:3px solid ${s.color};border-radius:8px;padding:10px 12px;">
+          <div style="font-size:22px;color:${s.color};font-family:'Bebas Neue',sans-serif;line-height:1;">${byStage[s.id].length}</div>
+          <div style="font-size:10px;color:rgba(255,255,255,0.5);letter-spacing:1px;font-weight:700;margin-top:4px;">${escapeHtml(s.label)}</div>
+        </div>
+      `).join('')}
+    </div>
+
+    <!-- One section per stage with a list of candidates inside -->
+    ${CANDIDATE_STAGES.filter(s => s.id !== 'coded' && byStage[s.id].length > 0).map(s => `
+      <div class="bo-card" style="margin-bottom:14px;border-left:3px solid ${s.color};">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
+          <div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:${s.color};letter-spacing:1.5px;">${s.icon} ${escapeHtml(s.label)}</div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-top:3px;">${escapeHtml(s.description)}</div>
+          </div>
+          <div style="background:${s.color}22;color:${s.color};padding:5px 12px;border-radius:50px;font-size:12px;font-weight:700;letter-spacing:1px;">${byStage[s.id].length}</div>
+        </div>
+        ${byStage[s.id].map(c => _renderCandidateRow(c, s)).join('')}
+      </div>
+    `).join('')}
+
+    ${(candidates || []).length === 0 ? `
+      <div class="bo-card" style="text-align:center;padding:40px;">
+        <div style="font-size:48px;margin-bottom:10px;">🎯</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#fff;letter-spacing:1px;margin-bottom:6px;">No candidates yet</div>
+        <div style="color:rgba(255,255,255,0.5);font-size:13px;max-width:400px;margin:0 auto 14px;line-height:1.6;">Click <strong>+ Invite Reliant Candidate</strong> to send someone the welcome email and get them started in the pipeline.</div>
+      </div>
+    ` : ''}`;
+}
+
+function _renderCandidateRow(c, stageMeta){
+  const lastChange = c.candidate_stage_changed_at ? new Date(c.candidate_stage_changed_at).toLocaleString() : (c.candidate_invited_at ? new Date(c.candidate_invited_at).toLocaleString() + ' (invited)' : '—');
+  const buttonsForStage = _stageActionButtons(c, stageMeta.id);
+  return `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:rgba(255,255,255,0.02);border-radius:8px;margin-bottom:6px;flex-wrap:wrap;gap:8px;">
+      <div style="display:flex;align-items:center;gap:12px;min-width:0;flex:1;">
+        <div style="width:36px;height:36px;border-radius:50%;background:${stageMeta.color}22;color:${stageMeta.color};display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0;">${(c.full_name || c.email || '?').substring(0,1).toUpperCase()}</div>
+        <div style="min-width:0;">
+          <div style="font-size:14px;color:#fff;font-weight:600;cursor:pointer;text-decoration:underline;text-decoration-color:rgba(255,255,255,0.2);text-underline-offset:3px;" onclick="openAgentOnboarding('${c.id}')">${escapeHtml(c.full_name || c.email)}</div>
+          <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-top:2px;">${escapeHtml(c.email)}${c.phone ? ' · ' + escapeHtml(c.phone) : ''}</div>
+          <div style="font-size:10.5px;color:rgba(255,255,255,0.4);margin-top:2px;">${lastChange}</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;flex-shrink:0;">${buttonsForStage}</div>
+    </div>`;
+}
+
+// Action buttons that appear on a candidate row depending on their current stage
+function _stageActionButtons(c, currentStage){
+  const id = c.id;
+  let buttons = '';
+  // Always show "View Profile" button
+  buttons += `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;" onclick="openAgentOnboarding('${id}')">📋 View</button>`;
+  if(currentStage === 'screening_review'){
+    buttons += `<button class="bo-btn bo-btn-primary" style="padding:5px 10px;font-size:11px;background:linear-gradient(135deg,#00FF88,#00C6FF);color:#000;" onclick="markCandidateBgPassed('${id}')">✓ Pass BG</button>`;
+    buttons += `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;color:#F87171;border-color:rgba(248,113,113,0.4);" onclick="markCandidateBgFailed('${id}')">✗ Fail BG</button>`;
+  }
+  if(currentStage === 'bg_passed'){
+    buttons += `<button class="bo-btn bo-btn-primary" style="padding:5px 10px;font-size:11px;background:linear-gradient(135deg,#00FF88,#00C6FF);color:#000;" onclick="markCandidateDtPassed('${id}')">✓ Pass DT</button>`;
+    buttons += `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;color:#F87171;border-color:rgba(248,113,113,0.4);" onclick="markCandidateDtFailed('${id}')">✗ Fail DT</button>`;
+  }
+  if(currentStage === 'dt_passed'){
+    buttons += `<button class="bo-btn bo-btn-primary" style="padding:5px 10px;font-size:11px;background:linear-gradient(135deg,#A855F7,#FF0080);" onclick="markCandidateCoded('${id}')">⭐ Mark as Coded</button>`;
+  }
+  if(currentStage === 'invited' || currentStage === 'forms_pending'){
+    buttons += `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;" onclick="resendCandidateInvite('${id}')">📧 Resend Invite</button>`;
+  }
+  return buttons;
+}
+
+// ─── INVITE CANDIDATE MODAL ─────────────────────────────────────────
+function openInviteCandidateModal(){
+  if(!_canPipelineAccess()){ alert('Access denied'); return; }
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#fff;margin-bottom:6px;letter-spacing:1px;">+ Invite Reliant Candidate</h2>
+    <p style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-bottom:18px;line-height:1.55;">Creates an account, sends the welcome email with login credentials, and adds them to the pipeline at <strong style="color:#A0A0A0;">INVITED</strong> stage.</p>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <div class="form-group"><label class="form-label">First Name *</label><input id="ic-first" class="form-input" placeholder="First"/></div>
+      <div class="form-group"><label class="form-label">Last Name *</label><input id="ic-last" class="form-input" placeholder="Last"/></div>
+    </div>
+    <div class="form-group"><label class="form-label">Email *</label><input id="ic-email" class="form-input" type="email" placeholder="candidate@example.com"/></div>
+    <div class="form-group"><label class="form-label">Phone (optional)</label><input id="ic-phone" class="form-input" type="tel" placeholder="(000) 000-0000"/></div>
+
+    <div class="form-group">
+      <label class="form-label">Temporary Password *</label>
+      <div style="display:flex;gap:8px;">
+        <input id="ic-password" class="form-input" type="text" placeholder="Min 8 characters"/>
+        <button type="button" class="bo-btn bo-btn-ghost" style="padding:7px 12px;font-size:11.5px;white-space:nowrap;" onclick="_icGenPassword()">🎲 Generate</button>
+      </div>
+      <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">They'll be told to change it on first login.</div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Sender name &amp; title (signs the email)</label>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <input id="ic-from-name" class="form-input" placeholder="Your name" value="${escapeHtml(currentProfile.full_name || '')}"/>
+        <input id="ic-from-title" class="form-input" placeholder="Your title" value="Onboarding Coordinator"/>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:10px;margin-top:18px;flex-wrap:wrap;">
+      <button class="bo-btn bo-btn-primary" onclick="submitInviteCandidate()">Create &amp; Send Invite</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="ic-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-box').style.maxWidth = '520px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+  setTimeout(() => _icGenPassword(), 50);
+}
+
+function _icGenPassword(){
+  // Generate a memorable but unguessable password — 3 short words + 2 digits
+  const words = ['retail','solar','blue','spark','ridge','grove','cedar','river','horizon','quartz','silver','flame','coast','river','ember','quick','bright','cobalt','reliant','citrus'];
+  const w1 = words[Math.floor(Math.random()*words.length)];
+  const w2 = words[Math.floor(Math.random()*words.length)];
+  const num = Math.floor(Math.random()*90 + 10);
+  const pwd = w1.charAt(0).toUpperCase() + w1.slice(1) + w2.charAt(0).toUpperCase() + w2.slice(1) + num;
+  const inp = document.getElementById('ic-password');
+  if(inp) inp.value = pwd;
+}
+window._icGenPassword = _icGenPassword;
+
+async function submitInviteCandidate(){
+  const msg = document.getElementById('ic-msg');
+  const get = id => document.getElementById(id)?.value?.trim() || '';
+  const first = get('ic-first');
+  const last = get('ic-last');
+  const email = get('ic-email').toLowerCase();
+  const phone = get('ic-phone') || null;
+  const password = get('ic-password');
+  const fromName = get('ic-from-name');
+  const fromTitle = get('ic-from-title');
+  if(!first || !last){ msg.innerHTML = '<span style="color:#F87171;">First + last name required.</span>'; return; }
+  if(!email || !email.includes('@')){ msg.innerHTML = '<span style="color:#F87171;">Valid email required.</span>'; return; }
+  if(!password || password.length < 8){ msg.innerHTML = '<span style="color:#F87171;">Password must be at least 8 characters.</span>'; return; }
+
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Creating candidate account…</span>';
+
+  const fullName = first + ' ' + last;
+  // Find the retail program id
+  const retailProgram = (allPrograms || []).find(p => p.id === 'retail');
+  const programs = retailProgram ? ['retail'] : [];
+
+  try {
+    const { data, error } = await sb.functions.invoke('admin-create-user', {
+      body: {
+        email, password,
+        full_name: fullName,
+        phone,
+        role: 'agent',          // candidates are agent-role
+        programs,                // retail
+        market_id: null,
+        reports_to: null,
+        phone_carrier: null,
+        sms_opt_in: false,
+        can_host_meetings: false
+      }
+    });
+
+    let errText = null;
+    if(error){
+      try {
+        if(error.context && typeof error.context.json === 'function'){
+          const j = await error.context.json();
+          errText = j?.error || j?.message;
+        }
+      } catch(_){}
+      errText = errText || error.message || 'Unknown error';
+    } else if(data?.error){
+      errText = data.error;
+    }
+    if(errText){ msg.innerHTML = '<span style="color:#F87171;">' + escapeHtml(errText) + '</span>'; return; }
+
+    const newUserId = data?.user_id;
+    if(!newUserId){ msg.innerHTML = '<span style="color:#F87171;">User created but no ID returned.</span>'; return; }
+
+    // Set candidate_stage = 'invited' + invited timestamp
+    const nowIso = new Date().toISOString();
+    await sb.from('profiles').update({
+      candidate_stage: 'invited',
+      candidate_invited_at: nowIso,
+      candidate_stage_changed_at: nowIso,
+      candidate_stage_changed_by: currentProfile.id
+    }).eq('id', newUserId);
+
+    // Log the stage change
+    await sb.from('candidate_stage_log').insert({
+      user_id: newUserId, from_stage: null, to_stage: 'invited',
+      changed_by: currentProfile.id, notes: 'Candidate invited by ' + (currentProfile.full_name || currentProfile.email)
+    });
+
+    // Send the candidate invite email
+    msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Sending welcome email…</span>';
+    let emailOk = false;
+    try {
+      const r = await sendEmailViaFunction('candidate_invite', email, {
+        full_name: fullName, email, password,
+        from_name: fromName, from_title: fromTitle
+      });
+      emailOk = r?.success !== false;
+    } catch(_){}
+
+    msg.innerHTML = `<div style="color:#00FF88;font-weight:600;">✓ Candidate invited.</div><div style="margin-top:6px;font-size:12.5px;color:rgba(255,255,255,0.7);">${emailOk ? '📧 Welcome email sent. Tell them to check their spam folder if it does not arrive.' : '⚠️ Email failed — you can resend from the pipeline.'}</div>`;
+    setTimeout(() => { closeAllModals(); renderMainContent(); }, 1800);
+  } catch(e){
+    msg.innerHTML = '<span style="color:#F87171;">Error: ' + escapeHtml(e.message) + '</span>';
+  }
+}
+
+// ─── STAGE TRANSITIONS ─────────────────────────────────────────────
+async function _setCandidateStage(userId, newStage, notes){
+  if(!_canPipelineAccess()) throw new Error('Access denied');
+  const { data: prev } = await sb.from('profiles').select('candidate_stage, full_name, email').eq('id', userId).maybeSingle();
+  const fromStage = prev?.candidate_stage || null;
+  const nowIso = new Date().toISOString();
+  await sb.from('profiles').update({
+    candidate_stage: newStage,
+    candidate_stage_changed_at: nowIso,
+    candidate_stage_changed_by: currentProfile.id
+  }).eq('id', userId);
+  await sb.from('candidate_stage_log').insert({
+    user_id: userId, from_stage: fromStage, to_stage: newStage,
+    changed_by: currentProfile.id, notes: notes || null
+  });
+  return prev;
+}
+
+async function markCandidateBgPassed(userId){
+  if(!confirm('Mark this candidate as PASSED background check?\n\nThis will:\n• Move them to "BG Passed" stage\n• Email them with drug-test heads-up\n• Unlock Contract + ACH banking forms in their packet')) return;
+  try {
+    const prev = await _setCandidateStage(userId, 'bg_passed', 'Background check passed');
+    await sendEmailViaFunction('candidate_bg_passed', prev?.email, {
+      full_name: prev?.full_name || 'Candidate',
+      from_name: currentProfile.full_name || 'The Onboarding Team',
+      from_title: 'Onboarding Coordinator'
+    });
+    try { await notifyUser(userId, { type:'generic', title:'🎉 Your background check passed!', body:'Check your email for next steps. Sign your contract and direct deposit forms in your onboarding packet.' }); } catch(_){}
+    alert('✓ Marked as BG Passed. Email sent.');
+    renderMainContent();
+  } catch(e){ alert('Error: ' + e.message); }
+}
+
+async function markCandidateBgFailed(userId){
+  if(!confirm('Mark this candidate as FAILED background check?\n\nThis will:\n• Move them to "BG Failed" stage (terminal)\n• Email them the rejection notice\n• Their packet will be locked\n\nProceed?')) return;
+  try {
+    const prev = await _setCandidateStage(userId, 'bg_failed', 'Background check failed — rejected');
+    await sendEmailViaFunction('candidate_bg_failed', prev?.email, {
+      full_name: prev?.full_name || 'Candidate',
+      from_name: currentProfile.full_name || 'The Onboarding Team',
+      from_title: 'Onboarding Coordinator'
+    });
+    // Deactivate the account
+    await sb.from('profiles').update({ active: false, account_locked: true }).eq('id', userId);
+    alert('✓ Marked as BG Failed. Account deactivated and rejection email sent.');
+    renderMainContent();
+  } catch(e){ alert('Error: ' + e.message); }
+}
+
+async function markCandidateDtPassed(userId){
+  if(!confirm('Mark this candidate as PASSED drug test?\n\nThis will:\n• Move them to "DT Passed · Awaiting Coding"\n• They are now ready to be submitted to Reliant for Trakstar coding\n\nUse the "Send to Reliant" button on their profile to dispatch the package.')) return;
+  try {
+    await _setCandidateStage(userId, 'dt_passed', 'Drug test passed');
+    try { await notifyUser(userId, { type:'generic', title:'✅ Drug test cleared!', body:'You are cleared for Reliant submission. Watch for emails from trainer@learn.trakstar.com next.' }); } catch(_){}
+    alert('✓ Marked as DT Passed. Now submit to Reliant via their profile.');
+    renderMainContent();
+  } catch(e){ alert('Error: ' + e.message); }
+}
+
+async function markCandidateDtFailed(userId){
+  if(!confirm('Mark this candidate as FAILED drug test?\n\nThis will:\n• Move them to "DT Failed" stage (terminal)\n• Email them the rejection notice\n• Their account will be deactivated\n\nProceed?')) return;
+  try {
+    const prev = await _setCandidateStage(userId, 'dt_failed', 'Drug test failed — rejected');
+    await sendEmailViaFunction('candidate_dt_failed', prev?.email, {
+      full_name: prev?.full_name || 'Candidate',
+      from_name: currentProfile.full_name || 'The Onboarding Team',
+      from_title: 'Onboarding Coordinator'
+    });
+    await sb.from('profiles').update({ active: false, account_locked: true }).eq('id', userId);
+    alert('✓ Marked as DT Failed. Account deactivated and rejection email sent.');
+    renderMainContent();
+  } catch(e){ alert('Error: ' + e.message); }
+}
+
+async function markCandidateCoded(userId){
+  if(!confirm('Mark this candidate as CODED in Trakstar?\n\nThis will:\n• Move them to fully-active retail agent status\n• Send them the official welcome-to-the-team email\n• They will appear in Team admin (no longer in the pipeline)\n• They can be assigned to stores and start working\n\nMake sure Reliant has confirmed they are coded in Trakstar before clicking this.')) return;
+  try {
+    const prev = await _setCandidateStage(userId, 'coded', 'Coded in Trakstar — fully active');
+    await sendEmailViaFunction('candidate_coded', prev?.email, {
+      full_name: prev?.full_name || 'Team Member',
+      from_name: currentProfile.full_name || 'The Onboarding Team',
+      from_title: 'Onboarding Coordinator'
+    });
+    try { await notifyUser(userId, { type:'generic', title:'🎊 Welcome to the team!', body:'You are officially coded and active. Check your email for next steps.' }); } catch(_){}
+    alert('✓ Welcome to the team! Final email sent. Candidate is now in Team admin.');
+    renderMainContent();
+  } catch(e){ alert('Error: ' + e.message); }
+}
+
+async function resendCandidateInvite(userId){
+  const { data: c } = await sb.from('profiles').select('full_name, email').eq('id', userId).maybeSingle();
+  if(!c){ alert('Candidate not found'); return; }
+  const newPassword = prompt('Enter a NEW temporary password to send (min 8 chars). They will use this to log in:');
+  if(!newPassword || newPassword.length < 8){ alert('Cancelled — password too short.'); return; }
+  // Update their password via admin-set-password
+  try {
+    await sb.functions.invoke('admin-set-password', { body: { user_id: userId, new_password: newPassword } });
+    await sendEmailViaFunction('candidate_invite', c.email, {
+      full_name: c.full_name || 'Candidate',
+      email: c.email,
+      password: newPassword,
+      from_name: currentProfile.full_name || 'The Onboarding Team',
+      from_title: 'Onboarding Coordinator'
+    });
+    alert('✓ Welcome email re-sent with new password.');
+  } catch(e){ alert('Error: ' + e.message); }
+}
+
+window.renderReliantPipeline = renderReliantPipeline;
+window.openInviteCandidateModal = openInviteCandidateModal;
+window.submitInviteCandidate = submitInviteCandidate;
+window.markCandidateBgPassed = markCandidateBgPassed;
+window.markCandidateBgFailed = markCandidateBgFailed;
+window.markCandidateDtPassed = markCandidateDtPassed;
+window.markCandidateDtFailed = markCandidateDtFailed;
+window.markCandidateCoded = markCandidateCoded;
+window.resendCandidateInvite = resendCandidateInvite;
 
 
 async function renderStoresAdmin(el){
