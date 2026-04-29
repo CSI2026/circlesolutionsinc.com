@@ -2357,6 +2357,13 @@ function renderSidebar(){
     adminNavItems.push({ id:'recruiting', label:'🎤 Recruiting' });
     adminNavItems.push({ id:'reliant-pipeline', label:'🎯 Reliant Pipeline' });
   }
+  // Manager Market Manager (MM) view of their own assigned interviews + response forms.
+  // Owners + Admin + Onboarding ALSO see this (it's "all interviews assigned to me as
+  // an interviewer"). MMs use this to record post-interview outcomes (show/no-show,
+  // hire/pass). Strict separation by interviewer — RLS enforces it on the row level.
+  if(isOwner || isAdmin || isManager || currentProfile.has_master_center_access){
+    adminNavItems.push({ id:'my-interviews', label:'🎤 My Interviews' });
+  }
   // Weekly Schedule — MMs see this to assign their agents to stores each week
   // Owner + admin can also see it (oversight)
   if(isOwner || isAdmin || isManager){
@@ -2640,6 +2647,8 @@ function renderMainContent(){
   if(activeAdminView === 'weekly-schedule'){ renderWeeklySchedule(el); return; }
   if(activeAdminView === 'recruiting'){ renderRecruiting(el); return; }
   if(activeAdminView === 'reliant-pipeline'){ renderReliantPipeline(el); return; }
+  if(activeAdminView === 'my-interviews'){ renderMyInterviews(el); return; }
+  if(activeAdminView === 'interview-response'){ renderInterviewResponseForm(el); return; }
   if(activeAdminView === 'onboarding-packet'){ renderOnboardingPacket(el); return; }
   if(activeAdminView === 'onboarding-intake-form'){ renderOnboardingIntakeForm(el); return; }
   if(activeAdminView === 'onboarding-ach-form'){ renderOnboardingAchForm(el); return; }
@@ -7174,32 +7183,68 @@ async function notifyInterviewScheduled(row){
   const dateLabel = new Date(row.interview_date + 'T00:00:00').toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric', year:'numeric' });
   const timeLabel = row.start_time ? row.start_time.substring(0,5) + (row.end_time ? ' – ' + row.end_time.substring(0,5) : '') : '';
 
-  const recipientIds = new Set();
-  // 1. Owners
-  const { data: owners } = await sb.from('profiles').select('id,email,full_name').eq('role', 'owner').eq('active', true);
-  (owners || []).forEach(o => recipientIds.add(o.id));
-  // 2. The interviewer
-  if(row.interviewer_id) recipientIds.add(row.interviewer_id);
+  // Resolve interviewer name (for the candidate-facing email)
+  let interviewerName = '';
+  let interviewerEmail = '';
+  if(row.interviewer_id){
+    const { data: iv } = await sb.from('profiles').select('full_name, email').eq('id', row.interviewer_id).maybeSingle();
+    interviewerName = iv?.full_name || '';
+    interviewerEmail = iv?.email || '';
+  }
 
-  // Fire notifications + email
-  for(const rid of recipientIds){
+  // Common variables for both .ics-bearing emails
+  const calendarVars = {
+    interview_id:    row.id,
+    interview_date:  row.interview_date,
+    start_time:      row.start_time,
+    end_time:        row.end_time,
+    location:        row.interview_location,
+    candidate_name:  candidateName,
+    candidate_email: row.candidate_email || '',
+    interviewer_name: interviewerName,
+    date_label:      dateLabel,
+    time_label:      timeLabel,
+    notes:           row.notes || '',
+    from_name:       recruiterName,
+    from_title:      'Recruiting Coordinator'
+  };
+
+  // 1. Email the CANDIDATE (with .ics calendar invite)
+  if(row.candidate_email){
     try {
-      const { data: profile } = await sb.from('profiles').select('id,email,full_name').eq('id', rid).maybeSingle();
-      if(!profile) continue;
-      const isInterviewer = rid === row.interviewer_id;
-      const titlePrefix = isInterviewer ? '🚨 Interview assigned to YOU' : '📅 New interview scheduled';
-      await notifyUser(rid, {
-        type: 'generic',
-        title: titlePrefix + ': ' + candidateName,
-        body: row.interview_location + ' · ' + dateLabel + ' · ' + timeLabel
+      await sendEmailViaFunction('interview_scheduled_candidate', row.candidate_email, calendarVars);
+    } catch(e){ console.warn('Candidate email failed:', e); }
+  }
+
+  // 2. Email the MM / interviewer (with .ics) + in-app notification
+  if(row.interviewer_id && interviewerEmail){
+    try {
+      await sendEmailViaFunction('interview_scheduled_mm', interviewerEmail, {
+        ...calendarVars,
+        mm_name: interviewerName || 'Hiring Manager'
       });
-      await sendEmailViaFunction('announcement', profile.email, {
-        title: titlePrefix + ': ' + candidateName,
-        body: 'Candidate: ' + candidateName + '\nLocation: ' + row.interview_location + '\nDate: ' + dateLabel + '\nTime: ' + (timeLabel || 'TBD') + (row.candidate_email ? '\nEmail: ' + row.candidate_email : '') + (row.notes ? '\n\nNotes: ' + row.notes : '') + '\n\nScheduled by: ' + recruiterName + (isInterviewer ? '\n\nYOU are the assigned interviewer.' : ''),
-        posted_by: 'Circle Solutions Recruiting'
+    } catch(e){ console.warn('MM email failed:', e); }
+    try {
+      await notifyUser(row.interviewer_id, {
+        type: 'generic',
+        title: '🚨 Interview assigned to YOU: ' + candidateName,
+        body: row.interview_location + ' · ' + dateLabel + ' · ' + (timeLabel || 'TBD')
       });
     } catch(_){}
   }
+
+  // 3. In-app notification to owners (no email — they're not party to the interview)
+  try {
+    const { data: owners } = await sb.from('profiles').select('id').eq('role', 'owner').eq('active', true);
+    for(const o of (owners || [])){
+      if(o.id === row.interviewer_id) continue;  // already notified above
+      await notifyUser(o.id, {
+        type: 'generic',
+        title: '📅 New interview scheduled: ' + candidateName,
+        body: 'With ' + (interviewerName || 'TBD') + ' · ' + row.interview_location + ' · ' + dateLabel + ' ' + (timeLabel || '')
+      });
+    }
+  } catch(e){ console.warn('Owner notify failed:', e); }
 }
 
 // ─── PRE-SCREEN HISTORY LIST ────────────────────────────────────────
@@ -9723,6 +9768,538 @@ window.markCandidateDtPassed = markCandidateDtPassed;
 window.markCandidateDtFailed = markCandidateDtFailed;
 window.markCandidateCoded = markCandidateCoded;
 window.resendCandidateInvite = resendCandidateInvite;
+
+// ═══════════════════════════════════════════════════════════════════════
+// MM INTERVIEW SYSTEM (Phase 3.9)
+// ═══════════════════════════════════════════════════════════════════════
+// MM ("interviewer") sees their own assigned interviews + can submit a
+// post-interview Response Form for each one.
+//
+// Outcomes captured:
+//   • Did the candidate show up? (showed / no_show)
+//   • If showed: hire / pass / maybe_revisit
+//   • Reason / notes (always required)
+//
+// When MM clicks Hire:
+//   • If auto_invite_on_hire = 'auto' → system auto-creates candidate account
+//     + sends candidate_invite email (uses Phase 3.8 Pipeline)
+//   • If 'manual' → onboarding gets notified to manually invite the candidate
+// ═══════════════════════════════════════════════════════════════════════
+
+// ─── HELPER: get the auto-hire setting ─────────────────────────────
+// Note: app_settings.value is JSONB, so the value comes back as a JS string
+// (not wrapped). We coerce it defensively.
+async function _getAutoHireSetting(){
+  try {
+    const { data } = await sb.from('app_settings').select('value').eq('key', 'auto_invite_on_hire').maybeSingle();
+    let v = data?.value;
+    // JSONB string column may come back as either "auto"/"manual" (string) or { ... }
+    if(typeof v !== 'string') v = String(v || '').replace(/^"|"$/g, '');
+    return v === 'auto' ? 'auto' : 'manual';
+  } catch(_){ return 'manual'; }
+}
+
+async function _setAutoHireSetting(newValue){
+  if(!['auto','manual'].includes(newValue)) throw new Error('Invalid value');
+  // Pass plain string — supabase-js will JSON-encode it when writing to JSONB
+  const { error } = await sb.from('app_settings').upsert({
+    key: 'auto_invite_on_hire',
+    value: newValue,
+    updated_by: currentProfile.id
+  }, { onConflict: 'key' });
+  if(error) throw error;
+}
+
+// ─── MY INTERVIEWS VIEW (MM-facing) ─────────────────────────────────
+async function renderMyInterviews(el){
+  const role = currentProfile?.role;
+  const isOwner = role === 'owner';
+  const isAdmin = isOwner || role === 'admin';
+  const isOnboarding = currentProfile?.has_master_center_access === true;
+  const seesAll = isOwner || isAdmin || isOnboarding;
+
+  el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading interviews…</div>';
+
+  // Build query — MMs see only their own; owner/admin/onboarding see all
+  let q = sb.from('interview_submissions')
+    .select('*, profiles!interview_submissions_interviewer_id_fkey(full_name,email)')
+    .order('interview_date', { ascending: false })
+    .order('start_time', { ascending: false });
+  if(!seesAll){
+    q = q.eq('interviewer_id', currentProfile.id);
+  }
+  const { data: rows, error } = await q;
+  if(error){ el.innerHTML = '<div class="bo-card" style="color:#F87171;">Error: ' + escapeHtml(error.message) + '</div>'; return; }
+
+  const today = new Date().toISOString().slice(0,10);
+  const upcoming = (rows || []).filter(iv => iv.interview_date >= today && (iv.status === 'scheduled' || !iv.attendance));
+  const needsResponse = (rows || []).filter(iv => iv.interview_date < today && !iv.attendance);
+  const completed = (rows || []).filter(iv => iv.attendance);
+
+  // Auto-hire toggle (only owner + onboarding can change it; everyone sees the current value)
+  const currentMode = await _getAutoHireSetting();
+  const canToggle = isOwner || isOnboarding;
+
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:24px;">
+      <div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;line-height:1;">🎤 ${seesAll ? 'All Interviews' : 'My Interviews'}</h1>
+        <p style="font-size:14px;color:rgba(255,255,255,0.55);margin-top:6px;">${seesAll ? 'Every interview across all hiring managers.' : 'Interviews assigned to you. Submit a response after each one to move the candidate forward.'}</p>
+      </div>
+    </div>
+
+    ${canToggle ? `
+      <div class="bo-card" style="margin-bottom:18px;background:linear-gradient(135deg,rgba(168,85,247,0.06),rgba(168,85,247,0));border:1px solid rgba(168,85,247,0.25);">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+          <div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#A855F7;letter-spacing:1.5px;margin-bottom:4px;">⚙️ AUTO-HIRE AUTOMATION</div>
+            <div style="font-size:12.5px;color:rgba(255,255,255,0.7);line-height:1.55;max-width:560px;">
+              When an MM clicks <strong>Hire</strong> on the response form:
+              ${currentMode === 'auto'
+                ? '<br/>🟢 <strong style="color:#00FF88;">AUTO MODE</strong> — system automatically creates the candidate account and sends them the welcome email immediately.'
+                : '<br/>🟡 <strong style="color:#FFC800;">MANUAL MODE</strong> — onboarding department gets notified to manually invite the candidate from the response.'}
+            </div>
+          </div>
+          <button class="bo-btn ${currentMode === 'auto' ? 'bo-btn-primary' : 'bo-btn-ghost'}" style="padding:8px 16px;font-size:12px;${currentMode === 'auto' ? 'background:linear-gradient(135deg,#00FF88,#00C6FF);color:#000;' : ''}" onclick="toggleAutoHire()">
+            ${currentMode === 'auto' ? '🔴 Switch to MANUAL' : '🟢 Switch to AUTO'}
+          </button>
+        </div>
+      </div>
+    ` : ''}
+
+    ${needsResponse.length > 0 ? `
+      <div class="bo-card" style="margin-bottom:14px;border-left:3px solid #FF6B00;background:linear-gradient(135deg,rgba(255,107,0,0.06),rgba(255,107,0,0));">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+          <div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#FF6B00;letter-spacing:1.5px;">⚠️ AWAITING YOUR RESPONSE</div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.55);margin-top:3px;">Past interviews that need an outcome submitted</div>
+          </div>
+          <div style="background:rgba(255,107,0,0.2);color:#FF6B00;padding:5px 12px;border-radius:50px;font-size:12px;font-weight:700;letter-spacing:1px;">${needsResponse.length}</div>
+        </div>
+        ${needsResponse.map(iv => _renderInterviewRow(iv, 'needs_response', seesAll)).join('')}
+      </div>
+    ` : ''}
+
+    ${upcoming.length > 0 ? `
+      <div class="bo-card" style="margin-bottom:14px;border-left:3px solid #00C6FF;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#00C6FF;letter-spacing:1.5px;">📅 UPCOMING</div>
+          <div style="background:rgba(0,198,255,0.2);color:#00C6FF;padding:5px 12px;border-radius:50px;font-size:12px;font-weight:700;letter-spacing:1px;">${upcoming.length}</div>
+        </div>
+        ${upcoming.map(iv => _renderInterviewRow(iv, 'upcoming', seesAll)).join('')}
+      </div>
+    ` : ''}
+
+    ${completed.length > 0 ? `
+      <div class="bo-card" style="margin-bottom:14px;border-left:3px solid #00FF88;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#00FF88;letter-spacing:1.5px;">✓ COMPLETED</div>
+          <div style="background:rgba(0,255,136,0.2);color:#00FF88;padding:5px 12px;border-radius:50px;font-size:12px;font-weight:700;letter-spacing:1px;">${completed.length}</div>
+        </div>
+        ${completed.slice(0, 25).map(iv => _renderInterviewRow(iv, 'completed', seesAll)).join('')}
+        ${completed.length > 25 ? `<div style="font-size:11.5px;color:rgba(255,255,255,0.45);text-align:center;margin-top:10px;">Showing 25 most recent of ${completed.length}</div>` : ''}
+      </div>
+    ` : ''}
+
+    ${(rows || []).length === 0 ? `
+      <div class="bo-card" style="text-align:center;padding:40px;">
+        <div style="font-size:48px;margin-bottom:10px;">🎤</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#fff;letter-spacing:1px;margin-bottom:6px;">No interviews yet</div>
+        <div style="color:rgba(255,255,255,0.5);font-size:13px;max-width:400px;margin:0 auto;line-height:1.6;">${seesAll ? 'No interviews have been scheduled yet. Recruiters can schedule them from the Recruiting page.' : 'You have not been assigned any interviews yet. When a recruiter schedules one with you, it will show up here.'}</div>
+      </div>
+    ` : ''}`;
+}
+
+function _renderInterviewRow(iv, mode, seesAll){
+  const candidateName = iv.candidate_first_name + ' ' + iv.candidate_last_name;
+  const dateLabel = new Date(iv.interview_date + 'T00:00:00').toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric', year:'numeric' });
+  const timeLabel = iv.start_time?.substring(0,5) || '';
+  const interviewerLabel = seesAll && iv.profiles ? ' · with ' + escapeHtml(iv.profiles.full_name || iv.profiles.email) : '';
+
+  // Outcome badge (only for completed)
+  let outcomeBadge = '';
+  if(iv.attendance === 'no_show'){
+    outcomeBadge = '<span style="background:rgba(248,113,113,0.15);color:#F87171;padding:3px 9px;border-radius:50px;font-size:10.5px;font-weight:700;letter-spacing:1px;">⛔ NO SHOW</span>';
+  } else if(iv.attendance === 'showed' && iv.hiring_decision === 'hire'){
+    outcomeBadge = '<span style="background:rgba(0,255,136,0.18);color:#00FF88;padding:3px 9px;border-radius:50px;font-size:10.5px;font-weight:700;letter-spacing:1px;">✓ HIRED</span>';
+  } else if(iv.attendance === 'showed' && iv.hiring_decision === 'pass'){
+    outcomeBadge = '<span style="background:rgba(248,113,113,0.15);color:#F87171;padding:3px 9px;border-radius:50px;font-size:10.5px;font-weight:700;letter-spacing:1px;">✗ PASSED</span>';
+  } else if(iv.attendance === 'showed' && iv.hiring_decision === 'maybe_revisit'){
+    outcomeBadge = '<span style="background:rgba(255,200,0,0.15);color:#FFC800;padding:3px 9px;border-radius:50px;font-size:10.5px;font-weight:700;letter-spacing:1px;">? REVISIT</span>';
+  }
+
+  // Action button
+  let actionBtn = '';
+  if(mode === 'needs_response' || mode === 'upcoming'){
+    const actionLabel = mode === 'needs_response' ? '📋 Submit Response' : '📋 Submit Response Early';
+    const actionStyle = mode === 'needs_response' ? 'bo-btn-primary' : 'bo-btn-ghost';
+    actionBtn = `<button class="bo-btn ${actionStyle}" style="padding:6px 12px;font-size:11.5px;" onclick="openInterviewResponse('${iv.id}')">${actionLabel}</button>`;
+  } else {
+    actionBtn = `<button class="bo-btn bo-btn-ghost" style="padding:6px 12px;font-size:11.5px;" onclick="openInterviewResponse('${iv.id}')">View Response</button>`;
+  }
+
+  return `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:rgba(255,255,255,0.025);border-radius:8px;margin-bottom:6px;flex-wrap:wrap;gap:8px;">
+      <div style="min-width:0;flex:1;">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:3px;">
+          <div style="font-size:14px;color:#fff;font-weight:600;">${escapeHtml(candidateName)}</div>
+          ${outcomeBadge}
+        </div>
+        <div style="font-size:11.5px;color:rgba(255,255,255,0.55);">${escapeHtml(iv.interview_location)} · ${dateLabel} ${timeLabel}${interviewerLabel}</div>
+        ${iv.candidate_email ? `<div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:2px;">📧 ${escapeHtml(iv.candidate_email)}</div>` : ''}
+      </div>
+      <div style="flex-shrink:0;">${actionBtn}</div>
+    </div>`;
+}
+
+async function toggleAutoHire(){
+  const cur = await _getAutoHireSetting();
+  const next = cur === 'auto' ? 'manual' : 'auto';
+  const msg = next === 'auto'
+    ? 'Switch to AUTO mode?\n\nWhen an MM clicks Hire on a response form, the system will:\n  • Create the candidate account immediately\n  • Send them the welcome email\n  • Move them into the Reliant Pipeline at INVITED stage\n\nNo human approval needed.'
+    : 'Switch to MANUAL mode?\n\nWhen an MM clicks Hire on a response form, onboarding will be notified to manually invite the candidate from the response.\n\nThis is the safer default.';
+  if(!confirm(msg)) return;
+  try {
+    await _setAutoHireSetting(next);
+    alert('✓ Mode switched to ' + next.toUpperCase());
+    renderMainContent();
+  } catch(e){
+    alert('Error: ' + e.message);
+  }
+}
+
+// ─── INTERVIEW RESPONSE FORM ─────────────────────────────────────────
+function openInterviewResponse(interviewId){
+  window._currentInterviewResponseId = interviewId;
+  boShowAdmin('interview-response');
+}
+
+async function renderInterviewResponseForm(el){
+  const interviewId = window._currentInterviewResponseId;
+  if(!interviewId){
+    el.innerHTML = '<div class="bo-card">No interview selected. Go back to My Interviews.</div>';
+    return;
+  }
+
+  el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading interview…</div>';
+
+  const { data: iv, error } = await sb.from('interview_submissions')
+    .select('*, profiles!interview_submissions_interviewer_id_fkey(full_name,email)')
+    .eq('id', interviewId)
+    .maybeSingle();
+  if(error || !iv){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Interview not found or access denied.</div>';
+    return;
+  }
+
+  const candidateName = iv.candidate_first_name + ' ' + iv.candidate_last_name;
+  const dateLabel = new Date(iv.interview_date + 'T00:00:00').toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric', year:'numeric' });
+  const timeLabel = iv.start_time?.substring(0,5) || '';
+  const isLocked = !!iv.attendance;  // already responded → locked, view-only
+
+  el.innerHTML = `
+    <button class="bo-back-btn show-on-mobile" onclick="boShowAdmin('my-interviews')">← Back</button>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:18px;">
+      <div>
+        <div style="font-size:11px;color:#FF6B00;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:6px;">${isLocked ? 'Submitted Response' : 'Interview Response'}</div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:34px;color:#fff;line-height:1.1;">📋 ${escapeHtml(candidateName)}</h1>
+        <p style="font-size:13px;color:rgba(255,255,255,0.55);margin-top:6px;">${escapeHtml(iv.interview_location)} · ${dateLabel} ${timeLabel}</p>
+      </div>
+      <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('my-interviews')" style="padding:7px 14px;font-size:12px;">← Back</button>
+    </div>
+
+    ${isLocked ? `
+      <div class="bo-card" style="background:linear-gradient(135deg,rgba(0,255,136,0.06),rgba(0,255,136,0));border:1px solid rgba(0,255,136,0.25);margin-bottom:14px;">
+        <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+          <div style="width:48px;height:48px;border-radius:50%;background:rgba(0,255,136,0.15);color:#00FF88;display:flex;align-items:center;justify-content:center;font-size:24px;flex-shrink:0;">✓</div>
+          <div style="flex:1;min-width:200px;">
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#00FF88;letter-spacing:1px;">RESPONSE ON RECORD</div>
+            <div style="font-size:12.5px;color:rgba(255,255,255,0.7);margin-top:4px;">Submitted ${iv.response_submitted_at ? new Date(iv.response_submitted_at).toLocaleString() : ''}</div>
+          </div>
+        </div>
+      </div>
+      <div class="bo-card">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:14px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">YOUR RESPONSE</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px;">
+          <div>
+            <div style="font-size:11px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;margin-bottom:4px;">ATTENDANCE</div>
+            <div style="font-size:14px;color:#fff;">${iv.attendance === 'showed' ? '✓ Showed up' : iv.attendance === 'no_show' ? '⛔ No show' : '—'}</div>
+          </div>
+          ${iv.hiring_decision ? `
+            <div>
+              <div style="font-size:11px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;margin-bottom:4px;">HIRING DECISION</div>
+              <div style="font-size:14px;color:#fff;">${iv.hiring_decision === 'hire' ? '✓ Hire' : iv.hiring_decision === 'pass' ? '✗ Pass' : '? Maybe / Revisit'}</div>
+            </div>
+          ` : ''}
+        </div>
+        <div style="font-size:11px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;margin-bottom:4px;">REASON / NOTES</div>
+        <div style="font-size:13.5px;color:#fff;line-height:1.6;background:rgba(0,0,0,0.2);padding:12px 14px;border-radius:6px;white-space:pre-wrap;">${escapeHtml(iv.response_reason || '—')}</div>
+      </div>
+    ` : `
+      <!-- The form -->
+      <div class="bo-card" style="margin-bottom:14px;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:14px;">1. Did the candidate show up?</div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
+          <label style="flex:1;min-width:160px;display:flex;align-items:center;gap:10px;padding:14px;background:rgba(0,255,136,0.04);border:2px solid rgba(0,255,136,0.2);border-radius:10px;cursor:pointer;" id="ir-att-showed-label">
+            <input type="radio" name="ir-attendance" value="showed" onchange="_irOnAttendance('showed')" style="width:18px;height:18px;accent-color:#00FF88;flex-shrink:0;"/>
+            <div><div style="font-size:14px;color:#00FF88;font-weight:700;">✓ Yes — they showed</div><div style="font-size:11px;color:rgba(255,255,255,0.55);">Conducted the interview</div></div>
+          </label>
+          <label style="flex:1;min-width:160px;display:flex;align-items:center;gap:10px;padding:14px;background:rgba(248,113,113,0.04);border:2px solid rgba(248,113,113,0.2);border-radius:10px;cursor:pointer;" id="ir-att-noshow-label">
+            <input type="radio" name="ir-attendance" value="no_show" onchange="_irOnAttendance('no_show')" style="width:18px;height:18px;accent-color:#F87171;flex-shrink:0;"/>
+            <div><div style="font-size:14px;color:#F87171;font-weight:700;">⛔ No — no show</div><div style="font-size:11px;color:rgba(255,255,255,0.55);">Didn't make it</div></div>
+          </label>
+        </div>
+      </div>
+
+      <!-- Hiring decision (shown only when "showed up" is selected) -->
+      <div class="bo-card" id="ir-decision-block" style="margin-bottom:14px;display:none;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:14px;">2. What's your call?</div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          <label style="flex:1;min-width:140px;display:flex;flex-direction:column;align-items:flex-start;gap:6px;padding:14px;background:rgba(0,255,136,0.04);border:2px solid rgba(0,255,136,0.2);border-radius:10px;cursor:pointer;" id="ir-dec-hire-label">
+            <input type="radio" name="ir-decision" value="hire" onchange="_irOnDecision()" style="width:18px;height:18px;accent-color:#00FF88;"/>
+            <div style="font-size:14px;color:#00FF88;font-weight:700;">✓ HIRE</div>
+            <div style="font-size:11px;color:rgba(255,255,255,0.55);">Move them to onboarding</div>
+          </label>
+          <label style="flex:1;min-width:140px;display:flex;flex-direction:column;align-items:flex-start;gap:6px;padding:14px;background:rgba(248,113,113,0.04);border:2px solid rgba(248,113,113,0.2);border-radius:10px;cursor:pointer;" id="ir-dec-pass-label">
+            <input type="radio" name="ir-decision" value="pass" onchange="_irOnDecision()" style="width:18px;height:18px;accent-color:#F87171;"/>
+            <div style="font-size:14px;color:#F87171;font-weight:700;">✗ PASS</div>
+            <div style="font-size:11px;color:rgba(255,255,255,0.55);">Not the right fit</div>
+          </label>
+          <label style="flex:1;min-width:140px;display:flex;flex-direction:column;align-items:flex-start;gap:6px;padding:14px;background:rgba(255,200,0,0.04);border:2px solid rgba(255,200,0,0.2);border-radius:10px;cursor:pointer;" id="ir-dec-maybe-label">
+            <input type="radio" name="ir-decision" value="maybe_revisit" onchange="_irOnDecision()" style="width:18px;height:18px;accent-color:#FFC800;"/>
+            <div style="font-size:14px;color:#FFC800;font-weight:700;">? MAYBE</div>
+            <div style="font-size:11px;color:rgba(255,255,255,0.55);">Want a 2nd opinion</div>
+          </label>
+        </div>
+      </div>
+
+      <!-- Reason — always required -->
+      <div class="bo-card" style="margin-bottom:14px;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:14px;">Reason / Notes <span style="font-size:11px;color:#F87171;font-weight:400;">REQUIRED</span></div>
+        <textarea id="ir-reason" class="form-input" rows="5" placeholder="Why did you make this call? Examples: 'No call/no text — never showed' · 'Strong communicator, professional, ready for the floor' · 'Lacked sales experience but trainable, want my MM peer to weigh in' · 'Inappropriate behavior during interview'"></textarea>
+        <div style="font-size:11.5px;color:rgba(255,255,255,0.4);margin-top:6px;">Be specific. Onboarding sees this and uses it for the next steps.</div>
+      </div>
+
+      <div style="display:flex;gap:10px;flex-wrap:wrap;">
+        <button class="bo-btn bo-btn-primary" style="padding:12px 22px;font-size:14px;" onclick="submitInterviewResponse('${iv.id}')">Submit Response</button>
+        <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('my-interviews')">Cancel</button>
+      </div>
+      <div id="ir-msg" style="margin-top:12px;font-size:13px;"></div>
+    `}`;
+}
+
+// Show/hide hiring decision block based on attendance choice
+function _irOnAttendance(value){
+  // Highlight selected radio's label border
+  const showedLabel = document.getElementById('ir-att-showed-label');
+  const noshowLabel = document.getElementById('ir-att-noshow-label');
+  if(showedLabel) showedLabel.style.borderColor = value === 'showed' ? '#00FF88' : 'rgba(0,255,136,0.2)';
+  if(noshowLabel) noshowLabel.style.borderColor = value === 'no_show' ? '#F87171' : 'rgba(248,113,113,0.2)';
+  // Toggle decision block
+  const block = document.getElementById('ir-decision-block');
+  if(block) block.style.display = value === 'showed' ? '' : 'none';
+  // If switching to no_show, clear any selected hiring decision
+  if(value === 'no_show'){
+    document.querySelectorAll('input[name="ir-decision"]').forEach(r => r.checked = false);
+    ['ir-dec-hire-label','ir-dec-pass-label','ir-dec-maybe-label'].forEach(id => {
+      const el = document.getElementById(id);
+      if(el){ el.style.borderColor = el.style.borderColor.includes('255,200,0') ? 'rgba(255,200,0,0.2)' : (el.style.borderColor.includes('248,113,113') ? 'rgba(248,113,113,0.2)' : 'rgba(0,255,136,0.2)'); }
+    });
+  }
+}
+
+function _irOnDecision(){
+  const v = document.querySelector('input[name="ir-decision"]:checked')?.value;
+  const map = { hire:['ir-dec-hire-label','#00FF88','rgba(0,255,136,0.2)'], pass:['ir-dec-pass-label','#F87171','rgba(248,113,113,0.2)'], maybe_revisit:['ir-dec-maybe-label','#FFC800','rgba(255,200,0,0.2)'] };
+  ['ir-dec-hire-label','ir-dec-pass-label','ir-dec-maybe-label'].forEach(id => {
+    const el = document.getElementById(id);
+    if(el){
+      const isSelected = (id === map[v]?.[0]);
+      const baseColor = id === 'ir-dec-hire-label' ? 'rgba(0,255,136,0.2)' : id === 'ir-dec-pass-label' ? 'rgba(248,113,113,0.2)' : 'rgba(255,200,0,0.2)';
+      const sharpColor = id === 'ir-dec-hire-label' ? '#00FF88' : id === 'ir-dec-pass-label' ? '#F87171' : '#FFC800';
+      el.style.borderColor = isSelected ? sharpColor : baseColor;
+    }
+  });
+}
+
+async function submitInterviewResponse(interviewId){
+  const msg = document.getElementById('ir-msg');
+  const attendance = document.querySelector('input[name="ir-attendance"]:checked')?.value;
+  const decision = document.querySelector('input[name="ir-decision"]:checked')?.value;
+  const reason = (document.getElementById('ir-reason')?.value || '').trim();
+  if(!attendance){ msg.innerHTML = '<span style="color:#F87171;">Pick whether they showed up or not.</span>'; return; }
+  if(attendance === 'showed' && !decision){ msg.innerHTML = '<span style="color:#F87171;">Pick a hiring decision (Hire / Pass / Maybe).</span>'; return; }
+  if(!reason || reason.length < 5){ msg.innerHTML = '<span style="color:#F87171;">Reason / notes is required (at least 5 characters).</span>'; return; }
+
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Saving response…</span>';
+
+  // Compute new status
+  let newStatus = 'completed';
+  if(attendance === 'no_show') newStatus = 'no_show';
+  else if(decision === 'hire') newStatus = 'hired';
+  else if(decision === 'pass') newStatus = 'passed';
+  else if(decision === 'maybe_revisit') newStatus = 'maybe_revisit';
+
+  const payload = {
+    attendance,
+    hiring_decision: decision || null,
+    response_reason: reason,
+    response_submitted_at: new Date().toISOString(),
+    response_submitted_by: currentProfile.id,
+    status: newStatus
+  };
+
+  const { data: updated, error } = await sb.from('interview_submissions')
+    .update(payload).eq('id', interviewId).select().single();
+  if(error){ msg.innerHTML = '<span style="color:#F87171;">' + escapeHtml(error.message) + '</span>'; return; }
+
+  // Outcome metadata for the email + next-action logic
+  let outcome_emoji = '✗', outcome_label = 'PASS', outcome_color = '#F87171';
+  let nextAction = '';
+  if(attendance === 'no_show'){
+    outcome_emoji = '⛔'; outcome_label = 'NO SHOW'; outcome_color = '#F87171';
+    nextAction = 'No further action needed.';
+  } else if(decision === 'hire'){
+    outcome_emoji = '✓'; outcome_label = 'HIRE'; outcome_color = '#00FF88';
+  } else if(decision === 'maybe_revisit'){
+    outcome_emoji = '?'; outcome_label = 'MAYBE / REVISIT'; outcome_color = '#FFC800';
+    nextAction = 'A 2nd opinion may be needed before moving forward. Discuss with the hiring manager.';
+  } else {
+    nextAction = 'No further action needed.';
+  }
+
+  // ─── HIRE branch ─────────────────────────────────────────────────────
+  // If MM hired the candidate, decide based on auto_invite_on_hire setting
+  let autoInviteHappened = false;
+  if(decision === 'hire'){
+    const mode = await _getAutoHireSetting();
+    if(mode === 'auto'){
+      // AUTO mode — create the candidate account immediately + email them
+      msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Creating candidate account...</span>';
+      try {
+        const created = await _autoCreateCandidateFromInterview(updated);
+        autoInviteHappened = !!created?.user_id;
+        if(created?.user_id){
+          // Link interview row → newly created candidate
+          await sb.from('interview_submissions').update({ hired_candidate_user_id: created.user_id }).eq('id', interviewId);
+          nextAction = '🟢 AUTO MODE: Candidate account created and welcome email sent. They are now in the Reliant Pipeline at INVITED stage.';
+        } else {
+          nextAction = '⚠️ AUTO MODE: Account creation failed (' + (created?.error || 'unknown error') + '). Onboarding should manually invite this candidate from the response.';
+        }
+      } catch(e){
+        console.error('Auto-invite failed:', e);
+        nextAction = '⚠️ AUTO MODE: Account creation failed (' + e.message + '). Onboarding should manually invite this candidate from the response.';
+      }
+    } else {
+      nextAction = '🟡 MANUAL MODE: Onboarding has been notified. Click "Invite as Candidate" on this response to create their account when ready.';
+    }
+  }
+
+  // ─── Notify Owner + Onboarding via in-app + email ───────────────────
+  try {
+    const candidateName = updated.candidate_first_name + ' ' + updated.candidate_last_name;
+    const mmName = currentProfile.full_name || currentProfile.email;
+    const { data: recipients } = await sb.from('profiles').select('id,email').or('role.eq.owner,has_master_center_access.eq.true').eq('active', true);
+    for(const r of (recipients || [])){
+      try {
+        await notifyUser(r.id, {
+          type: 'generic',
+          title: outcome_emoji + ' Interview response: ' + candidateName,
+          body: mmName + ' marked ' + candidateName + ' as ' + outcome_label + (decision === 'hire' && autoInviteHappened ? ' — auto-invited to onboarding' : decision === 'hire' ? ' — needs onboarding invite' : '')
+        });
+        if(r.email){
+          await sendEmailViaFunction('interview_response_submitted', r.email, {
+            candidate_name: candidateName,
+            mm_name: mmName,
+            outcome_emoji, outcome_label, outcome_color,
+            reason,
+            next_action: nextAction
+          });
+        }
+      } catch(_){}
+    }
+  } catch(e){ console.warn('Notify failed:', e); }
+
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Response submitted!</span><div style="font-size:12.5px;color:rgba(255,255,255,0.7);margin-top:6px;">' + escapeHtml(nextAction) + '</div>';
+  setTimeout(() => boShowAdmin('my-interviews'), 2400);
+}
+
+// AUTO mode: create the candidate account + send invite email + add to pipeline.
+// Mirrors what submitInviteCandidate does in the manual flow.
+async function _autoCreateCandidateFromInterview(iv){
+  const fullName = iv.candidate_first_name + ' ' + iv.candidate_last_name;
+  const email = iv.candidate_email;
+  if(!email){ return { error: 'No candidate email on the interview record' }; }
+  // Generate a memorable temp password
+  const words = ['retail','solar','blue','spark','ridge','grove','cedar','river','horizon','quartz','silver','flame','coast','ember','quick','bright','cobalt','reliant','citrus'];
+  const w1 = words[Math.floor(Math.random()*words.length)];
+  const w2 = words[Math.floor(Math.random()*words.length)];
+  const num = Math.floor(Math.random()*90 + 10);
+  const password = w1.charAt(0).toUpperCase() + w1.slice(1) + w2.charAt(0).toUpperCase() + w2.slice(1) + num;
+
+  const retailProgram = (allPrograms || []).find(p => p.id === 'retail');
+  const programs = retailProgram ? ['retail'] : [];
+
+  try {
+    const { data, error } = await sb.functions.invoke('admin-create-user', {
+      body: {
+        email, password, full_name: fullName,
+        phone: null, role: 'agent',
+        programs, market_id: null, reports_to: null,
+        phone_carrier: null, sms_opt_in: false, can_host_meetings: false
+      }
+    });
+    if(error || data?.error){
+      let errText = data?.error;
+      if(error){
+        try {
+          if(error.context && typeof error.context.json === 'function'){
+            const j = await error.context.json();
+            errText = j?.error || j?.message;
+          }
+        } catch(_){}
+        errText = errText || error.message;
+      }
+      return { error: errText };
+    }
+    const newUserId = data?.user_id;
+    if(!newUserId) return { error: 'No user_id returned' };
+
+    // Stage = invited
+    const nowIso = new Date().toISOString();
+    await sb.from('profiles').update({
+      candidate_stage: 'invited',
+      candidate_invited_at: nowIso,
+      candidate_stage_changed_at: nowIso,
+      candidate_stage_changed_by: currentProfile.id
+    }).eq('id', newUserId);
+    await sb.from('candidate_stage_log').insert({
+      user_id: newUserId, from_stage: null, to_stage: 'invited',
+      changed_by: currentProfile.id, notes: 'AUTO-INVITED from interview response by ' + (currentProfile.full_name || currentProfile.email)
+    });
+
+    // Send the candidate_invite welcome email
+    try {
+      await sendEmailViaFunction('candidate_invite', email, {
+        full_name: fullName, email, password,
+        from_name: currentProfile.full_name || 'The Onboarding Team',
+        from_title: 'Onboarding Coordinator'
+      });
+    } catch(_){}
+
+    return { user_id: newUserId };
+  } catch(e){
+    return { error: e.message };
+  }
+}
+
+window.renderMyInterviews = renderMyInterviews;
+window.renderInterviewResponseForm = renderInterviewResponseForm;
+window.openInterviewResponse = openInterviewResponse;
+window.toggleAutoHire = toggleAutoHire;
+window.submitInterviewResponse = submitInterviewResponse;
+window._irOnAttendance = _irOnAttendance;
+window._irOnDecision = _irOnDecision;
 
 
 async function renderStoresAdmin(el){
