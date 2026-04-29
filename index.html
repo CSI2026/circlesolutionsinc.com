@@ -2226,6 +2226,14 @@ function renderSidebar(){
     adminNavItems.push({ id:'forms-admin', label:'📋 All Forms' });
     adminNavItems.push({ id:'applications', label:'📝 Applications' });
     adminNavItems.push({ id:'programs-admin', label:'🎯 Programs' });
+  } else if(currentProfile.has_master_center_access){
+    // Onboarding department (non-owner, non-admin) gets stores access too
+    adminNavItems.push({ id:'stores', label:'🏪 Stores' });
+  }
+  // Weekly Schedule — MMs see this to assign their agents to stores each week
+  // Owner + admin can also see it (oversight)
+  if(isOwner || isAdmin || isManager){
+    adminNavItems.push({ id:'weekly-schedule', label:'📅 Weekly Schedule' });
   }
   const canInventory = isOwner || isAdmin || isManager || currentProfile.is_inventory_manager;
   if(canInventory){ adminNavItems.push({ id:'inventory', label:'📦 Inventory' }); }
@@ -2327,14 +2335,33 @@ function renderSidebar(){
 
   sidebarRoot.innerHTML = html;
 
-  // Async hydrate the conditional buttons
-  Promise.all([
-    sb.from('agent_stores').select('id', { count:'exact', head:true }).eq('user_id', currentProfile.id),
-    sb.from('inventory_items').select('id', { count:'exact', head:true }).eq('assigned_to_user', currentProfile.id).eq('status', 'assigned')
-  ]).then(([{ count: storeCount }, { count: invCount }]) => {
-    document.querySelectorAll('[data-conditional="checkin"]').forEach(b => { b.style.display = (storeCount && storeCount > 0) ? 'flex' : 'none'; });
+  // Async hydrate the conditional buttons.
+  // Daily Check-In shows if EITHER:
+  //   (a) The agent's MM has stores assigned (via store_managers join on reports_to), OR
+  //   (b) The agent has direct agent_stores assignments (legacy path)
+  // My Inventory shows if any inventory is assigned to them.
+  (async () => {
+    let canCheckin = false;
+    if(currentProfile.reports_to){
+      const { count: mmStoreCount } = await sb.from('store_managers')
+        .select('id', { count:'exact', head:true })
+        .eq('user_id', currentProfile.reports_to);
+      if(mmStoreCount && mmStoreCount > 0) canCheckin = true;
+    }
+    if(!canCheckin){
+      const { count: directCount } = await sb.from('agent_stores')
+        .select('id', { count:'exact', head:true })
+        .eq('user_id', currentProfile.id);
+      if(directCount && directCount > 0) canCheckin = true;
+    }
+    document.querySelectorAll('[data-conditional="checkin"]').forEach(b => { b.style.display = canCheckin ? 'flex' : 'none'; });
+
+    const { count: invCount } = await sb.from('inventory_items')
+      .select('id', { count:'exact', head:true })
+      .eq('assigned_to_user', currentProfile.id)
+      .eq('status', 'assigned');
     document.querySelectorAll('[data-conditional="myinv"]').forEach(b => { b.style.display = (invCount && invCount > 0) ? 'flex' : 'none'; });
-  }).catch(() => {});
+  })().catch(() => {});
 }
 
 // Toggle which accordion section is open. Only one open at a time.
@@ -2472,6 +2499,7 @@ function renderMainContent(){
   if(activeAdminView === 'onboarding-master'){ renderOnboardingMaster(el); return; }
   if(activeAdminView === 'onboarding-pending'){ renderOnboardingPending(el); return; }
   if(activeAdminView === 'stores'){ renderStoresAdmin(el); return; }
+  if(activeAdminView === 'weekly-schedule'){ renderWeeklySchedule(el); return; }
   if(activeAdminView === 'inventory'){ renderInventory(el); return; }
   if(activeAdminView === 'photo-audits-review'){ renderPhotoAuditsReview(el); return; }
   if(activeAdminView === 'payroll'){ renderPayroll(el); return; }
@@ -5372,32 +5400,112 @@ async function getAgentZeroSalesThreshold(userId){
 }
 
 // Schedule reminder for a check-in/out — returns string if outside hours, null if OK
-async function checkScheduleReminder(userId, auditType){
-  const { data: p } = await sb.from('profiles').select('programs').eq('id', userId).single();
-  if(!p || !p.programs || p.programs.length === 0) return null;
-  // Use FIRST program with a schedule defined
-  const { data: progs } = await sb.from('programs').select('name,schedule').in('id', p.programs);
-  const withSchedule = (progs || []).find(pr => pr.schedule);
-  if(!withSchedule) return null;
+// Get the effective schedule for a check-in: store override if present, else program default.
+// Returns: schedule array OR null if none defined.
+async function getEffectiveScheduleForStore(storeId){
+  if(!storeId) return null;
+  const { data: store } = await sb.from('stores').select('hours_override, program_id').eq('id', storeId).maybeSingle();
+  if(!store) return null;
+  if(store.hours_override && Array.isArray(store.hours_override) && store.hours_override.length > 0){
+    return store.hours_override;
+  }
+  if(!store.program_id) return null;
+  const { data: prog } = await sb.from('programs').select('schedule').eq('id', store.program_id).maybeSingle();
+  return prog?.schedule || null;
+}
+
+// Compute today's expected window from a schedule. Returns { start, end, optional, dayLabel } or null.
+function getTodayWindow(schedule){
+  if(!Array.isArray(schedule)) return null;
   const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const todayLabel = days[new Date().getDay()];
+  const todaySched = schedule.find(s => s.day === todayLabel);
+  if(!todaySched) return { dayLabel: todayLabel, missing: true };
+  return {
+    dayLabel: todayLabel,
+    start: todaySched.start,
+    end: todaySched.end,
+    optional: todaySched.optional === true,
+    missing: false
+  };
+}
+
+// Enhanced schedule check using store-level override.
+// Returns { offHours, minutesOff, message, todayWindow } where:
+//   offHours = boolean — true if check-in/out is outside expected window (>30min early or any late)
+//   minutesOff = signed integer — negative = early, positive = late, 0 = on time
+async function checkScheduleStatus(userId, auditType, storeId){
+  // Try store-effective schedule first; fall back to legacy "agent's program" path
+  let schedule = null;
+  if(storeId){
+    schedule = await getEffectiveScheduleForStore(storeId);
+  }
+  if(!schedule){
+    // Legacy fallback for backward compat — use agent's first scheduled program
+    const { data: p } = await sb.from('profiles').select('programs').eq('id', userId).single();
+    if(p?.programs?.length){
+      const { data: progs } = await sb.from('programs').select('schedule').in('id', p.programs);
+      const withSchedule = (progs || []).find(pr => pr.schedule);
+      if(withSchedule) schedule = withSchedule.schedule;
+    }
+  }
+  if(!schedule) return { offHours: false, minutesOff: 0, message: null, todayWindow: null };
+
+  const todayWindow = getTodayWindow(schedule);
+  if(!todayWindow) return { offHours: false, minutesOff: 0, message: null, todayWindow: null };
+
+  if(todayWindow.missing){
+    return { offHours: false, minutesOff: 0, message: 'Today (' + todayWindow.dayLabel + ') is not a scheduled work day. Hours still count toward your weekly total.', todayWindow };
+  }
+  if(todayWindow.optional){
+    return { offHours: false, minutesOff: 0, message: null, todayWindow };
+  }
+
   const now = new Date();
-  const todayLabel = days[now.getDay()];
-  const todaySched = (withSchedule.schedule || []).find(s => s.day === todayLabel);
-  if(!todaySched) return 'Today (' + todayLabel + ') is not a scheduled work day for ' + withSchedule.name + '. Hours still count toward your weekly total.';
-  if(todaySched.optional) return null; // optional days don't nag
   const cur = now.getHours() * 60 + now.getMinutes();
-  const [sh, sm] = todaySched.start.split(':').map(Number);
-  const [eh, em] = todaySched.end.split(':').map(Number);
+  const [sh, sm] = (todayWindow.start || '0:0').split(':').map(Number);
+  const [eh, em] = (todayWindow.end || '0:0').split(':').map(Number);
   const startMin = sh * 60 + sm;
   const endMin = eh * 60 + em;
-  if(auditType === 'check_in' && cur < startMin - 30){
-    return 'Your scheduled shift starts at ' + todaySched.start + '. You\'re early — that\'s fine, but typical hours are ' + todaySched.start + '–' + todaySched.end + '.';
+
+  let offHours = false;
+  let minutesOff = 0;
+  let message = null;
+
+  if(auditType === 'check_in'){
+    if(cur < startMin - 30){
+      offHours = true;
+      minutesOff = cur - startMin;
+      message = '⚠️ Early check-in: shift starts at ' + todayWindow.start + ' (you are ' + Math.abs(minutesOff) + ' min early). Your manager will be notified.';
+    } else if(cur > endMin){
+      offHours = true;
+      minutesOff = cur - endMin;
+      message = '⚠️ Late check-in: shift ended at ' + todayWindow.end + ' (you are ' + minutesOff + ' min past). Your manager will be notified.';
+    } else if(cur < startMin){
+      message = 'You\'re a few minutes early. Scheduled shift: ' + todayWindow.start + '–' + todayWindow.end + '.';
+    }
+  } else if(auditType === 'check_out'){
+    if(cur < endMin - 60){
+      offHours = true;
+      minutesOff = cur - endMin;
+      message = '⚠️ Early check-out: shift ends at ' + todayWindow.end + ' (you are ' + Math.abs(minutesOff) + ' min early). Your manager will be notified.';
+    } else if(cur > endMin + 90){
+      offHours = true;
+      minutesOff = cur - endMin;
+      message = '⚠️ Very late check-out: shift ended ' + minutesOff + ' min ago. Your manager will be notified.';
+    }
   }
-  if(auditType === 'check_in' && cur > endMin){
-    return 'Your scheduled shift ended at ' + todaySched.end + '. Late check-in flagged for review.';
-  }
-  return null;
+
+  return { offHours, minutesOff, message, todayWindow };
 }
+
+async function checkScheduleReminder(userId, auditType, storeId){
+  const result = await checkScheduleStatus(userId, auditType, storeId);
+  return result.message;
+}
+
+window.getEffectiveScheduleForStore = getEffectiveScheduleForStore;
+window.checkScheduleStatus = checkScheduleStatus;
 
 // ─── Auto-lock evaluator (called from payroll dashboard) ───
 // Looks at last N workdays for this agent; if zero sales on >= threshold of them
@@ -6060,9 +6168,266 @@ window.processCsvImport = processCsvImport;
 // ═══════════════════════════════════════════════════════════════════════
 // STORES ADMIN — owner/admin manages physical retail locations w/ GPS
 // ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════
+// WEEKLY SCHEDULE — MMs assign their direct-report agents to specific stores
+// each week. Owner + admin can also see/edit. Resets Mondays.
+// ═══════════════════════════════════════════════════════════════════════
+
+// Helper: get Monday-of-current-week as a YYYY-MM-DD string (local time)
+function getCurrentWeekMonday(offsetWeeks){
+  offsetWeeks = offsetWeeks || 0;
+  const d = new Date();
+  d.setHours(0,0,0,0);
+  const day = d.getDay(); // 0 = Sun, 1 = Mon
+  const shift = day === 0 ? -6 : 1 - day;
+  d.setDate(d.getDate() + shift + (offsetWeeks * 7));
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return yyyy + '-' + mm + '-' + dd;
+}
+
+async function renderWeeklySchedule(el){
+  const isOwner = currentProfile.role === 'owner';
+  const isAdmin = isOwner || currentProfile.role === 'admin';
+  const isManager = currentProfile.role === 'manager';
+  const isOnboarding = currentProfile.has_master_center_access === true;
+  const canSee = isAdmin || isManager || isOnboarding;
+  if(!canSee){ el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied. Weekly Schedule is for owner/admin/onboarding/managers.</div>'; return; }
+
+  const weekOffset = window._wsOffset || 0;
+  const weekMonday = getCurrentWeekMonday(weekOffset);
+  const weekDate = new Date(weekMonday + 'T00:00:00');
+  const weekEnd = new Date(weekDate);
+  weekEnd.setDate(weekEnd.getDate() + 6);
+  const weekLabel = weekDate.toLocaleDateString('en-US', { month:'short', day:'numeric' }) + ' – ' + weekEnd.toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
+
+  el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading schedule…</div>';
+
+  // Fetch stores this user can manage:
+  // - Owner/admin/onboarding: ALL stores
+  // - Manager: only stores they're assigned as MM of (via store_managers)
+  let stores = [];
+  if(isAdmin || isOnboarding){
+    const { data } = await sb.from('stores').select('*, markets(name)').eq('active', true).order('name');
+    stores = data || [];
+  } else if(isManager){
+    const { data: smRows } = await sb.from('store_managers').select('store_id').eq('user_id', currentProfile.id);
+    const storeIds = (smRows || []).map(x => x.store_id);
+    if(storeIds.length === 0){
+      el.innerHTML = `
+        <div style="margin-bottom:24px;">
+          <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;line-height:1;">📅 Weekly Schedule</h1>
+          <p style="font-size:14px;color:rgba(255,255,255,0.5);margin-top:6px;">No stores assigned to you yet.</p>
+        </div>
+        <div class="bo-card" style="text-align:center;padding:40px 30px;">
+          <div style="font-size:48px;margin-bottom:12px;">🏪</div>
+          <div style="color:rgba(255,255,255,0.5);font-size:14px;line-height:1.6;">You haven't been assigned to manage any stores yet.<br/>Owner or onboarding department needs to add you as a store manager.</div>
+        </div>`;
+      return;
+    }
+    const { data } = await sb.from('stores').select('*, markets(name)').in('id', storeIds).eq('active', true).order('name');
+    stores = data || [];
+  }
+
+  // Direct reports (only for managers — admin/owner can pick from anyone)
+  let assignableAgents = [];
+  if(isAdmin || isOnboarding){
+    const { data } = await sb.from('profiles').select('id,full_name,email,role,reports_to')
+      .in('role', ['agent','team_lead'])
+      .eq('active', true)
+      .order('full_name');
+    assignableAgents = data || [];
+  } else {
+    // Manager: only their direct reports
+    const { data } = await sb.from('profiles').select('id,full_name,email,role,reports_to')
+      .eq('reports_to', currentProfile.id)
+      .eq('active', true)
+      .order('full_name');
+    assignableAgents = data || [];
+  }
+
+  // Fetch this week's existing assignments (for these stores)
+  const storeIds = stores.map(s => s.id);
+  let weekAssignments = [];
+  if(storeIds.length > 0){
+    const { data } = await sb.from('weekly_store_assignments')
+      .select('*, profiles!weekly_store_assignments_user_id_fkey(full_name,email)')
+      .eq('week_start_date', weekMonday)
+      .in('store_id', storeIds);
+    weekAssignments = data || [];
+  }
+  // Map store -> array of assigned users
+  const assignmentsByStore = {};
+  weekAssignments.forEach(a => {
+    if(!assignmentsByStore[a.store_id]) assignmentsByStore[a.store_id] = [];
+    assignmentsByStore[a.store_id].push(a);
+  });
+  // Map user -> store (which store an agent is currently scheduled at)
+  const storeByUser = {};
+  weekAssignments.forEach(a => { storeByUser[a.user_id] = a.store_id; });
+
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;margin-bottom:24px;">
+      <div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;line-height:1;">📅 Weekly Schedule</h1>
+        <p style="font-size:14px;color:rgba(255,255,255,0.5);margin-top:6px;">Assign your team to specific stores for this week. Agents see their assigned store as the default check-in target.</p>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <button class="bo-btn bo-btn-ghost" style="padding:7px 12px;font-size:12px;" onclick="wsShiftWeek(-1)">◀ Prev Week</button>
+        <div style="text-align:center;min-width:200px;">
+          <div style="font-size:11px;color:rgba(255,255,255,0.5);letter-spacing:1.5px;font-weight:700;">WEEK OF</div>
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#fff;letter-spacing:1px;">${escapeHtml(weekLabel)}</div>
+        </div>
+        <button class="bo-btn bo-btn-ghost" style="padding:7px 12px;font-size:12px;" ${weekOffset >= 0 ? 'disabled style="padding:7px 12px;font-size:12px;opacity:0.4;cursor:not-allowed;"' : ''} onclick="wsShiftWeek(1)">Next Week ▶</button>
+      </div>
+    </div>
+
+    ${stores.length === 0 ? `
+      <div class="bo-card" style="text-align:center;padding:40px 30px;">
+        <div style="font-size:48px;margin-bottom:12px;">🏪</div>
+        <div style="color:rgba(255,255,255,0.5);font-size:14px;">No stores available.</div>
+      </div>
+    ` : assignableAgents.length === 0 ? `
+      <div class="bo-card" style="text-align:center;padding:40px 30px;">
+        <div style="font-size:48px;margin-bottom:12px;">👥</div>
+        <div style="color:rgba(255,255,255,0.5);font-size:14px;line-height:1.6;">No agents to schedule.${isManager ? ' You have no direct reports yet.' : ''}</div>
+      </div>
+    ` : `
+      <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(320px, 1fr));gap:16px;">
+        ${stores.map(s => {
+          const assignedHere = assignmentsByStore[s.id] || [];
+          return `
+            <div class="bo-card" style="padding:16px;">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
+                <div>
+                  <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#fff;letter-spacing:1px;">${escapeHtml(s.name)}${s.store_number ? ' #' + escapeHtml(s.store_number) : ''}</div>
+                  <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-top:2px;">${escapeHtml(s.city || '')}${s.markets?.name ? ' · ' + escapeHtml(s.markets.name) : ''}</div>
+                </div>
+                <div style="background:rgba(0,198,255,0.12);color:#00C6FF;padding:3px 9px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">${assignedHere.length} ASSIGNED</div>
+              </div>
+              <div style="font-size:11px;color:rgba(255,255,255,0.5);letter-spacing:1.5px;font-weight:700;margin-bottom:8px;">SCHEDULED THIS WEEK</div>
+              <div id="ws-store-${s.id}" style="display:flex;flex-direction:column;gap:5px;margin-bottom:10px;min-height:30px;">
+                ${assignedHere.length === 0 ? '<div style="font-size:12px;color:rgba(255,255,255,0.35);padding:6px 8px;font-style:italic;">No one scheduled here yet</div>' :
+                  assignedHere.map(a => `
+                    <div style="display:flex;justify-content:space-between;align-items:center;background:rgba(0,255,136,0.06);border:1px solid rgba(0,255,136,0.18);border-radius:6px;padding:6px 10px;font-size:12.5px;">
+                      <span style="color:#fff;">${escapeHtml(a.profiles?.full_name || a.profiles?.email || 'unknown')}</span>
+                      <button onclick="wsRemoveAssignment('${a.id}')" style="background:none;border:none;color:#F87171;cursor:pointer;font-size:14px;padding:0 4px;" title="Remove">✕</button>
+                    </div>
+                  `).join('')}
+              </div>
+              <button class="bo-btn bo-btn-primary" style="width:100%;padding:8px;font-size:12px;" onclick="wsOpenAssignModal('${s.id}','${escapeHtml(s.name).replace(/'/g, '')}','${weekMonday}')">+ Assign Agents</button>
+            </div>`;
+        }).join('')}
+      </div>
+    `}
+
+    <div style="margin-top:24px;font-size:11.5px;color:rgba(255,255,255,0.5);line-height:1.6;background:rgba(255,255,255,0.03);padding:12px 14px;border-radius:8px;">
+      <strong style="color:rgba(255,255,255,0.7);">How this works:</strong> Each agent has access to ALL stores their MM manages — they see the full list in their Daily Check-In dropdown. The weekly schedule highlights which store is their <em>primary</em> location for this week. If they're sent to another of your stores mid-week, they can still pick it from the dropdown — the geofence verifies they're physically there.
+    </div>`;
+
+  // Cache state for the assign modal
+  window._wsState = { stores, assignableAgents, weekMonday, storeByUser };
+}
+
+function wsShiftWeek(dir){
+  window._wsOffset = (window._wsOffset || 0) + dir;
+  if(window._wsOffset > 0) window._wsOffset = 0; // can't peek future
+  renderMainContent();
+}
+
+async function wsOpenAssignModal(storeId, storeName, weekMonday){
+  const state = window._wsState;
+  if(!state) return;
+  // Build picker — show all assignable agents, mark which ones are already
+  // assigned somewhere this week (and where)
+  const agents = state.assignableAgents;
+  const storeByUser = state.storeByUser;
+  const stores = state.stores;
+  const storeNameById = {};
+  stores.forEach(s => storeNameById[s.id] = s.name + (s.store_number ? ' #' + s.store_number : ''));
+
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;margin-bottom:6px;letter-spacing:1px;">📅 Assign Agents</h2>
+    <div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-bottom:14px;">Store: <strong style="color:#fff;">${escapeHtml(storeName)}</strong> · Week of ${weekMonday}</div>
+    <div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-bottom:10px;line-height:1.55;">Pick which of your agents work primarily at this store this week. An agent assigned to a different store will MOVE here — they can only have one primary store per week.</div>
+    <div style="max-height:340px;overflow-y:auto;background:rgba(0,0,0,0.2);border-radius:8px;padding:6px;margin-bottom:14px;">
+      ${agents.length === 0 ? '<div style="padding:12px;color:rgba(255,255,255,0.4);font-size:12px;">No agents to assign.</div>' :
+        agents.map(a => {
+          const currentStore = storeByUser[a.id];
+          const isHere = currentStore === storeId;
+          const isElsewhere = currentStore && !isHere;
+          return `
+            <label style="display:flex;align-items:center;gap:10px;padding:8px 10px;cursor:pointer;border-radius:6px;${isHere ? 'background:rgba(0,255,136,0.06);' : ''}" onmouseover="this.style.background='rgba(255,255,255,0.04)'" onmouseout="this.style.background='${isHere ? 'rgba(0,255,136,0.06)' : ''}'">
+              <input type="checkbox" class="ws-agent" value="${a.id}" ${isHere ? 'checked' : ''} style="width:16px;height:16px;accent-color:#00FF88;"/>
+              <div style="flex:1;">
+                <div style="font-size:13px;color:#fff;">${escapeHtml(a.full_name || a.email)}</div>
+                <div style="font-size:10.5px;color:${isElsewhere ? '#FFD700' : 'rgba(255,255,255,0.45)'};">
+                  ${isHere ? '✓ Already at this store' : isElsewhere ? '⚠ Currently at: ' + escapeHtml(storeNameById[currentStore] || 'other store') : 'Not assigned this week'}
+                </div>
+              </div>
+            </label>`;
+        }).join('')}
+    </div>
+    <div style="display:flex;gap:10px;">
+      <button class="bo-btn bo-btn-primary" onclick="wsSaveAssignments('${storeId}','${weekMonday}')">Save</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="ws-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-box').style.maxWidth = '520px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function wsSaveAssignments(storeId, weekMonday){
+  const checked = Array.from(document.querySelectorAll('.ws-agent:checked')).map(cb => cb.value);
+  const msg = document.getElementById('ws-msg');
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Saving…</span>';
+  try {
+    // First: delete this user's existing weekly assignment (UNIQUE on user_id+week_start)
+    if(checked.length > 0){
+      await sb.from('weekly_store_assignments').delete().eq('week_start_date', weekMonday).in('user_id', checked);
+    }
+    // Insert new rows for each checked agent at this store
+    if(checked.length > 0){
+      const rows = checked.map(uid => ({
+        user_id: uid,
+        store_id: storeId,
+        week_start_date: weekMonday,
+        assigned_by: currentProfile.id
+      }));
+      const { error } = await sb.from('weekly_store_assignments').insert(rows);
+      if(error){ msg.innerHTML = '<span style="color:#F87171;">' + error.message + '</span>'; return; }
+    }
+    msg.innerHTML = '<span style="color:#00FF88;">✓ Saved.</span>';
+    setTimeout(() => { closeAllModals(); renderMainContent(); }, 700);
+  } catch(e){
+    msg.innerHTML = '<span style="color:#F87171;">' + (e.message || 'Save failed') + '</span>';
+  }
+}
+
+async function wsRemoveAssignment(assignmentId){
+  if(!confirm('Remove this agent from this store this week?')) return;
+  const { error } = await sb.from('weekly_store_assignments').delete().eq('id', assignmentId);
+  if(error){ alert('Error: ' + error.message); return; }
+  renderMainContent();
+}
+
+window.renderWeeklySchedule = renderWeeklySchedule;
+window.wsShiftWeek = wsShiftWeek;
+window.wsOpenAssignModal = wsOpenAssignModal;
+window.wsSaveAssignments = wsSaveAssignments;
+window.wsRemoveAssignment = wsRemoveAssignment;
+
+
 async function renderStoresAdmin(el){
-  const canManage = ['owner','admin','manager'].includes(currentProfile.role);
-  if(!canManage){ el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied.</div>'; return; }
+  // Owner + admin + onboarding department can manage stores.
+  // (MMs can see their assigned stores but can't edit store details — they
+  // assign agents via the Weekly Schedule view.)
+  const isOwner = currentProfile.role === 'owner';
+  const isAdmin = isOwner || currentProfile.role === 'admin';
+  const isOnboarding = currentProfile.has_master_center_access === true;
+  const canManage = isAdmin || isOnboarding;
+  if(!canManage){ el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied. Stores are managed by Owner, Admin, and Onboarding department only.</div>'; return; }
 
   const { data: stores } = await sb.from('stores').select('*, markets(name)').order('name');
 
@@ -6117,11 +6482,17 @@ async function openStoreEditor(storeId){
   let s = { id:'', name:'', store_number:'', street_address:'', city:'', state:'', zip:'',
     latitude:null, longitude:null, geofence_radius_meters:100,
     market_id:null, program_id:null, active:true, notes:'' };
+  let assignedMMs = [];
   if(isEdit){
     const { data } = await sb.from('stores').select('*').eq('id', storeId).single();
     if(data) s = { ...s, ...data };
+    const { data: mmRows } = await sb.from('store_managers').select('user_id').eq('store_id', storeId);
+    assignedMMs = (mmRows || []).map(x => x.user_id);
   }
-  const { data: markets } = await sb.from('markets').select('id,name').order('name');
+  const [{ data: markets }, { data: managers }] = await Promise.all([
+    sb.from('markets').select('id,name').order('name'),
+    sb.from('profiles').select('id,full_name,email,market_id').eq('active', true).eq('role', 'manager').order('full_name')
+  ]);
 
   document.getElementById('modal-box').innerHTML = `
     <h2 style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:#fff;margin-bottom:14px;letter-spacing:1px;">${isEdit ? 'Edit' : 'New'} Store</h2>
@@ -6151,21 +6522,58 @@ async function openStoreEditor(storeId){
         </select>
       </div>
     </div>
+
+    <hr style="border:none;border-top:1px solid rgba(255,255,255,0.08);margin:18px 0;"/>
+    <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#00C6FF;letter-spacing:1.5px;margin-bottom:10px;">👔 Store Managers</div>
+    <div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-bottom:10px;line-height:1.55;">Pick which manager(s) run this store. They'll see it in their Stores list, can assign their agents to it via Weekly Schedule, and their direct-reports auto-inherit access for daily check-ins.</div>
+    <div class="form-group">
+      ${(managers || []).length === 0
+        ? '<div style="font-size:12px;color:rgba(255,255,255,0.4);padding:10px;background:rgba(255,255,255,0.03);border-radius:6px;">No managers in the system yet. Add managers to your team first.</div>'
+        : `<div style="max-height:200px;overflow-y:auto;background:rgba(0,0,0,0.2);border-radius:8px;padding:6px;">
+          ${(managers || []).map(m => `
+            <label style="display:flex;align-items:center;gap:10px;padding:6px 10px;cursor:pointer;border-radius:6px;" onmouseover="this.style.background='rgba(255,255,255,0.04)'" onmouseout="this.style.background=''">
+              <input type="checkbox" class="se-mm" value="${m.id}" ${assignedMMs.includes(m.id) ? 'checked' : ''} style="width:16px;height:16px;accent-color:#00C6FF;"/>
+              <div style="flex:1;">
+                <div style="font-size:13px;color:#fff;">${escapeHtml(m.full_name || m.email)}</div>
+                <div style="font-size:10.5px;color:rgba(255,255,255,0.45);">${escapeHtml(m.email)}</div>
+              </div>
+            </label>
+          `).join('')}
+        </div>`}
+    </div>
+
     <hr style="border:none;border-top:1px solid rgba(255,255,255,0.08);margin:18px 0;"/>
     <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#FF6B00;letter-spacing:1.5px;margin-bottom:10px;">📍 GPS &amp; Geofence</div>
-    <div style="background:rgba(255,193,7,0.06);border:1px solid rgba(255,193,7,0.25);border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:12px;color:rgba(255,255,255,0.7);line-height:1.55;">
-      <strong style="color:#FFD700;">How to get GPS:</strong> Open Google Maps → search for the store → right-click on the pin → click the lat/long that shows up. Or click <strong>Use My Current Location</strong> if you're standing at the store.
+    <div style="background:rgba(0,255,136,0.06);border:1px solid rgba(0,255,136,0.25);border-radius:8px;padding:12px 14px;margin-bottom:12px;font-size:12px;color:rgba(255,255,255,0.75);line-height:1.55;">
+      <strong style="color:#00FF88;">⚡ Auto-fill GPS:</strong> Fill in the address fields above, then click <strong>📍 Get GPS from Address</strong>. The system looks up the coordinates from OpenStreetMap (free service, ~20m accuracy). Or click <strong>Use My Current Location</strong> if you're standing at the store.
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
       <div class="form-group"><label class="form-label">Latitude</label><input id="se-lat" class="form-input" type="number" step="0.0000001" value="${s.latitude ?? ''}" placeholder="32.7767"/></div>
       <div class="form-group"><label class="form-label">Longitude</label><input id="se-lng" class="form-input" type="number" step="0.0000001" value="${s.longitude ?? ''}" placeholder="-96.7970"/></div>
     </div>
-    <button class="bo-btn bo-btn-ghost" style="padding:8px 14px;font-size:12px;margin-bottom:14px;" onclick="seUseMyLocation()">📍 Use My Current Location</button>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">
+      <button class="bo-btn bo-btn-primary" style="padding:8px 14px;font-size:12px;" onclick="seGeocodeAddress()">📍 Get GPS from Address</button>
+      <button class="bo-btn bo-btn-ghost" style="padding:8px 14px;font-size:12px;" onclick="seUseMyLocation()">📡 Use My Current Location</button>
+    </div>
     <div class="form-group">
       <label class="form-label">Geofence Radius (meters)</label>
       <input id="se-radius" class="form-input" type="number" min="50" max="2000" value="${s.geofence_radius_meters || 100}"/>
       <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">100m (~330 ft) is strict. 250m allows the parking lot. 500m is generous.</div>
     </div>
+
+    <hr style="border:none;border-top:1px solid rgba(255,255,255,0.08);margin:18px 0;"/>
+    <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#FFC800;letter-spacing:1.5px;margin-bottom:6px;">⏰ Hours Override</div>
+    <div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-bottom:10px;line-height:1.55;">By default, this store uses the program's default schedule (set in Programs admin). Toggle "Override" if THIS specific store has different hours.</div>
+    <div class="form-group">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+        <input type="checkbox" id="se-hours-override-toggle" ${s.hours_override ? 'checked' : ''} onchange="toggleStoreHoursOverride(this)" style="width:16px;height:16px;accent-color:#FFC800;"/>
+        <span style="font-size:13px;color:#fff;">Override program default schedule for this store</span>
+      </label>
+    </div>
+    <div id="se-hours-rows" style="background:rgba(0,0,0,0.2);border-radius:8px;padding:8px;display:${s.hours_override ? 'block' : 'none'};">
+      ${renderStoreHoursRows(s.hours_override || getDefaultSchedule())}
+    </div>
+
     <div class="form-group">
       <label class="form-label">
         <input type="checkbox" id="se-active" ${s.active !== false ? 'checked' : ''} style="margin-right:8px;width:16px;height:16px;accent-color:#FF6B00;"/>
@@ -6178,7 +6586,7 @@ async function openStoreEditor(storeId){
       <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
     </div>
     <div id="se-msg" style="margin-top:12px;font-size:13px;"></div>`;
-  document.getElementById('modal-box').style.maxWidth = '640px';
+  document.getElementById('modal-box').style.maxWidth = '680px';
   document.getElementById('modal-backdrop').style.display = 'flex';
 }
 
@@ -6197,7 +6605,50 @@ function seUseMyLocation(){
   );
 }
 
+// Build a single-line address from the current form state
+function _seBuildAddressString(){
+  const street = document.getElementById('se-street').value.trim();
+  const city = document.getElementById('se-city').value.trim();
+  const state = document.getElementById('se-state').value.trim();
+  const zip = document.getElementById('se-zip').value.trim();
+  return [street, city, state, zip].filter(Boolean).join(', ');
+}
+
+// Geocode the address via OpenStreetMap Nominatim (free, no API key)
+async function seGeocodeAddress(silent){
+  const msg = document.getElementById('se-msg');
+  const address = _seBuildAddressString();
+  if(!address){
+    if(!silent) msg.innerHTML = '<span style="color:#F87171;">Fill in street/city/state/zip first.</span>';
+    return false;
+  }
+  if(!silent) msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">📍 Looking up coordinates from OpenStreetMap…</span>';
+  try {
+    const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&q=' + encodeURIComponent(address);
+    const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
+    if(!resp.ok){ throw new Error('Nominatim returned ' + resp.status); }
+    const results = await resp.json();
+    if(!results || results.length === 0){
+      if(!silent) msg.innerHTML = '<span style="color:#F87171;">⚠️ No GPS match found for that address. Double-check the address or use "My Current Location" instead.</span>';
+      return false;
+    }
+    const lat = parseFloat(results[0].lat);
+    const lng = parseFloat(results[0].lon);
+    document.getElementById('se-lat').value = lat.toFixed(7);
+    document.getElementById('se-lng').value = lng.toFixed(7);
+    if(!silent) msg.innerHTML = '<span style="color:#00FF88;">✓ GPS pulled from OpenStreetMap. Verify accuracy before saving.</span>';
+    return true;
+  } catch(e){
+    if(!silent) msg.innerHTML = '<span style="color:#F87171;">Geocoding failed: ' + (e.message || 'network error') + '</span>';
+    return false;
+  }
+}
+
 async function saveStore(existingId){
+  // Read hours override (null if toggle off)
+  const overrideOn = document.getElementById('se-hours-override-toggle')?.checked;
+  const hoursOverride = overrideOn ? _readStoreHoursFromForm() : null;
+
   const payload = {
     name: document.getElementById('se-name').value.trim(),
     store_number: document.getElementById('se-store-num').value.trim() || null,
@@ -6211,22 +6662,49 @@ async function saveStore(existingId){
     longitude: parseFloat(document.getElementById('se-lng').value) || null,
     geofence_radius_meters: parseInt(document.getElementById('se-radius').value) || 100,
     active: document.getElementById('se-active').checked,
-    notes: document.getElementById('se-notes').value.trim() || null
+    notes: document.getElementById('se-notes').value.trim() || null,
+    hours_override: hoursOverride
   };
   const msg = document.getElementById('se-msg');
   if(!payload.name){ msg.innerHTML = '<span style="color:#F87171;">Store name is required.</span>'; return; }
+
+  // Auto-geocode on save if address present but no GPS yet
+  if((payload.latitude === null || payload.longitude === null) && _seBuildAddressString()){
+    msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">📍 Trying to auto-fill GPS from address…</span>';
+    const ok = await seGeocodeAddress(true);
+    if(ok){
+      payload.latitude = parseFloat(document.getElementById('se-lat').value);
+      payload.longitude = parseFloat(document.getElementById('se-lng').value);
+    }
+  }
   if(payload.latitude === null || payload.longitude === null){
     if(!confirm('No GPS coordinates set — agents will not be able to check in at this store. Save anyway?')) return;
   }
+
+  // Collect selected MMs
+  const selectedMMs = Array.from(document.querySelectorAll('.se-mm:checked')).map(cb => cb.value);
+
   msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Saving…</span>';
+  let storeId = existingId;
   if(existingId){
     const { error } = await sb.from('stores').update(payload).eq('id', existingId);
     if(error){ msg.innerHTML = '<span style="color:#F87171;">' + error.message + '</span>'; return; }
   } else {
     payload.created_by = currentProfile.id;
-    const { error } = await sb.from('stores').insert(payload);
+    const { data, error } = await sb.from('stores').insert(payload).select('id').single();
     if(error){ msg.innerHTML = '<span style="color:#F87171;">' + error.message + '</span>'; return; }
+    storeId = data.id;
   }
+
+  // Persist MM assignments — replace strategy
+  if(storeId){
+    await sb.from('store_managers').delete().eq('store_id', storeId);
+    if(selectedMMs.length > 0){
+      const rows = selectedMMs.map(uid => ({ store_id: storeId, user_id: uid, assigned_by: currentProfile.id }));
+      await sb.from('store_managers').insert(rows);
+    }
+  }
+
   msg.innerHTML = '<span style="color:#00FF88;">✓ Saved.</span>';
   setTimeout(() => { closeAllModals(); renderMainContent(); }, 700);
 }
@@ -6780,17 +7258,87 @@ function haversineDistance(lat1, lon1, lat2, lon2){
 let _paPhotoBlob = null;
 
 async function renderPhotoAuditCheckin(el){
-  const { data: assignments } = await sb.from('agent_stores').select('store_id, stores(*)').eq('user_id', currentProfile.id);
-  const stores = (assignments || []).map(a => a.stores).filter(s => s && s.active);
+  // NEW MODEL (Phase 3.2): An agent's available stores come from THEIR MM.
+  // 1. Find the agent's MM via reports_to.
+  // 2. Get all stores that MM manages (via store_managers).
+  // 3. Get this week's weekly_store_assignments to find the agent's "scheduled" store.
+  // The agent can pick ANY of those stores (geofence verifies physical presence).
+  // The scheduled store is pre-selected as a default.
+  //
+  // Fallback: if the agent has no MM or their MM has no stores assigned, fall back to
+  // the legacy agent_stores direct-assignment model (for existing assignments).
+
+  let stores = [];
+  let scheduledStoreId = null;
+  let mmName = null;
+
+  // Try the new MM-inheritance model first
+  if(currentProfile.reports_to){
+    const { data: mmRow } = await sb.from('profiles').select('id,full_name,email')
+      .eq('id', currentProfile.reports_to).maybeSingle();
+    if(mmRow){
+      mmName = mmRow.full_name || mmRow.email;
+      const { data: smRows } = await sb.from('store_managers').select('store_id').eq('user_id', mmRow.id);
+      const mmStoreIds = (smRows || []).map(x => x.store_id);
+      if(mmStoreIds.length > 0){
+        const { data: storeRows } = await sb.from('stores').select('*').in('id', mmStoreIds).eq('active', true).order('name');
+        stores = storeRows || [];
+      }
+    }
+  }
+
+  // Fetch this week's scheduled store (if any) for this agent
+  const weekMonday = getCurrentWeekMonday(0);
+  const { data: schedRow } = await sb.from('weekly_store_assignments')
+    .select('store_id')
+    .eq('user_id', currentProfile.id)
+    .eq('week_start_date', weekMonday)
+    .maybeSingle();
+  if(schedRow) scheduledStoreId = schedRow.store_id;
+
+  // Fallback to legacy agent_stores direct assignments if no stores found via MM
+  if(stores.length === 0){
+    const { data: assignments } = await sb.from('agent_stores').select('store_id, stores(*)').eq('user_id', currentProfile.id);
+    stores = (assignments || []).map(a => a.stores).filter(s => s && s.active);
+  }
+
   if(stores.length === 0){
     el.innerHTML = `
       <div class="bo-card" style="text-align:center;padding:40px;">
         <div style="font-size:42px;margin-bottom:10px;">🏪</div>
         <div style="color:rgba(255,255,255,0.5);font-size:14px;">You're not assigned to any stores yet.</div>
-        <div style="color:rgba(255,255,255,0.4);font-size:12.5px;margin-top:6px;">Ask your manager to assign you to your store(s) so you can check in.</div>
+        <div style="color:rgba(255,255,255,0.4);font-size:12.5px;margin-top:6px;">${mmName ? 'Your manager (' + escapeHtml(mmName) + ') has no stores assigned to them. Ask them or the office to set this up.' : 'Ask your manager to assign you to your store(s) so you can check in.'}</div>
       </div>`;
     return;
   }
+
+  // Sort: scheduled store first, then alphabetical
+  if(scheduledStoreId){
+    stores.sort((a, b) => {
+      if(a.id === scheduledStoreId) return -1;
+      if(b.id === scheduledStoreId) return 1;
+      return (a.name || '').localeCompare(b.name || '');
+    });
+  }
+  const scheduledStore = scheduledStoreId ? stores.find(s => s.id === scheduledStoreId) : null;
+
+  // Fetch today's expected work hours for the scheduled store (or first store) — used for banner
+  const primaryStoreForHours = scheduledStore || stores[0];
+  let todayExpected = null;
+  if(primaryStoreForHours){
+    const eff = await getEffectiveScheduleForStore(primaryStoreForHours.id);
+    todayExpected = getTodayWindow(eff);
+  }
+  const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const todayDayLabel = days[new Date().getDay()];
+  const dayLong = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][new Date().getDay()];
+  const fmt12 = (t) => {
+    if(!t) return '';
+    const [h, m] = t.split(':').map(Number);
+    const ampm = h >= 12 ? 'pm' : 'am';
+    const h12 = h % 12 === 0 ? 12 : h % 12;
+    return h12 + (m > 0 ? ':' + String(m).padStart(2,'0') : '') + ampm;
+  };
 
   const todayStart = new Date(); todayStart.setHours(0,0,0,0);
   const { data: todayAudits } = await sb.from('photo_audits')
@@ -6806,6 +7354,29 @@ async function renderPhotoAuditCheckin(el){
       <h1 style="font-family:'Bebas Neue',sans-serif;font-size:42px;color:#fff;margin-bottom:6px;">📸 Daily Check-In</h1>
       <p style="font-size:13.5px;color:rgba(255,255,255,0.55);line-height:1.55;">Take a live photo at your assigned store to log your shift. GPS is verified — fraud attempts trigger an immediate alert to your manager and the owner.</p>
     </div>
+    ${scheduledStore ? `
+      <div style="background:linear-gradient(135deg, rgba(0,255,136,0.1), rgba(0,198,255,0.05));border:1px solid rgba(0,255,136,0.3);border-radius:10px;padding:12px 16px;margin-bottom:14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+        <div style="font-size:24px;">📅</div>
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:11px;color:rgba(0,255,136,0.85);letter-spacing:1.5px;font-weight:700;">SCHEDULED THIS WEEK</div>
+          <div style="font-size:14.5px;color:#fff;font-weight:600;margin-top:2px;">${escapeHtml(scheduledStore.name)}${scheduledStore.store_number ? ' #' + escapeHtml(scheduledStore.store_number) : ''}</div>
+          <div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-top:2px;">${scheduledStore.city ? escapeHtml(scheduledStore.city) + ' · ' : ''}Pre-selected below. Pick another store if you got moved.</div>
+        </div>
+      </div>
+    ` : ''}
+    ${todayExpected ? `
+      <div style="background:rgba(255,200,0,0.06);border:1px solid rgba(255,200,0,0.25);border-radius:10px;padding:10px 14px;margin-bottom:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <div style="font-size:18px;">⏰</div>
+        <div style="flex:1;min-width:0;font-size:12.5px;color:rgba(255,255,255,0.8);">
+          ${todayExpected.missing
+            ? `<strong>${dayLong}</strong> is not a scheduled work day. Hours still count toward your weekly total.`
+            : todayExpected.optional
+              ? `<strong>${dayLong}: optional day</strong> — work if you want, no flag.`
+              : `<strong>Today's hours: ${fmt12(todayExpected.start)}–${fmt12(todayExpected.end)}</strong> · Now: ${new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit'})}`
+          }
+        </div>
+      </div>
+    ` : ''}
     ${(todayAudits || []).length > 0 ? `
       <div class="bo-card" style="margin-bottom:14px;">
         <div style="font-size:12px;color:rgba(255,255,255,0.55);letter-spacing:1.5px;font-weight:700;margin-bottom:8px;">TODAY'S ACTIVITY</div>
@@ -6930,15 +7501,29 @@ async function submitPhotoAudit(){
     msg.innerHTML = '<span style="color:#F87171;">Photo upload failed: ' + upErr.message + '</span>';
     return;
   }
+
+  // Compute off-hours status BEFORE the insert so we can store it
+  let offHoursCheck = false;
+  let offHoursMinutes = 0;
+  try {
+    const sched = await checkScheduleStatus(currentProfile.id, auditType, storeId);
+    offHoursCheck = sched.offHours;
+    offHoursMinutes = sched.minutesOff;
+  } catch(e){ console.warn('Schedule check failed (allowing audit):', e); }
+
   const { data: audit, error: insertErr } = await sb.from('photo_audits').insert({
     user_id: currentProfile.id, store_id: storeId, audit_type: auditType,
     reported_latitude: myLat, reported_longitude: myLng, reported_accuracy_meters: accuracy,
     distance_from_store_meters: distance, geofence_passed: passed,
-    photo_path: photoPath, notes, user_agent: navigator.userAgent
+    photo_path: photoPath, notes, user_agent: navigator.userAgent,
+    off_hours_check: offHoursCheck, off_hours_minutes: offHoursMinutes
   }).select().single();
   if(insertErr){ msg.innerHTML = '<span style="color:#F87171;">' + insertErr.message + '</span>'; return; }
 
   await notifyAuditSubmitted(audit, passed, storeOpt.text);
+  if(offHoursCheck){
+    try { await notifyOffHoursCheckin(audit, storeOpt.text, offHoursMinutes, auditType); } catch(_){}
+  }
 
   if(passed){
     let extras = '';
@@ -7027,6 +7612,35 @@ async function notifyAuditSubmitted(audit, passed, storeName){
       } catch(e){ console.warn('Audit alert failed for', rid, e); }
     }
   }
+}
+
+// Notify the agent's MM when they check in/out outside scheduled hours
+async function notifyOffHoursCheckin(audit, storeName, minutesOff, auditType){
+  const { data: agent } = await sb.from('profiles').select('full_name,email,reports_to').eq('id', currentProfile.id).single();
+  if(!agent || !agent.reports_to) return;
+  const { data: mgr } = await sb.from('profiles').select('id,email,full_name').eq('id', agent.reports_to).single();
+  if(!mgr) return;
+
+  const agentName = agent.full_name || agent.email || 'Agent';
+  const action = auditType === 'check_in' ? 'checked IN' : 'checked OUT';
+  const direction = minutesOff < 0 ? 'EARLY' : 'LATE';
+  const offByMin = Math.abs(minutesOff);
+  const offByLabel = offByMin >= 60 ? Math.floor(offByMin/60) + 'h ' + (offByMin%60) + 'min' : offByMin + ' min';
+
+  try {
+    await notifyUser(mgr.id, {
+      type: 'generic',
+      title: '⚠️ Off-hours: ' + agentName + ' ' + action,
+      body: storeName + ' · ' + offByLabel + ' ' + direction + ' · ' + new Date().toLocaleTimeString()
+    });
+  } catch(_){}
+  try {
+    await sendEmailViaFunction('announcement', mgr.email, {
+      title: '⚠️ Off-hours check-' + (auditType === 'check_in' ? 'in' : 'out') + ' alert',
+      body: agentName + ' ' + action + ' ' + offByLabel + ' ' + direction + '.\n\nStore: ' + storeName + '\nTime: ' + new Date().toLocaleString() + '\n\nThis is automated based on the program/store schedule. Contact the agent if you need clarification.',
+      posted_by: 'Circle Solutions Schedule Monitor'
+    });
+  } catch(_){}
 }
 
 async function renderPhotoAuditsReview(el){
@@ -7386,17 +8000,168 @@ async function openProgramEditor(programId){
       </label>
     </div>
 
+    <hr style="border:none;border-top:1px solid rgba(255,255,255,0.08);margin:18px 0;"/>
+    <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#00C6FF;letter-spacing:1.5px;margin-bottom:6px;">⏰ Default Work Schedule</div>
+    <div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-bottom:10px;line-height:1.55;">
+      The expected hours agents work for this program. Used as the default for ALL stores in this program (individual stores can override their own hours). Agents see these on Daily Check-In, and check-ins outside these hours flag the manager.
+    </div>
+    <div id="pe-schedule-rows" style="background:rgba(0,0,0,0.2);border-radius:8px;padding:8px;">
+      ${renderScheduleRows(p.schedule || getDefaultSchedule())}
+    </div>
+    <button class="bo-btn bo-btn-ghost" style="padding:6px 12px;font-size:11px;margin-top:8px;" onclick="resetScheduleToDefault()">↩ Reset to Mon-Fri 11-7, Sat 10-6, Sun optional</button>
+
     <div style="display:flex;gap:10px;margin-top:18px;">
       <button class="bo-btn bo-btn-primary" onclick="saveProgram(${isEdit ? `'${p.id}'` : 'null'})">${isEdit ? 'Save Changes' : 'Create Program'}</button>
       <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
     </div>
     <div id="pe-msg" style="margin-top:12px;font-size:13px;"></div>`;
-  document.getElementById('modal-box').style.maxWidth = '560px';
+  document.getElementById('modal-box').style.maxWidth = '600px';
   document.getElementById('modal-backdrop').style.display = 'flex';
 
   // Hide anchor field if reset is 'monthly' or 'never'
   setTimeout(() => onPeResetChange(), 50);
 }
+
+// ─── Schedule editor helpers ───
+function getDefaultSchedule(){
+  return [
+    { day:'Mon', start:'11:00', end:'19:00', optional:false },
+    { day:'Tue', start:'11:00', end:'19:00', optional:false },
+    { day:'Wed', start:'11:00', end:'19:00', optional:false },
+    { day:'Thu', start:'11:00', end:'19:00', optional:false },
+    { day:'Fri', start:'11:00', end:'19:00', optional:false },
+    { day:'Sat', start:'10:00', end:'18:00', optional:false },
+    { day:'Sun', start:'',      end:'',      optional:true  }
+  ];
+}
+
+function renderScheduleRows(schedule){
+  // Normalize schedule to array of 7 days
+  const dayOrder = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  const sched = Array.isArray(schedule) ? schedule : getDefaultSchedule();
+  const byDay = {};
+  sched.forEach(d => { byDay[d.day] = d; });
+  return dayOrder.map(day => {
+    const d = byDay[day] || { day, start:'', end:'', optional:false };
+    return `
+      <div class="pe-sched-row" data-day="${day}" style="display:grid;grid-template-columns:54px 1fr 1fr auto;gap:8px;align-items:center;padding:6px 8px;border-radius:6px;">
+        <div style="font-size:12px;font-weight:700;color:rgba(255,255,255,0.75);letter-spacing:1px;">${day}</div>
+        <input type="time" class="form-input pe-sched-start" data-day="${day}" value="${d.start || ''}" style="padding:6px 8px;font-size:12.5px;${d.optional ? 'opacity:0.4;' : ''}" ${d.optional ? 'disabled' : ''}/>
+        <input type="time" class="form-input pe-sched-end"   data-day="${day}" value="${d.end || ''}"   style="padding:6px 8px;font-size:12.5px;${d.optional ? 'opacity:0.4;' : ''}" ${d.optional ? 'disabled' : ''}/>
+        <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:rgba(255,255,255,0.55);cursor:pointer;white-space:nowrap;">
+          <input type="checkbox" class="pe-sched-opt" data-day="${day}" ${d.optional ? 'checked' : ''} onchange="onPeSchedOptChange(this)" style="width:14px;height:14px;accent-color:#FFC800;"/>
+          Optional
+        </label>
+      </div>`;
+  }).join('');
+}
+
+function onPeSchedOptChange(cb){
+  const day = cb.dataset.day;
+  const startInp = document.querySelector('.pe-sched-start[data-day="' + day + '"]');
+  const endInp = document.querySelector('.pe-sched-end[data-day="' + day + '"]');
+  if(cb.checked){
+    if(startInp){ startInp.disabled = true; startInp.style.opacity = '0.4'; }
+    if(endInp){ endInp.disabled = true; endInp.style.opacity = '0.4'; }
+  } else {
+    if(startInp){ startInp.disabled = false; startInp.style.opacity = ''; }
+    if(endInp){ endInp.disabled = false; endInp.style.opacity = ''; }
+  }
+}
+
+function resetScheduleToDefault(){
+  const wrap = document.getElementById('pe-schedule-rows');
+  if(wrap) wrap.innerHTML = renderScheduleRows(getDefaultSchedule());
+}
+
+// Read current schedule from the form
+function _readScheduleFromForm(){
+  const dayOrder = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  const out = [];
+  dayOrder.forEach(day => {
+    const optEl = document.querySelector('.pe-sched-opt[data-day="' + day + '"]');
+    const startEl = document.querySelector('.pe-sched-start[data-day="' + day + '"]');
+    const endEl = document.querySelector('.pe-sched-end[data-day="' + day + '"]');
+    if(!optEl) return;
+    out.push({
+      day,
+      start: optEl.checked ? '' : (startEl?.value || ''),
+      end:   optEl.checked ? '' : (endEl?.value || ''),
+      optional: optEl.checked
+    });
+  });
+  return out;
+}
+
+window.onPeSchedOptChange = onPeSchedOptChange;
+window.resetScheduleToDefault = resetScheduleToDefault;
+
+// ─── Store-level hours override editor ───
+function renderStoreHoursRows(schedule){
+  const dayOrder = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  const sched = Array.isArray(schedule) ? schedule : getDefaultSchedule();
+  const byDay = {};
+  sched.forEach(d => { byDay[d.day] = d; });
+  return dayOrder.map(day => {
+    const d = byDay[day] || { day, start:'', end:'', optional:false };
+    return `
+      <div class="se-sched-row" data-day="${day}" style="display:grid;grid-template-columns:54px 1fr 1fr auto;gap:8px;align-items:center;padding:6px 8px;border-radius:6px;">
+        <div style="font-size:12px;font-weight:700;color:rgba(255,255,255,0.75);letter-spacing:1px;">${day}</div>
+        <input type="time" class="form-input se-sched-start" data-day="${day}" value="${d.start || ''}" style="padding:6px 8px;font-size:12.5px;${d.optional ? 'opacity:0.4;' : ''}" ${d.optional ? 'disabled' : ''}/>
+        <input type="time" class="form-input se-sched-end"   data-day="${day}" value="${d.end || ''}"   style="padding:6px 8px;font-size:12.5px;${d.optional ? 'opacity:0.4;' : ''}" ${d.optional ? 'disabled' : ''}/>
+        <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:rgba(255,255,255,0.55);cursor:pointer;white-space:nowrap;">
+          <input type="checkbox" class="se-sched-opt" data-day="${day}" ${d.optional ? 'checked' : ''} onchange="onSeSchedOptChange(this)" style="width:14px;height:14px;accent-color:#FFC800;"/>
+          Optional
+        </label>
+      </div>`;
+  }).join('');
+}
+
+function onSeSchedOptChange(cb){
+  const day = cb.dataset.day;
+  const startInp = document.querySelector('.se-sched-start[data-day="' + day + '"]');
+  const endInp = document.querySelector('.se-sched-end[data-day="' + day + '"]');
+  if(cb.checked){
+    if(startInp){ startInp.disabled = true; startInp.style.opacity = '0.4'; }
+    if(endInp){ endInp.disabled = true; endInp.style.opacity = '0.4'; }
+  } else {
+    if(startInp){ startInp.disabled = false; startInp.style.opacity = ''; }
+    if(endInp){ endInp.disabled = false; endInp.style.opacity = ''; }
+  }
+}
+
+function toggleStoreHoursOverride(cb){
+  const wrap = document.getElementById('se-hours-rows');
+  if(!wrap) return;
+  if(cb.checked){
+    wrap.style.display = 'block';
+    // If empty, populate with default schedule
+    if(!wrap.innerHTML.trim()) wrap.innerHTML = renderStoreHoursRows(getDefaultSchedule());
+  } else {
+    wrap.style.display = 'none';
+  }
+}
+
+function _readStoreHoursFromForm(){
+  const dayOrder = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  const out = [];
+  dayOrder.forEach(day => {
+    const optEl = document.querySelector('.se-sched-opt[data-day="' + day + '"]');
+    const startEl = document.querySelector('.se-sched-start[data-day="' + day + '"]');
+    const endEl = document.querySelector('.se-sched-end[data-day="' + day + '"]');
+    if(!optEl) return;
+    out.push({
+      day,
+      start: optEl.checked ? '' : (startEl?.value || ''),
+      end:   optEl.checked ? '' : (endEl?.value || ''),
+      optional: optEl.checked
+    });
+  });
+  return out;
+}
+
+window.onSeSchedOptChange = onSeSchedOptChange;
+window.toggleStoreHoursOverride = toggleStoreHoursOverride;
 
 function onPeResetChange(){
   const reset = document.getElementById('pe-reset')?.value;
@@ -7429,7 +8194,8 @@ async function saveProgram(existingId){
     leaderboard_metric: lbMetric,
     leaderboard_reset: lbReset,
     leaderboard_anchor_date: lbAnchor,
-    leaderboard_show_dollars: lbDollars
+    leaderboard_show_dollars: lbDollars,
+    schedule: _readScheduleFromForm()
   };
 
   msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Saving…</span>';
@@ -11951,6 +12717,7 @@ window.onPeResetChange = onPeResetChange;
 window.renderStoresAdmin = renderStoresAdmin;
 window.openStoreEditor = openStoreEditor;
 window.seUseMyLocation = seUseMyLocation;
+window.seGeocodeAddress = seGeocodeAddress;
 window.saveStore = saveStore;
 window.deleteStore = deleteStore;
 window.openStoreAssignAgents = openStoreAssignAgents;
