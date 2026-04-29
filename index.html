@@ -2343,6 +2343,7 @@ function renderSidebar(){
     adminNavItems.push({ id:'forms-admin', label:'📋 All Forms' });
     adminNavItems.push({ id:'applications', label:'📝 Applications' });
     adminNavItems.push({ id:'programs-admin', label:'🎯 Programs' });
+    adminNavItems.push({ id:'reliant-email-settings', label:'📧 Reliant Email' });
   } else if(isAdmin){
     adminNavItems.push({ id:'stores', label:'🏪 Stores' });
     adminNavItems.push({ id:'forms-admin', label:'📋 All Forms' });
@@ -2423,6 +2424,7 @@ function renderSidebar(){
 
   // 2. COMPANY section — common nav for all users
   const companyItems = [
+    { id:'onboarding-packet', label:'📋 Onboarding Packet', show:'async-onboarding' },
     { id:'global-docs', label:'📁 Company Library', show:true },
     { id:'my-forms', label:'📋 My Forms', show:true },
     { id:'my-contracts', label:'📄 My Contracts', show:true },
@@ -2431,8 +2433,8 @@ function renderSidebar(){
   ];
   const companyBody = companyItems.map(it => `
     <button class="bo-nav-item ${activeAdminView === it.id ? 'active' : ''}"
-            data-conditional="${it.show === 'async-checkin' ? 'checkin' : it.show === 'async-myinv' ? 'myinv' : ''}"
-            ${(it.show === 'async-checkin' || it.show === 'async-myinv') ? 'style="display:none;"' : ''}
+            data-conditional="${it.show === 'async-checkin' ? 'checkin' : it.show === 'async-myinv' ? 'myinv' : it.show === 'async-onboarding' ? 'onboarding' : ''}"
+            ${(it.show === 'async-checkin' || it.show === 'async-myinv' || it.show === 'async-onboarding') ? 'style="display:none;"' : ''}
             onclick="boShowAdmin('${it.id}')">${it.label}</button>
   `).join('');
 
@@ -2486,6 +2488,14 @@ function renderSidebar(){
       .eq('assigned_to_user', currentProfile.id)
       .eq('status', 'assigned');
     document.querySelectorAll('[data-conditional="myinv"]').forEach(b => { b.style.display = (invCount && invCount > 0) ? 'flex' : 'none'; });
+
+    // Onboarding Packet visibility:
+    //   - Hide for owner / admin / onboarding (they don't need to fill it out themselves)
+    //   - Show for everyone else (agent / team_lead / manager) — they all use the system
+    //   We'll show it whether or not they've completed forms (since they may want to view receipts)
+    const r = currentProfile.role;
+    const isStaff = r === 'owner' || r === 'admin' || currentProfile.has_master_center_access === true;
+    document.querySelectorAll('[data-conditional="onboarding"]').forEach(b => { b.style.display = isStaff ? 'none' : 'flex'; });
   })().catch(() => {});
 }
 
@@ -2629,6 +2639,11 @@ function renderMainContent(){
   if(activeAdminView === 'stores'){ renderStoresAdmin(el); return; }
   if(activeAdminView === 'weekly-schedule'){ renderWeeklySchedule(el); return; }
   if(activeAdminView === 'recruiting'){ renderRecruiting(el); return; }
+  if(activeAdminView === 'onboarding-packet'){ renderOnboardingPacket(el); return; }
+  if(activeAdminView === 'onboarding-intake-form'){ renderOnboardingIntakeForm(el); return; }
+  if(activeAdminView === 'onboarding-ach-form'){ renderOnboardingAchForm(el); return; }
+  if(activeAdminView === 'onboarding-profile'){ renderOnboardingProfile(el); return; }
+  if(activeAdminView === 'reliant-email-settings'){ renderReliantEmailSettings(el); return; }
   if(activeAdminView === 'inventory'){ renderInventory(el); return; }
   if(activeAdminView === 'photo-audits-review'){ renderPhotoAuditsReview(el); return; }
   if(activeAdminView === 'payroll'){ renderPayroll(el); return; }
@@ -4094,6 +4109,7 @@ async function openAgentProfile(userId){
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:18px;padding-top:18px;border-top:1px solid rgba(255,255,255,0.07);">
           <button class="bo-btn bo-btn-primary" onclick="openSendPacketModal('${agent.id}')">📨 Send Onboarding Packet</button>
           <button class="bo-btn bo-btn-primary" onclick="openSendContractToAgentModal('${agent.id}')">📄 Send Contract</button>
+          ${(isOwner || currentProfile.has_master_center_access) ? `<button class="bo-btn bo-btn-primary" style="background:linear-gradient(135deg,#00C6FF,#0078D7);" onclick="openAgentOnboarding('${agent.id}')">📋 View Onboarding</button>` : ''}
           <button class="bo-btn bo-btn-ghost" onclick="openAgentModal('${agent.id}')">✏️ Edit Profile</button>
           <button class="bo-btn bo-btn-ghost" onclick="openResetPasswordModal('${agent.id}')">🔑 Manage Password</button>
           <button class="bo-btn bo-btn-ghost" onclick="emailLoginToAgent('${agent.id}')">📧 Resend Welcome</button>
@@ -7488,6 +7504,836 @@ function openTimePicker(targetInputId, triggerEl){
 
 window.openDatePicker = openDatePicker;
 window.openTimePicker = openTimePicker;
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// ONBOARDING PACKET SYSTEM (Phase 3.5)
+// - Agent's onboarding dashboard with checklist (renderOnboardingPacket)
+// - Reliant Intake Form (renderOnboardingIntakeForm)
+// - ACH Banking Form (renderOnboardingAchForm)
+// - Onboarding Profile viewer for Owner+Onboarding (renderOnboardingProfile)
+// - Reliant email config (renderReliantEmailSettings)
+// ═══════════════════════════════════════════════════════════════════════
+
+const ONBOARDING_FORMS = [
+  { id: 'reliant_intake', label: 'Reliant Intake', icon: '📝', description: 'Identity, address, photo IDs. Goes to Reliant.', view: 'onboarding-intake-form', goesToReliant: true },
+  { id: 'ach_banking',   label: 'Direct Deposit', icon: '🏦', description: 'Banking info for payroll. Internal only.',         view: 'onboarding-ach-form', goesToReliant: false }
+];
+
+// Helper: load all form-status rows for a user, return as { form_id: row }
+async function _loadFormStatuses(userId){
+  const { data } = await sb.from('onboarding_form_status').select('*').eq('user_id', userId);
+  const map = {};
+  (data || []).forEach(r => { map[r.form_type] = r; });
+  return map;
+}
+
+// Helper: upsert a form status when an agent submits a form
+async function _markFormSubmitted(userId, formType, sourceRecordId){
+  await sb.from('onboarding_form_status').upsert({
+    user_id: userId,
+    form_type: formType,
+    status: 'submitted',
+    completed_at: new Date().toISOString(),
+    source_record_id: sourceRecordId
+  }, { onConflict: 'user_id,form_type' });
+}
+
+// ─── AGENT'S ONBOARDING PACKET DASHBOARD ─────────────────────────────
+async function renderOnboardingPacket(el){
+  // Agent sees their own checklist. Owner/admin/onboarding wouldn't normally see
+  // this (the conditional hides the nav item for them) but we don't block it.
+  const statuses = await _loadFormStatuses(currentProfile.id);
+  const total = ONBOARDING_FORMS.length;
+  const done = ONBOARDING_FORMS.filter(f => {
+    const s = statuses[f.id];
+    return s && (s.status === 'submitted' || s.status === 'approved');
+  }).length;
+  const pct = Math.round((done / total) * 100);
+
+  el.innerHTML = `
+    <div style="margin-bottom:24px;">
+      <div style="font-size:11px;color:#00C6FF;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:6px;">Welcome aboard 👋</div>
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;line-height:1;">📋 Your Onboarding Packet</h1>
+      <p style="font-size:14px;color:rgba(255,255,255,0.55);margin-top:8px;line-height:1.55;max-width:600px;">Complete every form below to finish your onboarding. Your manager and the office team will see your progress as you go.</p>
+    </div>
+
+    <div class="bo-card" style="margin-bottom:18px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#fff;letter-spacing:1px;">Progress</div>
+        <div style="font-size:13px;color:rgba(255,255,255,0.7);"><strong style="color:#00FF88;">${done}</strong> of ${total} complete · ${pct}%</div>
+      </div>
+      <div style="height:10px;background:rgba(255,255,255,0.06);border-radius:5px;overflow:hidden;">
+        <div style="width:${pct}%;height:100%;background:linear-gradient(90deg,#00FF88,#00C6FF);transition:width 0.4s ease;"></div>
+      </div>
+    </div>
+
+    ${ONBOARDING_FORMS.map(f => {
+      const s = statuses[f.id];
+      const isDone = s && (s.status === 'submitted' || s.status === 'approved');
+      const isApproved = s && s.status === 'approved';
+      const isRejected = s && s.status === 'rejected';
+      return `
+        <div class="bo-card" style="margin-bottom:10px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+          <div style="font-size:38px;flex-shrink:0;">${f.icon}</div>
+          <div style="flex:1;min-width:200px;">
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#fff;letter-spacing:1px;line-height:1.1;">
+              ${escapeHtml(f.label)}
+              ${isApproved ? '<span style="display:inline-block;margin-left:8px;color:#00FF88;font-size:18px;">✓</span>' : isDone ? '<span style="display:inline-block;margin-left:8px;color:#FFC800;font-size:14px;">⏳ submitted</span>' : ''}
+            </div>
+            <div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-top:3px;">${escapeHtml(f.description)}</div>
+            ${isRejected && s?.notes ? `<div style="font-size:12px;color:#F87171;margin-top:5px;">Rejected: ${escapeHtml(s.notes)} — please re-submit.</div>` : ''}
+          </div>
+          <div style="flex-shrink:0;">
+            ${isApproved ? `
+              <button class="bo-btn bo-btn-ghost" style="padding:8px 14px;font-size:12px;" onclick="boShowAdmin('${f.view}')">View Submission</button>
+            ` : isDone ? `
+              <button class="bo-btn bo-btn-ghost" style="padding:8px 14px;font-size:12px;" onclick="boShowAdmin('${f.view}')">Review / Edit</button>
+            ` : `
+              <button class="bo-btn bo-btn-primary" style="padding:8px 16px;font-size:12.5px;" onclick="boShowAdmin('${f.view}')">${isRejected ? 'Re-submit' : 'Start →'}</button>
+            `}
+          </div>
+        </div>`;
+    }).join('')}
+
+    ${done === total ? `
+      <div class="bo-card" style="margin-top:14px;background:linear-gradient(135deg,rgba(0,255,136,0.1),rgba(0,198,255,0.05));border:1px solid rgba(0,255,136,0.3);text-align:center;padding:24px;">
+        <div style="font-size:48px;margin-bottom:6px;">🎉</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;">All forms complete!</div>
+        <div style="font-size:13px;color:rgba(255,255,255,0.7);margin-top:6px;">Your manager and the office team have been notified. They'll review and finalize your onboarding shortly.</div>
+      </div>
+    ` : ''}`;
+}
+
+// ─── RELIANT INTAKE FORM ────────────────────────────────────────────
+async function renderOnboardingIntakeForm(el){
+  // Load existing intake (if any) so agent can review/re-edit before final submission
+  const { data: existing } = await sb.from('onboarding_intake').select('*').eq('user_id', currentProfile.id).maybeSingle();
+  const r = existing || {};
+  const isLocked = existing && (existing.status === 'sent');
+
+  el.innerHTML = `
+    <button class="bo-back-btn show-on-mobile" onclick="boShowAdmin('onboarding-packet')">← Back to Packet</button>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:18px;">
+      <div>
+        <div style="font-size:11px;color:#FF6B00;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:6px;">Reliant Energy · Onboarding Intake</div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:38px;color:#fff;line-height:1;">📝 Intake Form</h1>
+        <p style="font-size:13px;color:rgba(255,255,255,0.55);margin-top:6px;max-width:560px;line-height:1.55;">All fields required. Photos must be clear and show all corners. This goes directly to Reliant once Onboarding reviews it.</p>
+      </div>
+      <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('onboarding-packet')" style="padding:7px 14px;font-size:12px;">← Back</button>
+    </div>
+
+    ${isLocked ? `
+      <div class="bo-card" style="margin-bottom:14px;background:rgba(0,255,136,0.06);border:1px solid rgba(0,255,136,0.25);">
+        <div style="display:flex;align-items:center;gap:10px;color:#00FF88;font-weight:600;font-size:14px;">
+          <span style="font-size:20px;">✓</span>
+          <span>This form has been sent to Reliant. You can no longer edit it. Contact onboarding if changes are needed.</span>
+        </div>
+      </div>
+    ` : ''}
+
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">👤 Identity</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
+        <div class="form-group"><label class="form-label">First Name *</label><input id="oi-first" class="form-input" value="${escapeHtml(r.first_name || '')}" ${isLocked ? 'disabled' : ''}/></div>
+        <div class="form-group"><label class="form-label">Middle Name</label><input id="oi-middle" class="form-input" value="${escapeHtml(r.middle_name || '')}" ${isLocked ? 'disabled' : ''}/></div>
+        <div class="form-group"><label class="form-label">Last Name *</label><input id="oi-last" class="form-input" value="${escapeHtml(r.last_name || '')}" ${isLocked ? 'disabled' : ''}/></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div class="form-group"><label class="form-label">State *</label><input id="oi-state" class="form-input" value="${escapeHtml(r.state || 'TX')}" maxlength="2" style="text-transform:uppercase;" ${isLocked ? 'disabled' : ''}/></div>
+        <div class="form-group"><label class="form-label">Program</label><input id="oi-program" class="form-input" value="Reliant Energy" disabled style="opacity:0.6;"/></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div class="form-group"><label class="form-label">Phone *</label><input id="oi-phone" class="form-input" type="tel" value="${escapeHtml(r.phone || '')}" placeholder="(000) 000-0000" ${isLocked ? 'disabled' : ''}/></div>
+        <div class="form-group"><label class="form-label">DOB *</label><input id="oi-dob" class="form-input" type="date" value="${r.dob || ''}" ${isLocked ? 'disabled' : ''}/></div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">9-digit SSN *</label>
+        <input id="oi-ssn" class="form-input" inputmode="numeric" maxlength="11" value="${escapeHtml(r.ssn || '')}" placeholder="XXX-XX-XXXX" ${isLocked ? 'disabled' : ''}/>
+        <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">🔒 Encrypted at rest. Visible only to Owner + Onboarding.</div>
+      </div>
+    </div>
+
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">🏠 Address</div>
+      <div class="form-group"><label class="form-label">Street Address *</label><input id="oi-street" class="form-input" value="${escapeHtml(r.street_address || '')}" ${isLocked ? 'disabled' : ''}/></div>
+      <div class="form-group"><label class="form-label">Street Address Line 2</label><input id="oi-street2" class="form-input" value="${escapeHtml(r.street_address_2 || '')}" ${isLocked ? 'disabled' : ''}/></div>
+      <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:12px;">
+        <div class="form-group"><label class="form-label">City *</label><input id="oi-city" class="form-input" value="${escapeHtml(r.city || '')}" ${isLocked ? 'disabled' : ''}/></div>
+        <div class="form-group"><label class="form-label">State *</label><input id="oi-province" class="form-input" value="${escapeHtml(r.state_province || 'TX')}" maxlength="2" style="text-transform:uppercase;" ${isLocked ? 'disabled' : ''}/></div>
+        <div class="form-group"><label class="form-label">Postal *</label><input id="oi-postal" class="form-input" value="${escapeHtml(r.postal_code || '')}" maxlength="10" ${isLocked ? 'disabled' : ''}/></div>
+      </div>
+    </div>
+
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">📷 Photo Uploads</div>
+      <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-bottom:12px;line-height:1.55;"><strong style="color:#FFC800;">All photos must show ALL CORNERS clearly.</strong> No glare, no fingers covering text, no filters.</div>
+      ${[
+        { id:'id_front', label:"Front of Driver's License / State ID *", existing: r.id_front_path },
+        { id:'id_back',  label:"Back of Driver's License / State ID *",  existing: r.id_back_path },
+        { id:'badge',    label:'Badge Photo (no filters or hats accepted) *', existing: r.badge_photo_path }
+      ].map(p => `
+        <div class="form-group">
+          <label class="form-label">${p.label}</label>
+          ${p.existing ? `<div style="font-size:11.5px;color:#00FF88;margin-bottom:6px;">✓ Uploaded: ${escapeHtml(p.existing.split('/').pop() || '')}</div>` : ''}
+          <input type="file" id="oi-photo-${p.id}" accept="image/*" capture="environment" class="form-input" style="padding:8px;" ${isLocked ? 'disabled' : ''}/>
+          <div id="oi-photo-${p.id}-preview" style="margin-top:8px;"></div>
+        </div>
+      `).join('')}
+    </div>
+
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">✍️ Signature *</div>
+      <div style="font-size:12px;color:rgba(255,255,255,0.55);margin-bottom:10px;">Sign below using your finger (mobile) or mouse. By signing, you certify all information is accurate.</div>
+      <canvas id="oi-sig-canvas" width="600" height="150" style="background:#fff;border-radius:8px;width:100%;max-width:600px;cursor:crosshair;touch-action:none;"></canvas>
+      <div style="display:flex;gap:8px;margin-top:8px;">
+        <button class="bo-btn bo-btn-ghost" style="padding:6px 12px;font-size:11.5px;" onclick="csiSigClear('oi-sig-canvas')" ${isLocked ? 'disabled' : ''}>Clear</button>
+      </div>
+      <input type="hidden" id="oi-sig-data" value="${escapeHtml(r.signature_data || '')}"/>
+    </div>
+
+    ${!isLocked ? `
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+        <button class="bo-btn bo-btn-primary" onclick="submitOnboardingIntake('${r.id || ''}')">${existing ? 'Update Submission' : 'Submit to Onboarding'}</button>
+        <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('onboarding-packet')">Cancel</button>
+      </div>
+      <div id="oi-msg" style="font-size:13px;"></div>
+    ` : ''}`;
+
+  // Initialize signature canvas
+  setTimeout(() => {
+    csiSigInit('oi-sig-canvas', r.signature_data || '');
+  }, 50);
+}
+
+// ─── ACH BANKING FORM ──────────────────────────────────────────────
+async function renderOnboardingAchForm(el){
+  const { data: existing } = await sb.from('onboarding_ach').select('*').eq('user_id', currentProfile.id).maybeSingle();
+  const r = existing || {};
+
+  el.innerHTML = `
+    <button class="bo-back-btn show-on-mobile" onclick="boShowAdmin('onboarding-packet')">← Back to Packet</button>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:18px;">
+      <div>
+        <div style="font-size:11px;color:#00C6FF;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:6px;">Direct Deposit · Internal Only</div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:38px;color:#fff;line-height:1;">🏦 ACH Banking</h1>
+        <p style="font-size:13px;color:rgba(255,255,255,0.55);margin-top:6px;max-width:560px;line-height:1.55;">Banking info for payroll. <strong>This stays internal at Circle Solutions</strong> — never sent to Reliant or any external party.</p>
+      </div>
+      <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('onboarding-packet')" style="padding:7px 14px;font-size:12px;">← Back</button>
+    </div>
+
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">💳 Account Type</div>
+      <select id="ach-type" class="form-input">
+        <option value="">— Select —</option>
+        <option value="personal_checking" ${r.account_type === 'personal_checking' ? 'selected' : ''}>Personal Checking</option>
+        <option value="personal_savings" ${r.account_type === 'personal_savings' ? 'selected' : ''}>Personal Savings</option>
+        <option value="business_checking" ${r.account_type === 'business_checking' ? 'selected' : ''}>Business Checking</option>
+        <option value="business_savings" ${r.account_type === 'business_savings' ? 'selected' : ''}>Business Savings</option>
+      </select>
+    </div>
+
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">👤 Account Holder</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div class="form-group"><label class="form-label">First Name *</label><input id="ach-first" class="form-input" value="${escapeHtml(r.first_name || '')}"/></div>
+        <div class="form-group"><label class="form-label">Last Name *</label><input id="ach-last" class="form-input" value="${escapeHtml(r.last_name || '')}"/></div>
+      </div>
+      <div class="form-group"><label class="form-label">Street</label><input id="ach-street" class="form-input" value="${escapeHtml(r.street_address || '')}"/></div>
+      <div class="form-group"><label class="form-label">Street Line 2</label><input id="ach-street2" class="form-input" value="${escapeHtml(r.street_address_2 || '')}"/></div>
+      <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:12px;">
+        <div class="form-group"><label class="form-label">City</label><input id="ach-city" class="form-input" value="${escapeHtml(r.city || '')}"/></div>
+        <div class="form-group"><label class="form-label">State</label><input id="ach-state" class="form-input" value="${escapeHtml(r.state_province || 'TX')}" maxlength="2" style="text-transform:uppercase;"/></div>
+        <div class="form-group"><label class="form-label">Postal</label><input id="ach-postal" class="form-input" value="${escapeHtml(r.postal_code || '')}" maxlength="10"/></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div class="form-group"><label class="form-label">DOB</label><input id="ach-dob" class="form-input" type="date" value="${r.dob || ''}"/></div>
+        <div class="form-group"><label class="form-label">Full SSN *</label><input id="ach-ssn" class="form-input" maxlength="11" value="${escapeHtml(r.ssn_full || '')}" placeholder="XXX-XX-XXXX"/></div>
+      </div>
+    </div>
+
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">🏢 Company (if 1099 contractor)</div>
+      <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-bottom:10px;">Leave blank if you're not paying through an LLC.</div>
+      <div class="form-group"><label class="form-label">Company Name</label><input id="ach-company" class="form-input" value="${escapeHtml(r.company_name || '')}"/></div>
+      <div class="form-group"><label class="form-label">Company Street</label><input id="ach-co-street" class="form-input" value="${escapeHtml(r.company_street || '')}"/></div>
+      <div class="form-group"><label class="form-label">Company Street Line 2</label><input id="ach-co-street2" class="form-input" value="${escapeHtml(r.company_street_2 || '')}"/></div>
+      <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:12px;">
+        <div class="form-group"><label class="form-label">City</label><input id="ach-co-city" class="form-input" value="${escapeHtml(r.company_city || '')}"/></div>
+        <div class="form-group"><label class="form-label">State</label><input id="ach-co-state" class="form-input" value="${escapeHtml(r.company_state || '')}" maxlength="2" style="text-transform:uppercase;"/></div>
+        <div class="form-group"><label class="form-label">Postal</label><input id="ach-co-postal" class="form-input" value="${escapeHtml(r.company_postal || '')}" maxlength="10"/></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div class="form-group"><label class="form-label">Company EIN</label><input id="ach-ein" class="form-input" value="${escapeHtml(r.company_ein || '')}" placeholder="XX-XXXXXXX"/></div>
+        <div class="form-group"><label class="form-label">Email</label><input id="ach-email" class="form-input" type="email" value="${escapeHtml(r.email || currentProfile.email || '')}"/></div>
+      </div>
+    </div>
+
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">🏦 Bank Details</div>
+      <div class="form-group"><label class="form-label">Name(s) on Bank Account *</label><input id="ach-holder-name" class="form-input" value="${escapeHtml(r.account_holder_name || '')}"/></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div class="form-group"><label class="form-label">Routing Number * (9 digits)</label><input id="ach-routing" class="form-input" inputmode="numeric" maxlength="9" value="${escapeHtml(r.routing_number || '')}"/></div>
+        <div class="form-group"><label class="form-label">Account Number * (9-12 digits)</label><input id="ach-account" class="form-input" inputmode="numeric" maxlength="17" value="${escapeHtml(r.account_number || '')}"/></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div class="form-group"><label class="form-label">Bank Name</label><input id="ach-bank" class="form-input" value="${escapeHtml(r.bank_name || '')}"/></div>
+        <div class="form-group"><label class="form-label">Bank Branch</label><input id="ach-branch" class="form-input" value="${escapeHtml(r.bank_branch || '')}"/></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div class="form-group"><label class="form-label">Phone</label><input id="ach-phone" class="form-input" type="tel" value="${escapeHtml(r.phone || '')}"/></div>
+        <div class="form-group"><label class="form-label">Date</label><input id="ach-date" class="form-input" type="date" value="${r.signed_date || new Date().toISOString().slice(0,10)}"/></div>
+      </div>
+    </div>
+
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">✍️ Signature *</div>
+      <div style="font-size:12px;color:rgba(255,255,255,0.55);margin-bottom:10px;">Sign below to authorize Circle Solutions to direct-deposit payroll into the account above.</div>
+      <canvas id="ach-sig-canvas" width="600" height="150" style="background:#fff;border-radius:8px;width:100%;max-width:600px;cursor:crosshair;touch-action:none;"></canvas>
+      <div style="display:flex;gap:8px;margin-top:8px;">
+        <button class="bo-btn bo-btn-ghost" style="padding:6px 12px;font-size:11.5px;" onclick="csiSigClear('ach-sig-canvas')">Clear</button>
+      </div>
+      <input type="hidden" id="ach-sig-data" value="${escapeHtml(r.signature_data || '')}"/>
+    </div>
+
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+      <button class="bo-btn bo-btn-primary" onclick="submitOnboardingAch('${r.id || ''}')">${existing ? 'Update Submission' : 'Submit'}</button>
+      <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('onboarding-packet')">Cancel</button>
+    </div>
+    <div id="ach-msg" style="font-size:13px;"></div>`;
+
+  setTimeout(() => csiSigInit('ach-sig-canvas', r.signature_data || ''), 50);
+}
+
+// ─── SIGNATURE PAD WIDGET ──────────────────────────────────────────
+function csiSigInit(canvasId, existingData){
+  const canvas = document.getElementById(canvasId);
+  if(!canvas) return;
+  const ctx = canvas.getContext('2d');
+  // Match canvas resolution to display size for crispness
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * 2;
+  canvas.height = rect.height * 2;
+  ctx.scale(2, 2);
+  ctx.lineWidth = 2;
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = '#000';
+  // Fill white background
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, rect.width, rect.height);
+  // If existing signature, paint it
+  if(existingData){
+    const img = new Image();
+    img.onload = () => ctx.drawImage(img, 0, 0, rect.width, rect.height);
+    img.src = existingData;
+  }
+
+  let drawing = false;
+  let last = null;
+  function getPoint(e){
+    const r = canvas.getBoundingClientRect();
+    if(e.touches && e.touches[0]){
+      return { x: e.touches[0].clientX - r.left, y: e.touches[0].clientY - r.top };
+    }
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+  function start(e){ drawing = true; last = getPoint(e); e.preventDefault(); }
+  function move(e){
+    if(!drawing) return;
+    const p = getPoint(e);
+    ctx.beginPath(); ctx.moveTo(last.x, last.y); ctx.lineTo(p.x, p.y); ctx.stroke();
+    last = p;
+    e.preventDefault();
+  }
+  function end(){
+    drawing = false;
+    last = null;
+    // Save data URL to hidden input
+    const hidden = document.getElementById(canvasId.replace('-canvas','-data'));
+    if(hidden) hidden.value = canvas.toDataURL('image/png');
+  }
+  canvas.onmousedown = start; canvas.onmousemove = move; canvas.onmouseup = end; canvas.onmouseleave = end;
+  canvas.ontouchstart = start; canvas.ontouchmove = move; canvas.ontouchend = end;
+}
+
+function csiSigClear(canvasId){
+  const canvas = document.getElementById(canvasId);
+  if(!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const rect = canvas.getBoundingClientRect();
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, rect.width * 2, rect.height * 2);
+  const hidden = document.getElementById(canvasId.replace('-canvas','-data'));
+  if(hidden) hidden.value = '';
+}
+
+// ─── INTAKE SUBMIT ─────────────────────────────────────────────────
+async function submitOnboardingIntake(existingId){
+  const msg = document.getElementById('oi-msg');
+  const get = id => document.getElementById(id)?.value?.trim() || '';
+  const required = { 'oi-first':'First name', 'oi-last':'Last name', 'oi-state':'State', 'oi-phone':'Phone', 'oi-dob':'DOB', 'oi-ssn':'SSN', 'oi-street':'Street', 'oi-city':'City', 'oi-province':'State (in address)', 'oi-postal':'Postal' };
+  for(const [id, label] of Object.entries(required)){
+    if(!get(id)){ msg.innerHTML = '<span style="color:#F87171;">' + label + ' is required.</span>'; return; }
+  }
+  // Validate SSN — strip non-digits, must be 9 digits
+  const ssnDigits = get('oi-ssn').replace(/\D/g, '');
+  if(ssnDigits.length !== 9){ msg.innerHTML = '<span style="color:#F87171;">SSN must be 9 digits.</span>'; return; }
+
+  const sigData = document.getElementById('oi-sig-data')?.value || '';
+  if(!sigData){ msg.innerHTML = '<span style="color:#F87171;">Signature is required.</span>'; return; }
+
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">📤 Uploading photos…</span>';
+
+  // Upload any new photo files to onboarding-docs bucket
+  const userId = currentProfile.id;
+  const photoPaths = {};
+  for(const [field, key] of [['id_front','id_front_path'], ['id_back','id_back_path'], ['badge','badge_photo_path']]){
+    const fileInp = document.getElementById('oi-photo-' + field);
+    const file = fileInp?.files?.[0];
+    if(file){
+      const path = userId + '/' + field + '-' + Date.now() + '.jpg';
+      // Compress before upload
+      const compressed = await _compressImage(file, 1600, 0.85);
+      const { error } = await sb.storage.from('onboarding-docs').upload(path, compressed, { upsert: true });
+      if(error){ msg.innerHTML = '<span style="color:#F87171;">Upload failed for ' + field + ': ' + error.message + '</span>'; return; }
+      photoPaths[key] = path;
+    }
+  }
+
+  const payload = {
+    user_id: userId,
+    first_name: get('oi-first'),
+    middle_name: get('oi-middle') || null,
+    last_name: get('oi-last'),
+    state: get('oi-state').toUpperCase(),
+    program: 'Reliant Energy',
+    phone: get('oi-phone'),
+    ssn: ssnDigits.substring(0,3) + '-' + ssnDigits.substring(3,5) + '-' + ssnDigits.substring(5),
+    dob: get('oi-dob'),
+    street_address: get('oi-street'),
+    street_address_2: get('oi-street2') || null,
+    city: get('oi-city'),
+    state_province: get('oi-province').toUpperCase(),
+    postal_code: get('oi-postal'),
+    signature_data: sigData,
+    status: 'submitted',
+    submitted_at: new Date().toISOString()
+  };
+  Object.assign(payload, photoPaths);
+
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">💾 Saving…</span>';
+  let recordId = existingId;
+  if(existingId){
+    const { error } = await sb.from('onboarding_intake').update(payload).eq('id', existingId);
+    if(error){ msg.innerHTML = '<span style="color:#F87171;">' + error.message + '</span>'; return; }
+  } else {
+    const { data, error } = await sb.from('onboarding_intake').insert(payload).select('id').single();
+    if(error){ msg.innerHTML = '<span style="color:#F87171;">' + error.message + '</span>'; return; }
+    recordId = data.id;
+  }
+
+  await _markFormSubmitted(userId, 'reliant_intake', recordId);
+
+  // Notify owner + onboarding department
+  try { await _notifyOnboardingFormSubmitted('reliant_intake', payload.first_name + ' ' + payload.last_name); } catch(_){}
+
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Submitted! Onboarding has been notified.</span>';
+  setTimeout(() => boShowAdmin('onboarding-packet'), 1000);
+}
+
+async function _compressImage(file, maxDim, quality){
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let { width, height } = img;
+      if(width > maxDim || height > maxDim){
+        if(width > height){ height = Math.round(height * maxDim / width); width = maxDim; }
+        else { width = Math.round(width * maxDim / height); height = maxDim; }
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = width; canvas.height = height;
+      canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+      canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('compress failed')), 'image/jpeg', quality || 0.85);
+    };
+    img.onerror = reject;
+    img.src = url;
+  });
+}
+
+async function _notifyOnboardingFormSubmitted(formType, candidateName){
+  const formLabel = ONBOARDING_FORMS.find(f => f.id === formType)?.label || formType;
+  const { data: recipients } = await sb.from('profiles')
+    .select('id, email')
+    .or('role.eq.owner,has_master_center_access.eq.true')
+    .eq('active', true);
+  for(const p of (recipients || [])){
+    try {
+      await notifyUser(p.id, {
+        type: 'generic',
+        title: '📋 ' + formLabel + ' submitted',
+        body: candidateName + ' submitted their ' + formLabel + ' form'
+      });
+    } catch(_){}
+  }
+  // Also notify the agent's MM
+  if(currentProfile.reports_to){
+    try {
+      await notifyUser(currentProfile.reports_to, {
+        type: 'generic',
+        title: '📋 Direct report onboarding update',
+        body: (currentProfile.full_name || currentProfile.email) + ' submitted: ' + formLabel
+      });
+    } catch(_){}
+  }
+}
+
+// ─── ACH SUBMIT ────────────────────────────────────────────────────
+async function submitOnboardingAch(existingId){
+  const msg = document.getElementById('ach-msg');
+  const get = id => document.getElementById(id)?.value?.trim() || '';
+  const required = { 'ach-type':'Account type', 'ach-first':'First name', 'ach-last':'Last name', 'ach-ssn':'SSN', 'ach-holder-name':'Account holder name', 'ach-routing':'Routing number', 'ach-account':'Account number' };
+  for(const [id, label] of Object.entries(required)){
+    if(!get(id)){ msg.innerHTML = '<span style="color:#F87171;">' + label + ' is required.</span>'; return; }
+  }
+  const routing = get('ach-routing').replace(/\D/g, '');
+  if(routing.length !== 9){ msg.innerHTML = '<span style="color:#F87171;">Routing number must be 9 digits.</span>'; return; }
+  const account = get('ach-account').replace(/\D/g, '');
+  if(account.length < 9 || account.length > 17){ msg.innerHTML = '<span style="color:#F87171;">Account number must be 9-17 digits.</span>'; return; }
+  const ssn = get('ach-ssn').replace(/\D/g, '');
+  if(ssn.length !== 9){ msg.innerHTML = '<span style="color:#F87171;">SSN must be 9 digits.</span>'; return; }
+  const sigData = document.getElementById('ach-sig-data')?.value || '';
+  if(!sigData){ msg.innerHTML = '<span style="color:#F87171;">Signature required.</span>'; return; }
+
+  const payload = {
+    user_id: currentProfile.id,
+    account_type: get('ach-type'),
+    first_name: get('ach-first'),
+    last_name: get('ach-last'),
+    street_address: get('ach-street') || null,
+    street_address_2: get('ach-street2') || null,
+    city: get('ach-city') || null,
+    state_province: get('ach-state').toUpperCase() || null,
+    postal_code: get('ach-postal') || null,
+    dob: get('ach-dob') || null,
+    ssn_full: ssn.substring(0,3) + '-' + ssn.substring(3,5) + '-' + ssn.substring(5),
+    company_name: get('ach-company') || null,
+    company_street: get('ach-co-street') || null,
+    company_street_2: get('ach-co-street2') || null,
+    company_city: get('ach-co-city') || null,
+    company_state: get('ach-co-state').toUpperCase() || null,
+    company_postal: get('ach-co-postal') || null,
+    company_ein: get('ach-ein') || null,
+    email: get('ach-email') || null,
+    account_holder_name: get('ach-holder-name'),
+    routing_number: routing,
+    account_number: account,
+    bank_name: get('ach-bank') || null,
+    bank_branch: get('ach-branch') || null,
+    phone: get('ach-phone') || null,
+    signed_date: get('ach-date') || null,
+    signature_data: sigData,
+    status: 'submitted',
+    submitted_at: new Date().toISOString()
+  };
+
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">💾 Saving…</span>';
+  let recordId = existingId;
+  if(existingId){
+    const { error } = await sb.from('onboarding_ach').update(payload).eq('id', existingId);
+    if(error){ msg.innerHTML = '<span style="color:#F87171;">' + error.message + '</span>'; return; }
+  } else {
+    const { data, error } = await sb.from('onboarding_ach').insert(payload).select('id').single();
+    if(error){ msg.innerHTML = '<span style="color:#F87171;">' + error.message + '</span>'; return; }
+    recordId = data.id;
+  }
+
+  await _markFormSubmitted(currentProfile.id, 'ach_banking', recordId);
+  try { await _notifyOnboardingFormSubmitted('ach_banking', currentProfile.full_name || currentProfile.email); } catch(_){}
+
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Banking saved. Internal use only.</span>';
+  setTimeout(() => boShowAdmin('onboarding-packet'), 1000);
+}
+
+// ─── ONBOARDING PROFILE VIEWER (Owner + Onboarding) ────────────────
+async function openAgentOnboarding(agentId){
+  window._onboardingProfileAgentId = agentId;
+  boShowAdmin('onboarding-profile');
+}
+
+async function renderOnboardingProfile(el){
+  const isOwner = currentProfile.role === 'owner';
+  const isOnboarding = currentProfile.has_master_center_access === true;
+  if(!isOwner && !isOnboarding){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied. Owner + Onboarding only.</div>';
+    return;
+  }
+  const agentId = window._onboardingProfileAgentId;
+  if(!agentId){
+    el.innerHTML = '<div class="bo-card">No agent selected. Go to Team admin and click 📋 View Onboarding on an agent.</div>';
+    return;
+  }
+
+  el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading agent onboarding…</div>';
+
+  const [{ data: agent }, { data: intake }, { data: ach }, statuses] = await Promise.all([
+    sb.from('profiles').select('id, full_name, email, phone, role, market_id, reports_to, created_at').eq('id', agentId).maybeSingle(),
+    sb.from('onboarding_intake').select('*').eq('user_id', agentId).maybeSingle(),
+    sb.from('onboarding_ach').select('*').eq('user_id', agentId).maybeSingle(),
+    _loadFormStatuses(agentId)
+  ]);
+
+  if(!agent){ el.innerHTML = '<div class="bo-card" style="color:#F87171;">Agent not found.</div>'; return; }
+
+  // Generate signed URLs for the photo previews if they exist
+  const photoUrls = {};
+  if(intake){
+    for(const [field, key] of [['id_front','id_front_path'], ['id_back','id_back_path'], ['badge','badge_photo_path']]){
+      if(intake[key]){
+        const { data } = await sb.storage.from('onboarding-docs').createSignedUrl(intake[key], 3600);
+        photoUrls[field] = data?.signedUrl || null;
+      }
+    }
+  }
+
+  el.innerHTML = `
+    <button class="bo-back-btn show-on-mobile" onclick="boShowAdmin('agents')">← Back to Team</button>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:18px;">
+      <div>
+        <div style="font-size:11px;color:#00C6FF;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:6px;">Onboarding Profile</div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:38px;color:#fff;line-height:1;">📋 ${escapeHtml(agent.full_name || agent.email)}</h1>
+        <p style="font-size:13px;color:rgba(255,255,255,0.55);margin-top:6px;">${escapeHtml(agent.email)} · ${escapeHtml(agent.phone || 'no phone')} · joined ${new Date(agent.created_at).toLocaleDateString()}</p>
+      </div>
+      <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('agents')" style="padding:7px 14px;font-size:12px;">← Back to Team</button>
+    </div>
+
+    <!-- Status overview -->
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#FFC800;letter-spacing:1.5px;margin-bottom:10px;">📊 Form Status</div>
+      ${ONBOARDING_FORMS.map(f => {
+        const s = statuses[f.id];
+        const status = s?.status || 'pending';
+        const colors = { pending:'rgba(255,255,255,0.4)', submitted:'#FFC800', approved:'#00FF88', rejected:'#F87171' };
+        const labels = { pending:'NOT STARTED', submitted:'SUBMITTED', approved:'APPROVED', rejected:'REJECTED' };
+        return `
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:rgba(255,255,255,0.03);border-radius:8px;margin-bottom:6px;flex-wrap:wrap;gap:8px;">
+            <div style="display:flex;align-items:center;gap:10px;">
+              <div style="font-size:24px;">${f.icon}</div>
+              <div>
+                <div style="font-size:14px;color:#fff;font-weight:600;">${escapeHtml(f.label)}</div>
+                <div style="font-size:11px;color:rgba(255,255,255,0.5);">${s?.completed_at ? new Date(s.completed_at).toLocaleString() : '—'}</div>
+              </div>
+            </div>
+            <div style="background:${colors[status]}22;color:${colors[status]};padding:4px 10px;border-radius:50px;font-size:10.5px;font-weight:700;letter-spacing:1px;border:1px solid ${colors[status]}55;">${labels[status]}</div>
+          </div>`;
+      }).join('')}
+    </div>
+
+    <!-- Reliant Intake details -->
+    ${intake ? `
+      <div class="bo-card" style="margin-bottom:14px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#00C6FF;letter-spacing:1.5px;">📝 Reliant Intake</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            ${intake.status !== 'sent' ? `
+              <button class="bo-btn bo-btn-primary" style="padding:7px 14px;font-size:12px;" onclick="confirmSendToReliant('${intake.id}')">📧 Send to Reliant</button>
+              <button class="bo-btn bo-btn-ghost" style="padding:7px 14px;font-size:12px;color:#F87171;border-color:rgba(248,113,113,0.3);" onclick="rejectIntake('${intake.id}','${agentId}')">✗ Reject &amp; ask to resubmit</button>
+            ` : `
+              <span style="background:rgba(0,255,136,0.12);color:#00FF88;padding:6px 12px;border-radius:50px;font-size:11px;font-weight:700;letter-spacing:1px;">✓ SENT TO RELIANT · ${new Date(intake.sent_to_reliant_at).toLocaleDateString()}</span>
+            `}
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 18px;font-size:13px;line-height:1.6;">
+          ${[
+            ['Full Name', `${intake.first_name} ${intake.middle_name || ''} ${intake.last_name}`.replace(/\s+/g,' ').trim()],
+            ['Phone', intake.phone],
+            ['DOB', intake.dob],
+            ['SSN', `<span id="onb-ssn-${intake.id}" data-full="${escapeHtml(intake.ssn || '')}" style="font-family:monospace;">XXX-XX-${(intake.ssn || '').slice(-4)}</span> <button class="bo-btn bo-btn-ghost" style="padding:1px 8px;font-size:10px;margin-left:6px;" onclick="onbToggleReveal('onb-ssn-${intake.id}','XXX-XX-${(intake.ssn || '').slice(-4)}')">Reveal</button>`],
+            ['State', intake.state],
+            ['Program', intake.program],
+            ['Address', `${intake.street_address || ''}${intake.street_address_2 ? ', ' + intake.street_address_2 : ''}, ${intake.city}, ${intake.state_province} ${intake.postal_code}`]
+          ].map(([k,v]) => `
+            <div><span style="color:rgba(255,255,255,0.5);font-size:11px;letter-spacing:1px;font-weight:700;">${escapeHtml(k)}</span><div style="color:#fff;">${v || '—'}</div></div>
+          `).join('')}
+        </div>
+        <!-- Photos -->
+        <div style="margin-top:18px;">
+          <div style="font-size:11px;color:rgba(255,255,255,0.5);letter-spacing:1.5px;font-weight:700;margin-bottom:8px;">PHOTOS</div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));gap:10px;">
+            ${[['id_front','ID Front'],['id_back','ID Back'],['badge','Badge']].map(([key,label]) => `
+              <div style="background:rgba(0,0,0,0.3);border-radius:8px;overflow:hidden;">
+                ${photoUrls[key] ? `<img src="${photoUrls[key]}" style="width:100%;height:140px;object-fit:cover;display:block;cursor:pointer;" onclick="window.open('${photoUrls[key]}','_blank')"/>` : '<div style="height:140px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.3);font-size:12px;">No photo</div>'}
+                <div style="padding:6px 10px;font-size:11px;color:rgba(255,255,255,0.6);">${escapeHtml(label)}</div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+        ${intake.signature_data ? `
+          <div style="margin-top:14px;">
+            <div style="font-size:11px;color:rgba(255,255,255,0.5);letter-spacing:1.5px;font-weight:700;margin-bottom:8px;">SIGNATURE</div>
+            <img src="${intake.signature_data}" style="max-width:300px;background:#fff;padding:6px;border-radius:6px;"/>
+          </div>
+        ` : ''}
+      </div>
+    ` : '<div class="bo-card" style="margin-bottom:14px;color:rgba(255,255,255,0.4);font-style:italic;">Reliant Intake form not yet submitted.</div>'}
+
+    <!-- ACH details -->
+    ${ach ? `
+      <div class="bo-card" style="margin-bottom:14px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#00C6FF;letter-spacing:1.5px;">🏦 Direct Deposit (Internal)</div>
+          <div style="font-size:11px;color:rgba(255,255,255,0.45);font-style:italic;">never sent to Reliant</div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 18px;font-size:13px;line-height:1.6;">
+          ${[
+            ['Account Type', (ach.account_type || '').replace('_',' ')],
+            ['Account Holder', `${ach.first_name || ''} ${ach.last_name || ''}`.trim()],
+            ['Routing #', `<span id="onb-rt-${ach.id}" data-full="${escapeHtml(ach.routing_number || '')}" style="font-family:monospace;">XXXXX${(ach.routing_number || '').slice(-4)}</span> <button class="bo-btn bo-btn-ghost" style="padding:1px 8px;font-size:10px;margin-left:6px;" onclick="onbToggleReveal('onb-rt-${ach.id}','XXXXX${(ach.routing_number || '').slice(-4)}')">Reveal</button>`],
+            ['Account #', `<span id="onb-acc-${ach.id}" data-full="${escapeHtml(ach.account_number || '')}" style="font-family:monospace;">XXXXXXX${(ach.account_number || '').slice(-4)}</span> <button class="bo-btn bo-btn-ghost" style="padding:1px 8px;font-size:10px;margin-left:6px;" onclick="onbToggleReveal('onb-acc-${ach.id}','XXXXXXX${(ach.account_number || '').slice(-4)}')">Reveal</button>`],
+            ['Bank', ach.bank_name],
+            ['Branch', ach.bank_branch],
+            ['Bank Account Holder', ach.account_holder_name],
+            ['Company (if 1099)', ach.company_name],
+            ['Company EIN', ach.company_ein],
+            ['SSN', `<span id="onb-achssn-${ach.id}" data-full="${escapeHtml(ach.ssn_full || '')}" style="font-family:monospace;">XXX-XX-${(ach.ssn_full || '').slice(-4)}</span> <button class="bo-btn bo-btn-ghost" style="padding:1px 8px;font-size:10px;margin-left:6px;" onclick="onbToggleReveal('onb-achssn-${ach.id}','XXX-XX-${(ach.ssn_full || '').slice(-4)}')">Reveal</button>`]
+          ].map(([k,v]) => `
+            <div><span style="color:rgba(255,255,255,0.5);font-size:11px;letter-spacing:1px;font-weight:700;">${escapeHtml(k)}</span><div style="color:#fff;">${v || '—'}</div></div>
+          `).join('')}
+        </div>
+      </div>
+    ` : '<div class="bo-card" style="margin-bottom:14px;color:rgba(255,255,255,0.4);font-style:italic;">Direct Deposit form not yet submitted.</div>'}`;
+}
+
+function onbToggleReveal(elemId, maskedText){
+  const el = document.getElementById(elemId);
+  if(!el) return;
+  if(el.dataset.revealed === '1'){
+    el.textContent = maskedText;
+    el.dataset.revealed = '0';
+  } else {
+    el.textContent = el.dataset.full || maskedText;
+    el.dataset.revealed = '1';
+  }
+}
+
+function onbToggleSsn(id, fullSsn){
+  // Legacy alias kept for safety
+  onbToggleReveal('onb-ssn-' + id, 'XXX-XX-' + fullSsn.slice(-4));
+}
+
+function onbToggleField(id, prefix, fullVal){
+  // Legacy alias kept for safety
+  let masked = '';
+  if(prefix === 'rt') masked = 'XXXXX' + fullVal.slice(-4);
+  else if(prefix === 'acc') masked = 'XXXXXXX' + fullVal.slice(-4);
+  else if(prefix === 'achssn') masked = 'XXX-XX-' + fullVal.slice(-4);
+  onbToggleReveal('onb-' + prefix + '-' + id, masked);
+}
+
+async function confirmSendToReliant(intakeId){
+  const { data: intake } = await sb.from('onboarding_intake').select('first_name, last_name').eq('id', intakeId).maybeSingle();
+  const candidateName = intake ? (intake.first_name + ' ' + intake.last_name) : 'this candidate';
+  // Show settings reminder first
+  const { data: setting } = await sb.from('app_settings').select('value').eq('key', 'reliant_intake_email').maybeSingle();
+  const email = setting?.value;
+  if(!email || typeof email !== 'string' || !email.includes('@')){
+    alert('Reliant email is not configured. Owner: go to Reliant Email settings to set it.');
+    return;
+  }
+  if(!confirm('Send ' + candidateName + "'s onboarding intake to:\n\n" + email + "\n\nThis will email a PDF cover sheet + 3 photo attachments. Make sure you've reviewed everything first.")) return;
+
+  try {
+    const { data, error } = await sb.functions.invoke('send-onboarding-to-reliant', { body: { intakeId } });
+    if(error){ alert('Send failed: ' + error.message); return; }
+    if(data?.error){ alert('Send failed: ' + data.error); return; }
+    alert('✓ Sent to ' + (data?.sentTo || email));
+    renderMainContent();
+  } catch(e){
+    alert('Send failed: ' + e.message);
+  }
+}
+
+async function rejectIntake(intakeId, agentId){
+  const reason = prompt('Reason for rejection (will be shown to the agent):');
+  if(!reason) return;
+  await sb.from('onboarding_intake').update({ status: 'rejected', reject_reason: reason, reviewed_at: new Date().toISOString(), reviewed_by: currentProfile.id }).eq('id', intakeId);
+  await sb.from('onboarding_form_status').upsert({
+    user_id: agentId, form_type: 'reliant_intake', status: 'rejected', notes: reason
+  }, { onConflict: 'user_id,form_type' });
+  // Notify the agent
+  try { await notifyUser(agentId, { type:'generic', title:'⚠️ Intake form needs revision', body: reason }); } catch(_){}
+  alert('Marked as rejected. Agent has been notified.');
+  renderMainContent();
+}
+
+// ─── RELIANT EMAIL SETTINGS ────────────────────────────────────────
+async function renderReliantEmailSettings(el){
+  if(currentProfile.role !== 'owner'){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Owner only.</div>';
+    return;
+  }
+  const { data: setting } = await sb.from('app_settings').select('*').eq('key', 'reliant_intake_email').maybeSingle();
+  const current = setting?.value || '';
+
+  el.innerHTML = `
+    <div style="margin-bottom:24px;">
+      <div style="font-size:11px;color:#FF6B00;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:6px;">Owner Settings</div>
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:38px;color:#fff;line-height:1;">📧 Reliant Email</h1>
+      <p style="font-size:13px;color:rgba(255,255,255,0.55);margin-top:6px;max-width:600px;line-height:1.55;">The email address where completed Reliant Intake forms get sent. Update this if Reliant gives you a new contact.</p>
+    </div>
+
+    <div class="bo-card">
+      <div class="form-group">
+        <label class="form-label">Reliant Onboarding Email</label>
+        <input id="rel-email" class="form-input" type="email" value="${escapeHtml(current)}" placeholder="onboarding@reliant.com"/>
+        <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">This is where the auto-generated PDF + photo attachments are sent when Onboarding hits "Send to Reliant".</div>
+      </div>
+      <div style="display:flex;gap:10px;margin-top:14px;">
+        <button class="bo-btn bo-btn-primary" onclick="saveReliantEmail()">Save</button>
+      </div>
+      <div id="rel-msg" style="margin-top:12px;font-size:13px;"></div>
+    </div>
+
+    <div class="bo-card" style="margin-top:14px;background:rgba(255,200,0,0.05);border:1px solid rgba(255,200,0,0.2);">
+      <div style="font-size:13px;color:rgba(255,255,255,0.7);line-height:1.6;">
+        <strong style="color:#FFC800;">⚠️ Reminder:</strong> Reliant should provide their secure/encrypted email endpoint. If you're unsure whether email is the right method or what address to use, contact your Reliant rep before sending real candidates' info.
+      </div>
+    </div>`;
+}
+
+async function saveReliantEmail(){
+  const email = document.getElementById('rel-email').value.trim();
+  const msg = document.getElementById('rel-msg');
+  if(!email || !email.includes('@')){ msg.innerHTML = '<span style="color:#F87171;">Invalid email.</span>'; return; }
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Saving…</span>';
+  const { error } = await sb.from('app_settings').upsert({
+    key: 'reliant_intake_email',
+    value: email,
+    updated_at: new Date().toISOString(),
+    updated_by: currentProfile.id
+  }, { onConflict: 'key' });
+  if(error){ msg.innerHTML = '<span style="color:#F87171;">' + error.message + '</span>'; return; }
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Saved.</span>';
+}
+
+// ─── EXPORTS ───
+window.renderOnboardingPacket = renderOnboardingPacket;
+window.renderOnboardingIntakeForm = renderOnboardingIntakeForm;
+window.renderOnboardingAchForm = renderOnboardingAchForm;
+window.renderOnboardingProfile = renderOnboardingProfile;
+window.renderReliantEmailSettings = renderReliantEmailSettings;
+window.submitOnboardingIntake = submitOnboardingIntake;
+window.submitOnboardingAch = submitOnboardingAch;
+window.csiSigInit = csiSigInit;
+window.csiSigClear = csiSigClear;
+window.openAgentOnboarding = openAgentOnboarding;
+window.onbToggleSsn = onbToggleSsn;
+window.onbToggleField = onbToggleField;
+window.onbToggleReveal = onbToggleReveal;
+window.confirmSendToReliant = confirmSendToReliant;
+window.rejectIntake = rejectIntake;
+window.saveReliantEmail = saveReliantEmail;
 
 
 async function renderStoresAdmin(el){
