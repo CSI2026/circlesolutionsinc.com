@@ -2372,9 +2372,8 @@ function renderSidebar(){
   if(isOwner || currentProfile.has_master_center_access){
     adminNavItems.push({ id:'onboarding-master', label:'🎯 Onboarding Center' });
   }
-  if(isOwner || isAdmin){
-    adminNavItems.push({ id:'onboarding-pending', label:'📋 Pending Onboarding' });
-  }
+  // (Legacy "Pending Onboarding" removed — replaced by Phase 3.5 system.
+  //  View an agent's onboarding via Team admin → 📋 View Onboarding.)
 
   // Determine which section should be open by default — the one matching current activeView
   // OR fall back to "programs" section if user has any programs.
@@ -2775,7 +2774,7 @@ async function renderDashboard(el, prog, canManage){
         <div class="stat-card"><div class="stat-num" style="color:${prog.color};">${myTotal}</div><div class="stat-lbl">My Enrollments</div></div>
         <div class="stat-card"><div class="stat-num" style="color:#00FF88;">${myActive}</div><div class="stat-lbl">Active</div></div>
         ${canManage ? `<div class="stat-card"><div class="stat-num" style="color:#FFD700;">${teamTotal ?? 0}</div><div class="stat-lbl">Team Total</div></div>` : ''}
-        ${canManage ? `<div class="stat-card" style="cursor:pointer;" onclick="boShowAdmin('onboarding-pending')"><div class="stat-num" style="color:#FF6B00;">${pipelineAgents.length}</div><div class="stat-lbl">In Pipeline</div></div>` : ''}
+        ${canManage ? `<div class="stat-card" style="cursor:pointer;" onclick="boShowAdmin('agents')"><div class="stat-num" style="color:#FF6B00;">${pipelineAgents.length}</div><div class="stat-lbl">In Pipeline</div></div>` : ''}
       </div>
 
       ${canManage && pipelineAgents.length > 0 ? `
@@ -2785,7 +2784,7 @@ async function renderDashboard(el, prog, canManage){
               <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#FF6B00;letter-spacing:1px;">🔄 NEW AGENTS PIPELINE</div>
               <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-top:2px;">Onboarding in progress or waiting on codes unlock</div>
             </div>
-            <button class="bo-btn bo-btn-ghost" style="padding:6px 14px;font-size:12px;" onclick="boShowAdmin('onboarding-pending')">View all →</button>
+            <button class="bo-btn bo-btn-ghost" style="padding:6px 14px;font-size:12px;" onclick="boShowAdmin('agents')">View all →</button>
           </div>
           <div style="display:flex;flex-direction:column;gap:6px;">
             ${pipelineAgents.map(a => {
@@ -5154,12 +5153,12 @@ async function renderOwnerPanel(el){
   if(readyForCodesCount > 0) actionItems.push({
     emoji: '⚡', color: '#00C6FF', count: readyForCodesCount,
     label: `Agents ready for codes unlock`,
-    action: 'onboarding-pending'
+    action: 'agents'
   });
   if(pendingOnboardingCount > 0) actionItems.push({
     emoji: '🔄', color: '#FFD700', count: pendingOnboardingCount,
     label: `Agents still in onboarding`,
-    action: 'onboarding-pending'
+    action: 'agents'
   });
 
   el.innerHTML = `
@@ -7588,7 +7587,7 @@ async function renderOnboardingPacket(el){
             ${isApproved ? `
               <button class="bo-btn bo-btn-ghost" style="padding:8px 14px;font-size:12px;" onclick="boShowAdmin('${f.view}')">View Submission</button>
             ` : isDone ? `
-              <button class="bo-btn bo-btn-ghost" style="padding:8px 14px;font-size:12px;" onclick="boShowAdmin('${f.view}')">Review / Edit</button>
+              <button class="bo-btn bo-btn-ghost" style="padding:8px 14px;font-size:12px;" onclick="boShowAdmin('${f.view}')">View Status</button>
             ` : `
               <button class="bo-btn bo-btn-primary" style="padding:8px 16px;font-size:12.5px;" onclick="boShowAdmin('${f.view}')">${isRejected ? 'Re-submit' : 'Start →'}</button>
             `}
@@ -7610,7 +7609,14 @@ async function renderOnboardingIntakeForm(el){
   // Load existing intake (if any) so agent can review/re-edit before final submission
   const { data: existing } = await sb.from('onboarding_intake').select('*').eq('user_id', currentProfile.id).maybeSingle();
   const r = existing || {};
-  const isLocked = existing && (existing.status === 'sent');
+  // Lock once submitted — agent can no longer edit. They use "Request Edit" to ask Onboarding to unlock.
+  // Status 'rejected' unlocks for resubmission.
+  const isLocked = existing && (existing.status === 'submitted' || existing.status === 'reviewed' || existing.status === 'sent');
+  const isRejected = existing && existing.status === 'rejected';
+
+  if(isLocked){
+    return _renderIntakeLockedView(el, existing);
+  }
 
   el.innerHTML = `
     <button class="bo-back-btn show-on-mobile" onclick="boShowAdmin('onboarding-packet')">← Back to Packet</button>
@@ -7623,45 +7629,43 @@ async function renderOnboardingIntakeForm(el){
       <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('onboarding-packet')" style="padding:7px 14px;font-size:12px;">← Back</button>
     </div>
 
-    ${isLocked ? `
-      <div class="bo-card" style="margin-bottom:14px;background:rgba(0,255,136,0.06);border:1px solid rgba(0,255,136,0.25);">
-        <div style="display:flex;align-items:center;gap:10px;color:#00FF88;font-weight:600;font-size:14px;">
-          <span style="font-size:20px;">✓</span>
-          <span>This form has been sent to Reliant. You can no longer edit it. Contact onboarding if changes are needed.</span>
-        </div>
+    ${isRejected ? `
+      <div class="bo-card" style="margin-bottom:14px;background:rgba(248,113,113,0.06);border:1px solid rgba(248,113,113,0.3);">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#F87171;letter-spacing:1px;margin-bottom:6px;">⚠️ Onboarding asked you to fix something</div>
+        <div style="font-size:13px;color:rgba(255,255,255,0.85);line-height:1.55;">${r.reject_reason ? '<strong>Reason:</strong> ' + escapeHtml(r.reject_reason) : 'Please review your submission and re-submit.'}</div>
       </div>
     ` : ''}
 
     <div class="bo-card" style="margin-bottom:14px;">
       <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">👤 Identity</div>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
-        <div class="form-group"><label class="form-label">First Name *</label><input id="oi-first" class="form-input" value="${escapeHtml(r.first_name || '')}" ${isLocked ? 'disabled' : ''}/></div>
-        <div class="form-group"><label class="form-label">Middle Name</label><input id="oi-middle" class="form-input" value="${escapeHtml(r.middle_name || '')}" ${isLocked ? 'disabled' : ''}/></div>
-        <div class="form-group"><label class="form-label">Last Name *</label><input id="oi-last" class="form-input" value="${escapeHtml(r.last_name || '')}" ${isLocked ? 'disabled' : ''}/></div>
+        <div class="form-group"><label class="form-label">First Name *</label><input id="oi-first" class="form-input" value="${escapeHtml(r.first_name || '')}"/></div>
+        <div class="form-group"><label class="form-label">Middle Name</label><input id="oi-middle" class="form-input" value="${escapeHtml(r.middle_name || '')}"/></div>
+        <div class="form-group"><label class="form-label">Last Name *</label><input id="oi-last" class="form-input" value="${escapeHtml(r.last_name || '')}"/></div>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-        <div class="form-group"><label class="form-label">State *</label><input id="oi-state" class="form-input" value="${escapeHtml(r.state || 'TX')}" maxlength="2" style="text-transform:uppercase;" ${isLocked ? 'disabled' : ''}/></div>
+        <div class="form-group"><label class="form-label">State *</label><input id="oi-state" class="form-input" value="${escapeHtml(r.state || 'TX')}" maxlength="2" style="text-transform:uppercase;"/></div>
         <div class="form-group"><label class="form-label">Program</label><input id="oi-program" class="form-input" value="Reliant Energy" disabled style="opacity:0.6;"/></div>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-        <div class="form-group"><label class="form-label">Phone *</label><input id="oi-phone" class="form-input" type="tel" value="${escapeHtml(r.phone || '')}" placeholder="(000) 000-0000" ${isLocked ? 'disabled' : ''}/></div>
-        <div class="form-group"><label class="form-label">DOB *</label><input id="oi-dob" class="form-input" type="date" value="${r.dob || ''}" ${isLocked ? 'disabled' : ''}/></div>
+        <div class="form-group"><label class="form-label">Phone *</label><input id="oi-phone" class="form-input" type="tel" value="${escapeHtml(r.phone || '')}" placeholder="(000) 000-0000"/></div>
+        <div class="form-group"><label class="form-label">DOB *</label><input id="oi-dob" class="form-input" type="date" value="${r.dob || ''}"/></div>
       </div>
       <div class="form-group">
         <label class="form-label">9-digit SSN *</label>
-        <input id="oi-ssn" class="form-input" inputmode="numeric" maxlength="11" value="${escapeHtml(r.ssn || '')}" placeholder="XXX-XX-XXXX" ${isLocked ? 'disabled' : ''}/>
+        <input id="oi-ssn" class="form-input" inputmode="numeric" maxlength="11" value="${escapeHtml(r.ssn || '')}" placeholder="XXX-XX-XXXX"/>
         <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">🔒 Encrypted at rest. Visible only to Owner + Onboarding.</div>
       </div>
     </div>
 
     <div class="bo-card" style="margin-bottom:14px;">
       <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">🏠 Address</div>
-      <div class="form-group"><label class="form-label">Street Address *</label><input id="oi-street" class="form-input" value="${escapeHtml(r.street_address || '')}" ${isLocked ? 'disabled' : ''}/></div>
-      <div class="form-group"><label class="form-label">Street Address Line 2</label><input id="oi-street2" class="form-input" value="${escapeHtml(r.street_address_2 || '')}" ${isLocked ? 'disabled' : ''}/></div>
+      <div class="form-group"><label class="form-label">Street Address *</label><input id="oi-street" class="form-input" value="${escapeHtml(r.street_address || '')}"/></div>
+      <div class="form-group"><label class="form-label">Street Address Line 2</label><input id="oi-street2" class="form-input" value="${escapeHtml(r.street_address_2 || '')}"/></div>
       <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:12px;">
-        <div class="form-group"><label class="form-label">City *</label><input id="oi-city" class="form-input" value="${escapeHtml(r.city || '')}" ${isLocked ? 'disabled' : ''}/></div>
-        <div class="form-group"><label class="form-label">State *</label><input id="oi-province" class="form-input" value="${escapeHtml(r.state_province || 'TX')}" maxlength="2" style="text-transform:uppercase;" ${isLocked ? 'disabled' : ''}/></div>
-        <div class="form-group"><label class="form-label">Postal *</label><input id="oi-postal" class="form-input" value="${escapeHtml(r.postal_code || '')}" maxlength="10" ${isLocked ? 'disabled' : ''}/></div>
+        <div class="form-group"><label class="form-label">City *</label><input id="oi-city" class="form-input" value="${escapeHtml(r.city || '')}"/></div>
+        <div class="form-group"><label class="form-label">State *</label><input id="oi-province" class="form-input" value="${escapeHtml(r.state_province || 'TX')}" maxlength="2" style="text-transform:uppercase;"/></div>
+        <div class="form-group"><label class="form-label">Postal *</label><input id="oi-postal" class="form-input" value="${escapeHtml(r.postal_code || '')}" maxlength="10"/></div>
       </div>
     </div>
 
@@ -7676,7 +7680,7 @@ async function renderOnboardingIntakeForm(el){
         <div class="form-group">
           <label class="form-label">${p.label}</label>
           ${p.existing ? `<div style="font-size:11.5px;color:#00FF88;margin-bottom:6px;">✓ Uploaded: ${escapeHtml(p.existing.split('/').pop() || '')}</div>` : ''}
-          <input type="file" id="oi-photo-${p.id}" accept="image/*" capture="environment" class="form-input" style="padding:8px;" ${isLocked ? 'disabled' : ''}/>
+          <input type="file" id="oi-photo-${p.id}" accept="image/*" capture="environment" class="form-input" style="padding:8px;"/>
           <div id="oi-photo-${p.id}-preview" style="margin-top:8px;"></div>
         </div>
       `).join('')}
@@ -7687,24 +7691,151 @@ async function renderOnboardingIntakeForm(el){
       <div style="font-size:12px;color:rgba(255,255,255,0.55);margin-bottom:10px;">Sign below using your finger (mobile) or mouse. By signing, you certify all information is accurate.</div>
       <canvas id="oi-sig-canvas" width="600" height="150" style="background:#fff;border-radius:8px;width:100%;max-width:600px;cursor:crosshair;touch-action:none;"></canvas>
       <div style="display:flex;gap:8px;margin-top:8px;">
-        <button class="bo-btn bo-btn-ghost" style="padding:6px 12px;font-size:11.5px;" onclick="csiSigClear('oi-sig-canvas')" ${isLocked ? 'disabled' : ''}>Clear</button>
+        <button class="bo-btn bo-btn-ghost" style="padding:6px 12px;font-size:11.5px;" onclick="csiSigClear('oi-sig-canvas')">Clear</button>
       </div>
       <input type="hidden" id="oi-sig-data" value="${escapeHtml(r.signature_data || '')}"/>
     </div>
 
-    ${!isLocked ? `
-      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
-        <button class="bo-btn bo-btn-primary" onclick="submitOnboardingIntake('${r.id || ''}')">${existing ? 'Update Submission' : 'Submit to Onboarding'}</button>
-        <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('onboarding-packet')">Cancel</button>
-      </div>
-      <div id="oi-msg" style="font-size:13px;"></div>
-    ` : ''}`;
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+      <button class="bo-btn bo-btn-primary" onclick="submitOnboardingIntake('${r.id || ''}')">${isRejected ? 'Re-submit' : (existing ? 'Update Submission' : 'Submit to Onboarding')}</button>
+      <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('onboarding-packet')">Cancel</button>
+    </div>
+    <div id="oi-msg" style="font-size:13px;"></div>`;
 
   // Initialize signature canvas
   setTimeout(() => {
     csiSigInit('oi-sig-canvas', r.signature_data || '');
   }, 50);
 }
+
+// Locked, read-only view of the intake form for the agent after submission.
+// Shows what they sent + a "Request Edit" button.
+async function _renderIntakeLockedView(el, intake){
+  // Generate signed URLs for photo previews
+  const photoUrls = {};
+  for(const [field, key] of [['id_front','id_front_path'], ['id_back','id_back_path'], ['badge','badge_photo_path']]){
+    if(intake[key]){
+      const { data } = await sb.storage.from('onboarding-docs').createSignedUrl(intake[key], 3600);
+      photoUrls[field] = data?.signedUrl || null;
+    }
+  }
+  const statusInfo = (() => {
+    if(intake.status === 'sent') return { color:'#00FF88', icon:'✓', title:'Sent to Reliant', body:'Your information has been sent to Reliant Energy. You\'re all set on this form.' };
+    if(intake.status === 'reviewed') return { color:'#00C6FF', icon:'👁', title:'Reviewed by Onboarding', body:'Onboarding has reviewed your submission and is preparing it to send to Reliant.' };
+    return { color:'#00FF88', icon:'✓', title:'Submitted ✓', body:'Onboarding has been notified and will review your submission shortly. You\'ll get a notification when it\'s sent to Reliant.' };
+  })();
+
+  el.innerHTML = `
+    <button class="bo-back-btn show-on-mobile" onclick="boShowAdmin('onboarding-packet')">← Back to Packet</button>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:18px;">
+      <div>
+        <div style="font-size:11px;color:#FF6B00;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:6px;">Reliant Energy · Onboarding Intake</div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:38px;color:#fff;line-height:1;">📝 Intake Form</h1>
+      </div>
+      <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('onboarding-packet')" style="padding:7px 14px;font-size:12px;">← Back</button>
+    </div>
+
+    <!-- Big status banner -->
+    <div class="bo-card" style="margin-bottom:14px;background:linear-gradient(135deg, ${statusInfo.color}18, ${statusInfo.color}05);border:1px solid ${statusInfo.color}55;">
+      <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+        <div style="width:54px;height:54px;border-radius:50%;background:${statusInfo.color}22;display:flex;align-items:center;justify-content:center;font-size:30px;color:${statusInfo.color};flex-shrink:0;">${statusInfo.icon}</div>
+        <div style="flex:1;min-width:200px;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:${statusInfo.color};letter-spacing:1.5px;line-height:1;">${statusInfo.title}</div>
+          <div style="font-size:13px;color:rgba(255,255,255,0.7);margin-top:6px;line-height:1.55;">${statusInfo.body}</div>
+        </div>
+      </div>
+      <div style="font-size:11.5px;color:rgba(255,255,255,0.45);margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.06);">
+        Submitted: ${intake.submitted_at ? new Date(intake.submitted_at).toLocaleString() : '—'}
+        ${intake.sent_to_reliant_at ? '· Sent: ' + new Date(intake.sent_to_reliant_at).toLocaleString() : ''}
+      </div>
+    </div>
+
+    ${intake.status !== 'sent' ? `
+      <div class="bo-card" style="margin-bottom:14px;background:rgba(255,200,0,0.04);border:1px solid rgba(255,200,0,0.2);">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+          <div style="flex:1;min-width:200px;">
+            <div style="font-size:13px;color:#FFC800;font-weight:600;margin-bottom:4px;">Need to fix something?</div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.6);line-height:1.55;">If you spotted a typo or need to update something, request an edit. Onboarding will unlock the form so you can re-submit.</div>
+          </div>
+          <button class="bo-btn bo-btn-primary" style="padding:8px 16px;font-size:12.5px;" onclick="requestIntakeEdit('${intake.id}')">📝 Request Edit</button>
+        </div>
+      </div>
+    ` : ''}
+
+    <!-- Read-only summary of what was submitted -->
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">👤 Identity (submitted)</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 18px;font-size:13.5px;line-height:1.6;">
+        ${[
+          ['Full Name', `${intake.first_name} ${intake.middle_name || ''} ${intake.last_name}`.replace(/\s+/g,' ').trim()],
+          ['Phone', intake.phone],
+          ['DOB', intake.dob],
+          ['SSN', 'XXX-XX-' + (intake.ssn || '').slice(-4)],
+          ['State', intake.state],
+          ['Program', intake.program]
+        ].map(([k,v]) => `
+          <div><span style="color:rgba(255,255,255,0.5);font-size:11px;letter-spacing:1px;font-weight:700;">${escapeHtml(k)}</span><div style="color:#fff;">${escapeHtml(v || '—')}</div></div>
+        `).join('')}
+      </div>
+    </div>
+
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">🏠 Address (submitted)</div>
+      <div style="font-size:13.5px;color:#fff;line-height:1.6;">
+        ${escapeHtml(intake.street_address || '')}${intake.street_address_2 ? '<br/>' + escapeHtml(intake.street_address_2) : ''}<br/>
+        ${escapeHtml(intake.city || '')}, ${escapeHtml(intake.state_province || '')} ${escapeHtml(intake.postal_code || '')}
+      </div>
+    </div>
+
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">📷 Photos (submitted)</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(160px, 1fr));gap:10px;">
+        ${[['id_front','ID Front'],['id_back','ID Back'],['badge','Badge']].map(([key,label]) => `
+          <div style="background:rgba(0,0,0,0.3);border-radius:8px;overflow:hidden;">
+            ${photoUrls[key] ? `<img src="${photoUrls[key]}" style="width:100%;height:130px;object-fit:cover;display:block;cursor:pointer;" onclick="window.open('${photoUrls[key]}','_blank')"/>` : '<div style="height:130px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.3);font-size:12px;">No photo</div>'}
+            <div style="padding:6px 10px;font-size:11px;color:rgba(255,255,255,0.6);">${escapeHtml(label)}</div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+
+    ${intake.signature_data ? `
+      <div class="bo-card" style="margin-bottom:14px;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">✍️ Your Signature</div>
+        <img src="${intake.signature_data}" style="max-width:300px;background:#fff;padding:6px;border-radius:6px;"/>
+      </div>
+    ` : ''}`;
+}
+
+async function requestIntakeEdit(intakeId){
+  const reason = prompt('What would you like to change? (This message goes to Onboarding):');
+  if(!reason || !reason.trim()) return;
+
+  // Notify owner + onboarding department
+  const { data: intake } = await sb.from('onboarding_intake').select('first_name, last_name').eq('id', intakeId).maybeSingle();
+  const candidateName = intake ? (intake.first_name + ' ' + intake.last_name) : 'agent';
+  const { data: recipients } = await sb.from('profiles')
+    .select('id, email')
+    .or('role.eq.owner,has_master_center_access.eq.true')
+    .eq('active', true);
+  for(const p of (recipients || [])){
+    try {
+      await notifyUser(p.id, {
+        type: 'generic',
+        title: '📝 Edit requested: ' + candidateName,
+        body: 'Reason: ' + reason
+      });
+      await sendEmailViaFunction('announcement', p.email, {
+        title: '📝 Onboarding edit request from ' + candidateName,
+        body: candidateName + ' is asking to edit their Reliant Intake form.\n\nReason:\n' + reason + '\n\nTo unlock the form for re-submission, go to Team admin → click their name → 📋 View Onboarding → use "Reject & ask to resubmit" with this reason.',
+        posted_by: 'Circle Solutions Onboarding'
+      });
+    } catch(_){}
+  }
+  alert('✓ Edit request sent to Onboarding. They\'ll review and either fix it directly OR unlock the form so you can re-submit.');
+}
+
+window.requestIntakeEdit = requestIntakeEdit;
 
 // ─── ACH BANKING FORM ──────────────────────────────────────────────
 async function renderOnboardingAchForm(el){
@@ -10732,7 +10863,8 @@ async function onNotificationClick(notifId){
       renderSidebar();
       renderMainContent();
     } else if(n.link_view === 'onboarding-pending'){
-      boShowAdmin('onboarding-pending');
+      // Legacy view removed in Phase 3.5 — redirect to Team admin (new onboarding lives there)
+      boShowAdmin('agents');
     } else if(n.link_view === 'applications'){
       boShowAdmin('applications');
     } else {
