@@ -2641,6 +2641,13 @@ function renderMainContent(){
   if(activeAdminView === 'onboarding-packet'){ renderOnboardingPacket(el); return; }
   if(activeAdminView === 'onboarding-intake-form'){ renderOnboardingIntakeForm(el); return; }
   if(activeAdminView === 'onboarding-ach-form'){ renderOnboardingAchForm(el); return; }
+  if(activeAdminView === 'onboarding-contract'){ renderOnboardingContractStep(el); return; }
+  // Consent forms route by suffix: 'onboarding-consent-<form_type>'
+  if(activeAdminView && activeAdminView.startsWith('onboarding-consent-')){
+    const consentType = activeAdminView.replace('onboarding-consent-', '');
+    renderOnboardingConsentForm(el, consentType);
+    return;
+  }
   if(activeAdminView === 'onboarding-profile'){ renderOnboardingProfile(el); return; }
   if(activeAdminView === 'reliant-email-settings'){ renderReliantEmailSettings(el); return; }
   if(activeAdminView === 'inventory'){ renderInventory(el); return; }
@@ -7628,9 +7635,21 @@ window.openTimePicker = openTimePicker;
 // - Reliant email config (renderReliantEmailSettings)
 // ═══════════════════════════════════════════════════════════════════════
 
+// Sequential onboarding steps for Reliant Energy contractors.
+// MUST be done in this order — step 2 is locked until step 1 is signed, etc.
+//
+// Each entry: { id, label, icon, description, view, kind }
+//   kind = 'contract' (handled by the existing contract_assignments system),
+//          'reliant_intake' (Phase 3.5 form),
+//          'consent' (Phase 3.7 generic consent — uses consent_signatures table),
+//          'ach' (Phase 3.5 banking form, internal only)
 const ONBOARDING_FORMS = [
-  { id: 'reliant_intake', label: 'Reliant Intake', icon: '📝', description: 'Identity, address, photo IDs. Goes to Reliant.', view: 'onboarding-intake-form', goesToReliant: true },
-  { id: 'ach_banking',   label: 'Direct Deposit', icon: '🏦', description: 'Banking info for payroll. Internal only.',         view: 'onboarding-ach-form', goesToReliant: false }
+  { id: 'agent_contract',    label: 'Field Sales Agent Contract', icon: '📜', description: 'Independent contractor agreement with CSI. Must be signed first.', view: 'onboarding-contract',     kind: 'contract' },
+  { id: 'reliant_intake',    label: 'CSI Personal Upload',         icon: '📝', description: 'Identity, address, photo IDs. Goes to Reliant.',                       view: 'onboarding-intake-form',  kind: 'reliant_intake' },
+  { id: 'nrg_release',       label: 'NRG Release Form',            icon: '📋', description: 'Authorize CSI to share background/drug results with Reliant/NRG.',     view: 'onboarding-consent-nrg_release',       kind: 'consent', consentType: 'nrg_release' },
+  { id: 'background_consent',label: 'Background Check Consent',    icon: '🔍', description: 'Authorize CSI to run a background check.',                              view: 'onboarding-consent-background_consent', kind: 'consent', consentType: 'background_consent' },
+  { id: 'drug_consent',      label: 'Drug Test Consent',           icon: '🧪', description: 'Authorize CSI to drug test you as a condition of engagement.',         view: 'onboarding-consent-drug_consent',       kind: 'consent', consentType: 'drug_consent' },
+  { id: 'ach_banking',       label: 'Direct Deposit',              icon: '🏦', description: 'Banking info for payroll. Internal only — never sent to Reliant.',     view: 'onboarding-ach-form',     kind: 'ach' }
 ];
 
 // Helper: load all form-status rows for a user, return as { form_id: row }
@@ -7639,6 +7658,63 @@ async function _loadFormStatuses(userId){
   const map = {};
   (data || []).forEach(r => { map[r.form_type] = r; });
   return map;
+}
+
+// Helper: load completion status for ALL onboarding steps (sequential).
+// Returns a map keyed by step id with { complete, locked, status, sourceRow }.
+// Sequential rule: step N is locked until step N-1 is complete.
+async function _loadStepStatuses(userId){
+  // 1. Form-status rows (covers reliant_intake + ach_banking)
+  const statuses = await _loadFormStatuses(userId);
+
+  // 2. Contract assignment status — completed when status='signed'
+  let contractRow = null;
+  try {
+    const { data: contracts } = await sb.from('contract_assignments')
+      .select('id, status, assigned_at, signed_at, template_snapshot')
+      .eq('user_id', userId)
+      .order('assigned_at', { ascending: false });
+    // Find the FSA-style contract — flag templates that are auto-assign for retail
+    // Use ANY signed contract assigned for the agent as completion.
+    contractRow = (contracts || []).find(c => c.status === 'signed') || (contracts || [])[0] || null;
+  } catch(_){}
+
+  // 3. Consent signatures — one row per (user, form_type)
+  let consents = {};
+  try {
+    const { data } = await sb.from('consent_signatures')
+      .select('id, form_type, status, signed_at')
+      .eq('user_id', userId);
+    (data || []).forEach(c => { consents[c.form_type] = c; });
+  } catch(_){}
+
+  // Build result for each step in ONBOARDING_FORMS
+  const result = {};
+  let priorComplete = true;
+  for(const step of ONBOARDING_FORMS){
+    let complete = false;
+    let sourceRow = null;
+    if(step.kind === 'contract'){
+      complete = contractRow && contractRow.status === 'signed';
+      sourceRow = contractRow;
+    } else if(step.kind === 'consent'){
+      const c = consents[step.consentType];
+      complete = c && c.status === 'submitted';
+      sourceRow = c;
+    } else {
+      // reliant_intake / ach_banking — use form_status table
+      const s = statuses[step.id];
+      complete = s && (s.status === 'submitted' || s.status === 'approved');
+      sourceRow = s;
+    }
+    result[step.id] = {
+      complete,
+      locked: !priorComplete,  // gated by previous step
+      sourceRow
+    };
+    if(!complete) priorComplete = false;  // anything after this is locked
+  }
+  return result;
 }
 
 // Helper: upsert a form status when an agent submits a form
@@ -7654,21 +7730,21 @@ async function _markFormSubmitted(userId, formType, sourceRecordId){
 
 // ─── AGENT'S ONBOARDING PACKET DASHBOARD ─────────────────────────────
 async function renderOnboardingPacket(el){
-  // Agent sees their own checklist. Owner/admin/onboarding wouldn't normally see
-  // this (the conditional hides the nav item for them) but we don't block it.
-  const statuses = await _loadFormStatuses(currentProfile.id);
+  // SEQUENTIAL flow: each step locked until the previous is complete.
+  // _loadStepStatuses returns { stepId: { complete, locked, sourceRow } }
+  const stepStatuses = await _loadStepStatuses(currentProfile.id);
   const total = ONBOARDING_FORMS.length;
-  const done = ONBOARDING_FORMS.filter(f => {
-    const s = statuses[f.id];
-    return s && (s.status === 'submitted' || s.status === 'approved');
-  }).length;
+  const done = ONBOARDING_FORMS.filter(f => stepStatuses[f.id]?.complete).length;
   const pct = Math.round((done / total) * 100);
+
+  // Find the FIRST locked, NOT-complete step — that's the active "next up" step
+  const activeStep = ONBOARDING_FORMS.find(f => !stepStatuses[f.id]?.complete);
 
   el.innerHTML = `
     <div style="margin-bottom:24px;">
       <div style="font-size:11px;color:#00C6FF;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:6px;">Welcome aboard 👋</div>
       <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;line-height:1;">📋 Your Onboarding Packet</h1>
-      <p style="font-size:14px;color:rgba(255,255,255,0.55);margin-top:8px;line-height:1.55;max-width:600px;">Complete every form below to finish your onboarding. Your manager and the office team will see your progress as you go.</p>
+      <p style="font-size:14px;color:rgba(255,255,255,0.55);margin-top:8px;line-height:1.55;max-width:600px;">Complete each step IN ORDER. The next step unlocks once the previous one is signed/submitted. Your manager and the office team see your progress as you go.</p>
     </div>
 
     <div class="bo-card" style="margin-bottom:18px;">
@@ -7681,29 +7757,38 @@ async function renderOnboardingPacket(el){
       </div>
     </div>
 
-    ${ONBOARDING_FORMS.map(f => {
-      const s = statuses[f.id];
-      const isDone = s && (s.status === 'submitted' || s.status === 'approved');
-      const isApproved = s && s.status === 'approved';
-      const isRejected = s && s.status === 'rejected';
+    ${ONBOARDING_FORMS.map((f, idx) => {
+      const status = stepStatuses[f.id] || { complete:false, locked:true, sourceRow:null };
+      const isComplete = status.complete;
+      const isLocked = status.locked;
+      const isActive = !isComplete && !isLocked;  // the one they should be doing right now
+      const stepNum = idx + 1;
+      // Visual color
+      const borderColor = isComplete ? 'rgba(0,255,136,0.35)' : isActive ? 'rgba(255,107,0,0.5)' : 'rgba(255,255,255,0.06)';
+      const bgGradient = isComplete ? 'linear-gradient(135deg,rgba(0,255,136,0.04),rgba(0,255,136,0))' : isActive ? 'linear-gradient(135deg,rgba(255,107,0,0.06),rgba(255,107,0,0))' : 'rgba(255,255,255,0.02)';
+      const opacity = isLocked ? '0.5' : '1';
+      const stepBadgeColor = isComplete ? '#00FF88' : isActive ? '#FF6B00' : 'rgba(255,255,255,0.4)';
       return `
-        <div class="bo-card" style="margin-bottom:10px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
-          <div style="font-size:38px;flex-shrink:0;">${f.icon}</div>
+        <div class="bo-card" style="margin-bottom:10px;display:flex;align-items:center;gap:14px;flex-wrap:wrap;border:1px solid ${borderColor};background:${bgGradient};opacity:${opacity};${isActive ? 'box-shadow:0 0 0 1px rgba(255,107,0,0.3),0 4px 16px rgba(255,107,0,0.1);' : ''}">
+          <div style="display:flex;align-items:center;gap:14px;flex-shrink:0;">
+            <div style="width:32px;height:32px;border-radius:50%;background:${stepBadgeColor}22;color:${stepBadgeColor};display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;border:2px solid ${stepBadgeColor};">${isComplete ? '✓' : stepNum}</div>
+            <div style="font-size:38px;">${f.icon}</div>
+          </div>
           <div style="flex:1;min-width:200px;">
             <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#fff;letter-spacing:1px;line-height:1.1;">
               ${escapeHtml(f.label)}
-              ${isApproved ? '<span style="display:inline-block;margin-left:8px;color:#00FF88;font-size:18px;">✓</span>' : isDone ? '<span style="display:inline-block;margin-left:8px;background:rgba(0,255,136,0.15);color:#00FF88;font-size:11px;font-weight:700;letter-spacing:1px;padding:3px 10px;border-radius:50px;">✓ SUBMITTED</span>' : ''}
+              ${isComplete ? '<span style="display:inline-block;margin-left:8px;background:rgba(0,255,136,0.15);color:#00FF88;font-size:11px;font-weight:700;letter-spacing:1px;padding:3px 10px;border-radius:50px;">✓ COMPLETE</span>' : isActive ? '<span style="display:inline-block;margin-left:8px;background:rgba(255,107,0,0.15);color:#FF6B00;font-size:11px;font-weight:700;letter-spacing:1px;padding:3px 10px;border-radius:50px;">⏰ NEXT UP</span>' : isLocked ? '<span style="display:inline-block;margin-left:8px;color:rgba(255,255,255,0.35);font-size:11px;font-weight:700;letter-spacing:1px;">🔒 LOCKED</span>' : ''}
             </div>
             <div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-top:3px;">${escapeHtml(f.description)}</div>
-            ${isRejected && s?.notes ? `<div style="font-size:12px;color:#F87171;margin-top:5px;">Rejected: ${escapeHtml(s.notes)} — please re-submit.</div>` : ''}
+            ${isLocked ? `<div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;font-style:italic;">Complete step ${stepNum - 1} first to unlock.</div>` : ''}
           </div>
           <div style="flex-shrink:0;">
-            ${isApproved ? `
-              <button class="bo-btn bo-btn-ghost" style="padding:8px 14px;font-size:12px;" onclick="boShowAdmin('${f.view}')">View Submission</button>
-            ` : isDone ? `
-              <button class="bo-btn bo-btn-ghost" style="padding:8px 14px;font-size:12px;" onclick="boShowAdmin('${f.view}')">View Status</button>
+            ${isComplete ? `
+              <button class="bo-btn bo-btn-ghost" style="padding:8px 14px;font-size:12px;" onclick="boShowAdmin('${f.view}')">View</button>
+            ` : isActive ? `
+              <button class="bo-btn bo-btn-primary" style="padding:8px 16px;font-size:12.5px;" onclick="boShowAdmin('${f.view}')">Start →</button>
             ` : `
-              <button class="bo-btn bo-btn-primary" style="padding:8px 16px;font-size:12.5px;" onclick="boShowAdmin('${f.view}')">${isRejected ? 'Re-submit' : 'Start →'}</button>
+              <button class="bo-btn bo-btn-ghost" style="padding:8px 14px;font-size:12px;opacity:0.4;cursor:not-allowed;" disabled>🔒 Locked</button>
             `}
           </div>
         </div>`;
@@ -7712,7 +7797,7 @@ async function renderOnboardingPacket(el){
     ${done === total ? `
       <div class="bo-card" style="margin-top:14px;background:linear-gradient(135deg,rgba(0,255,136,0.1),rgba(0,198,255,0.05));border:1px solid rgba(0,255,136,0.3);text-align:center;padding:24px;">
         <div style="font-size:48px;margin-bottom:6px;">🎉</div>
-        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;">All forms complete!</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;">All steps complete!</div>
         <div style="font-size:13px;color:rgba(255,255,255,0.7);margin-top:6px;">Your manager and the office team have been notified. They'll review and finalize your onboarding shortly.</div>
       </div>
     ` : ''}`;
@@ -7950,6 +8035,469 @@ async function requestIntakeEdit(intakeId){
 }
 
 window.requestIntakeEdit = requestIntakeEdit;
+
+// ═══════════════════════════════════════════════════════════════════════
+// STEP 1: CONTRACT (uses the existing Contract Builder + signing system)
+// ═══════════════════════════════════════════════════════════════════════
+// This step delegates to the existing contract_assignments / signing UI.
+// We just need to surface the agent's pending contract here as Step 1
+// of the onboarding flow.
+async function renderOnboardingContractStep(el){
+  // Find the agent's most recent contract assignment
+  let assignments = [];
+  try {
+    const { data } = await sb.from('contract_assignments')
+      .select('id, status, assigned_at, signed_at, template_snapshot, template_id')
+      .eq('user_id', currentProfile.id)
+      .order('assigned_at', { ascending: false });
+    assignments = data || [];
+  } catch(e){ console.warn('Contract fetch failed:', e); }
+
+  const pending = assignments.find(a => a.status === 'pending');
+  const signed = assignments.find(a => a.status === 'signed');
+
+  el.innerHTML = `
+    <button class="bo-back-btn show-on-mobile" onclick="boShowAdmin('onboarding-packet')">← Back to Packet</button>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:18px;">
+      <div>
+        <div style="font-size:11px;color:#FF6B00;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:6px;">Step 1 · Independent Contractor Agreement</div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:38px;color:#fff;line-height:1;">📜 Field Sales Agent Contract</h1>
+        <p style="font-size:13px;color:rgba(255,255,255,0.55);margin-top:6px;max-width:560px;line-height:1.55;">Read and sign your independent contractor agreement with Circle Solutions Inc. This must be signed before any other onboarding step.</p>
+      </div>
+      <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('onboarding-packet')" style="padding:7px 14px;font-size:12px;">← Back</button>
+    </div>
+
+    ${signed ? `
+      <div class="bo-card" style="background:linear-gradient(135deg,rgba(0,255,136,0.08),rgba(0,255,136,0));border:1px solid rgba(0,255,136,0.3);">
+        <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+          <div style="width:54px;height:54px;border-radius:50%;background:rgba(0,255,136,0.15);display:flex;align-items:center;justify-content:center;font-size:30px;color:#00FF88;flex-shrink:0;">✓</div>
+          <div style="flex:1;min-width:200px;">
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#00FF88;letter-spacing:1px;">Contract Signed</div>
+            <div style="font-size:13px;color:rgba(255,255,255,0.7);margin-top:4px;">${escapeHtml(signed.template_snapshot?.title || 'Field Sales Agent Agreement')} · Signed ${new Date(signed.signed_at).toLocaleString()}</div>
+          </div>
+          <button class="bo-btn bo-btn-ghost" style="padding:8px 14px;font-size:12px;" onclick="viewSignedContract('${signed.id}')">👁 View</button>
+        </div>
+      </div>
+    ` : pending ? `
+      <div class="bo-card" style="background:rgba(255,107,0,0.04);border:1px solid rgba(255,107,0,0.3);">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;margin-bottom:6px;">${escapeHtml(pending.template_snapshot?.title || 'Field Sales Agent Agreement')}</div>
+        <div style="font-size:13px;color:rgba(255,255,255,0.7);margin-bottom:14px;">Click below to read the full agreement and sign electronically.</div>
+        <button class="bo-btn bo-btn-primary" style="padding:12px 20px;font-size:14px;" onclick="openContractSigningFlow('${pending.id}')">📄 Read &amp; Sign Contract →</button>
+      </div>
+    ` : `
+      <div class="bo-card" style="background:rgba(248,113,113,0.06);border:1px solid rgba(248,113,113,0.3);">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#F87171;letter-spacing:1px;margin-bottom:8px;">No contract assigned yet</div>
+        <div style="font-size:13px;color:rgba(255,255,255,0.7);line-height:1.55;">Your contract has not been assigned. Contact <a href="mailto:onboarding@circlesolutionsinc.com" style="color:#00C6FF;">onboarding@circlesolutionsinc.com</a> so they can send it to you.</div>
+      </div>
+    `}`;
+}
+
+// Helper: open the existing contract signing modal/page for a given assignment.
+// Tries common existing function names; falls back to the My Contracts view.
+function openContractSigningFlow(assignmentId){
+  if(typeof openContractToSign === 'function') return openContractToSign(assignmentId);
+  if(typeof openSigningModal === 'function') return openSigningModal(assignmentId);
+  if(typeof signContract === 'function') return signContract(assignmentId);
+  // Fallback — go to My Contracts
+  boShowAdmin('my-contracts');
+}
+window.renderOnboardingContractStep = renderOnboardingContractStep;
+window.openContractSigningFlow = openContractSigningFlow;
+
+// ═══════════════════════════════════════════════════════════════════════
+// STEPS 3-5: GENERIC CONSENT FORMS (NRG Release / Background / Drug Test)
+// ═══════════════════════════════════════════════════════════════════════
+// One render function handles all 3 consent types — they differ only in
+// title, disclosure body, and which fields are needed.
+
+const CONSENT_FORM_CONFIG = {
+  nrg_release: {
+    label: 'NRG Release Form',
+    icon: '📋',
+    headline: 'Authorization to Release Background & Drug Test Results',
+    description: 'You authorize Circle Solutions Inc. to share your background investigation and drug test results with NRG Energy and Reliant Energy for the purpose of evaluating your assignment.',
+    fields: ['phone', 'email'],  // minimal — most data already exists
+    disclosureMd: `I, **{{NAME}}**, hereby authorize Circle Solutions Inc. ("CSI") to share with NRG Energy, Inc. and its subsidiary businesses (collectively, "NRG") the results and related information regarding all background investigations and reports and drug tests that CSI has procured regarding me.
+
+The purpose of this authorization is so that management employees of CSI and NRG may evaluate my eligibility for assignment by CSI to NRG.
+
+By signing below, I agree that this is my electronic signature and that it is the legally binding equivalent to my handwritten signature. Whenever I execute an electronic signature, it has the same validity and meaning as my handwritten signature. I will not, at any time in the future, refuse the meaning of my electronic signature or claim that my electronic signature is not legally binding.`,
+    confirmCheckbox: 'I agree that this is my electronic signature and that it is the legally binding equivalent to my handwritten signature.',
+  },
+  background_consent: {
+    label: 'Background Check Consent',
+    icon: '🔍',
+    headline: 'Background Check Authorization & Consent',
+    description: 'You authorize Circle Solutions Inc. to obtain a background check (criminal history, driving record, employment verification, etc.) as part of your contractor engagement.',
+    fields: ['dob', 'ssn', 'drivers_license', 'street_address', 'city', 'state_province', 'postal_code', 'phone', 'email'],
+    disclosureMd: `**DISCLOSURE**
+
+Circle Solutions Inc. may obtain information about you for contractor engagement purposes from a third-party consumer reporting agency. This may include criminal history, credit history (if applicable), driving record, and employment / education verification.
+
+**AUTHORIZATION**
+
+I, **{{NAME}}**, authorize Circle Solutions Inc. to conduct a background check as part of the contractor engagement process and ongoing engagement, as permitted by law.
+
+I understand my rights under the Fair Credit Reporting Act (FCRA).
+
+By signing below, I acknowledge that I am engaged by CSI as an independent contractor (not as an employee), and I consent to the background check described above.`,
+    confirmCheckbox: 'I have read and understand the disclosure above, and I authorize this background check.',
+  },
+  drug_consent: {
+    label: 'Drug Test Consent',
+    icon: '🧪',
+    headline: 'Drug Test Consent & Authorization',
+    description: 'You consent to drug and/or alcohol testing as a condition of contractor engagement with Circle Solutions Inc.',
+    fields: ['dob', 'phone', 'email'],
+    disclosureMd: `**DISCLOSURE**
+
+Circle Solutions Inc. requires drug testing as a condition of contractor engagement. Testing may include pre-engagement, random, post-incident, or reasonable-suspicion testing.
+
+**AUTHORIZATION**
+
+I, **{{NAME}}**, hereby consent to submit to drug and/or alcohol testing and authorize the release of results to Circle Solutions Inc. I understand that refusal may result in disqualification or termination of contractor engagement.
+
+I certify that I have read and understand this consent form.`,
+    confirmCheckbox: 'I certify that I have read and understand this consent form, and I agree to the testing described above.',
+  },
+};
+
+async function renderOnboardingConsentForm(el, consentType){
+  const cfg = CONSENT_FORM_CONFIG[consentType];
+  if(!cfg){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Unknown consent form type: ' + escapeHtml(consentType) + '</div>';
+    return;
+  }
+
+  // Check if previous step is complete (sequential gate enforcement at the form level too)
+  const stepStatuses = await _loadStepStatuses(currentProfile.id);
+  const myStepIndex = ONBOARDING_FORMS.findIndex(f => f.consentType === consentType);
+  if(myStepIndex > 0){
+    const prevStep = ONBOARDING_FORMS[myStepIndex - 1];
+    if(!stepStatuses[prevStep.id]?.complete){
+      el.innerHTML = `
+        <button class="bo-back-btn show-on-mobile" onclick="boShowAdmin('onboarding-packet')">← Back to Packet</button>
+        <div class="bo-card" style="background:rgba(255,200,0,0.05);border:1px solid rgba(255,200,0,0.3);text-align:center;padding:30px;">
+          <div style="font-size:42px;margin-bottom:10px;">🔒</div>
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#FFC800;letter-spacing:1px;margin-bottom:6px;">This step is locked</div>
+          <div style="font-size:13px;color:rgba(255,255,255,0.7);max-width:420px;margin:0 auto 14px;line-height:1.55;">Complete <strong>${escapeHtml(prevStep.label)}</strong> first before you can sign this form.</div>
+          <button class="bo-btn bo-btn-primary" onclick="boShowAdmin('onboarding-packet')">← Go Back to Packet</button>
+        </div>`;
+      return;
+    }
+  }
+
+  // Load existing signature (if any) so we show a locked view
+  let existing = null;
+  try {
+    const { data } = await sb.from('consent_signatures')
+      .select('*')
+      .eq('user_id', currentProfile.id)
+      .eq('form_type', consentType)
+      .maybeSingle();
+    existing = data;
+  } catch(_){}
+
+  if(existing && existing.status === 'submitted'){
+    return _renderConsentLockedView(el, cfg, existing, consentType);
+  }
+
+  // Pull pre-fill data from Reliant Intake (if it exists)
+  let prefill = {};
+  try {
+    const { data: intake } = await sb.from('onboarding_intake')
+      .select('*')
+      .eq('user_id', currentProfile.id)
+      .maybeSingle();
+    if(intake){
+      const fullName = (intake.first_name + ' ' + (intake.middle_name ? intake.middle_name + ' ' : '') + intake.last_name).trim();
+      prefill = {
+        full_legal_name: fullName,
+        dob: intake.dob || '',
+        ssn: intake.ssn || '',
+        street_address: intake.street_address || '',
+        city: intake.city || '',
+        state_province: intake.state_province || '',
+        postal_code: intake.postal_code || '',
+        phone: intake.phone || '',
+        email: currentProfile.email || ''
+      };
+    }
+  } catch(_){}
+  // Always default email from current profile
+  if(!prefill.email) prefill.email = currentProfile.email || '';
+  if(!prefill.full_legal_name) prefill.full_legal_name = currentProfile.full_name || '';
+
+  // Render the form
+  el.innerHTML = `
+    <button class="bo-back-btn show-on-mobile" onclick="boShowAdmin('onboarding-packet')">← Back to Packet</button>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:18px;">
+      <div>
+        <div style="font-size:11px;color:#FF6B00;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:6px;">Step ${myStepIndex + 1} · ${escapeHtml(cfg.label)}</div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:34px;color:#fff;line-height:1.1;">${cfg.icon} ${escapeHtml(cfg.headline)}</h1>
+        <p style="font-size:13px;color:rgba(255,255,255,0.55);margin-top:6px;max-width:600px;line-height:1.55;">${escapeHtml(cfg.description)}</p>
+      </div>
+      <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('onboarding-packet')" style="padding:7px 14px;font-size:12px;">← Back</button>
+    </div>
+
+    <!-- Disclosure / authorization text -->
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">📄 Authorization Text</div>
+      <div id="cs-disclosure" style="font-size:13.5px;color:rgba(255,255,255,0.85);line-height:1.7;background:rgba(0,0,0,0.18);padding:18px 20px;border-radius:8px;border:1px solid rgba(255,255,255,0.06);">${_renderDisclosureMarkdown(cfg.disclosureMd, prefill.full_legal_name)}</div>
+    </div>
+
+    <!-- Identity fields -->
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">👤 Your Information</div>
+      <div class="form-group">
+        <label class="form-label">Full Legal Name *</label>
+        <input id="cs-name" class="form-input" value="${escapeHtml(prefill.full_legal_name || '')}" oninput="_csOnNameChange()" placeholder="Type your full legal name as it appears on your ID"/>
+        <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">This must match the name on your government ID. Any change re-renders the authorization above.</div>
+      </div>
+      ${cfg.fields.includes('dob') ? `
+        <div class="form-group"><label class="form-label">Date of Birth *</label><input id="cs-dob" class="form-input" type="date" value="${prefill.dob || ''}"/></div>
+      ` : ''}
+      ${cfg.fields.includes('ssn') ? `
+        <div class="form-group"><label class="form-label">Social Security Number *</label><input id="cs-ssn" class="form-input" inputmode="numeric" maxlength="11" value="${escapeHtml(prefill.ssn || '')}" placeholder="XXX-XX-XXXX"/><div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">🔒 Encrypted at rest. Only Owner + Onboarding can view.</div></div>
+      ` : ''}
+      ${cfg.fields.includes('drivers_license') ? `
+        <div style="display:grid;grid-template-columns:2fr 1fr;gap:12px;">
+          <div class="form-group"><label class="form-label">Driver's License #</label><input id="cs-dl" class="form-input" value=""/></div>
+          <div class="form-group"><label class="form-label">DL State</label><input id="cs-dl-state" class="form-input" maxlength="2" style="text-transform:uppercase;" value="TX"/></div>
+        </div>
+      ` : ''}
+      ${cfg.fields.includes('street_address') ? `
+        <div class="form-group"><label class="form-label">Street Address *</label><input id="cs-street" class="form-input" value="${escapeHtml(prefill.street_address || '')}"/></div>
+        <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:12px;">
+          <div class="form-group"><label class="form-label">City *</label><input id="cs-city" class="form-input" value="${escapeHtml(prefill.city || '')}"/></div>
+          <div class="form-group"><label class="form-label">State *</label><input id="cs-state" class="form-input" maxlength="2" style="text-transform:uppercase;" value="${escapeHtml(prefill.state_province || 'TX')}"/></div>
+          <div class="form-group"><label class="form-label">Postal *</label><input id="cs-postal" class="form-input" maxlength="10" value="${escapeHtml(prefill.postal_code || '')}"/></div>
+        </div>
+      ` : ''}
+      ${cfg.fields.includes('phone') ? `
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+          <div class="form-group"><label class="form-label">Phone *</label><input id="cs-phone" class="form-input" type="tel" value="${escapeHtml(prefill.phone || '')}"/></div>
+          <div class="form-group"><label class="form-label">Email *</label><input id="cs-email" class="form-input" type="email" value="${escapeHtml(prefill.email || '')}"/></div>
+        </div>
+      ` : ''}
+    </div>
+
+    <!-- Signature -->
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">✍️ Electronic Signature</div>
+
+      <!-- Confirm checkbox -->
+      <div class="form-group">
+        <label style="display:flex;gap:10px;align-items:flex-start;cursor:pointer;background:rgba(255,255,255,0.03);padding:12px 14px;border-radius:8px;border:1px solid rgba(255,255,255,0.08);">
+          <input type="checkbox" id="cs-confirm" style="width:18px;height:18px;margin-top:2px;accent-color:#FF6B00;flex-shrink:0;"/>
+          <span style="font-size:13px;color:rgba(255,255,255,0.85);line-height:1.55;">${escapeHtml(cfg.confirmCheckbox)}</span>
+        </label>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Sign Below *</label>
+        <div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-bottom:8px;">Use your finger (mobile) or mouse to draw your signature. By signing, you acknowledge this signature is legally binding.</div>
+        <canvas id="cs-sig-canvas" width="600" height="150" style="background:#fff;border-radius:8px;width:100%;max-width:600px;cursor:crosshair;touch-action:none;"></canvas>
+        <div style="display:flex;gap:8px;margin-top:8px;">
+          <button class="bo-btn bo-btn-ghost" style="padding:6px 12px;font-size:11.5px;" onclick="csiSigClear('cs-sig-canvas')">Clear</button>
+        </div>
+        <input type="hidden" id="cs-sig-data" value=""/>
+      </div>
+
+      <!-- Audit trail preview -->
+      <div style="font-size:11px;color:rgba(255,255,255,0.45);margin-top:14px;padding:10px 12px;background:rgba(0,0,0,0.2);border-radius:6px;border:1px solid rgba(255,255,255,0.05);line-height:1.6;">
+        <strong style="color:rgba(255,255,255,0.6);">Audit trail captured on submit:</strong> Your typed name, drawn signature, IP address, browser, and timestamp will be recorded with this signed document.
+      </div>
+    </div>
+
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+      <button class="bo-btn bo-btn-primary" onclick="submitConsent('${consentType}')">Sign &amp; Submit</button>
+      <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('onboarding-packet')">Cancel</button>
+    </div>
+    <div id="cs-msg" style="font-size:13px;"></div>`;
+
+  setTimeout(() => csiSigInit('cs-sig-canvas', ''), 50);
+}
+
+// Render the disclosure markdown — bold + paragraph breaks + name substitution
+function _renderDisclosureMarkdown(md, name){
+  const safe = escapeHtml(md || '').replace(/\{\{NAME\}\}/g, '<strong style="color:#FFC800;">' + escapeHtml(name || '_______________') + '</strong>');
+  // Bold via **text**
+  return safe.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>').replace(/\n\n/g, '<br/><br/>').replace(/\n/g, ' ');
+}
+
+// Live update of the {{NAME}} placeholder in the disclosure as the user types
+function _csOnNameChange(){
+  const name = document.getElementById('cs-name')?.value || '';
+  const disc = document.getElementById('cs-disclosure');
+  // Find which consent we're rendering by checking activeAdminView
+  const view = activeAdminView || '';
+  if(!view.startsWith('onboarding-consent-')) return;
+  const consentType = view.replace('onboarding-consent-', '');
+  const cfg = CONSENT_FORM_CONFIG[consentType];
+  if(!cfg || !disc) return;
+  disc.innerHTML = _renderDisclosureMarkdown(cfg.disclosureMd, name);
+}
+
+// Locked view after submission
+async function _renderConsentLockedView(el, cfg, consent, consentType){
+  // Generate a signed URL for the PDF if it exists
+  let pdfUrl = null;
+  if(consent.pdf_path){
+    try {
+      const { data } = await sb.storage.from('onboarding-docs').createSignedUrl(consent.pdf_path, 3600);
+      pdfUrl = data?.signedUrl || null;
+    } catch(_){}
+  }
+
+  el.innerHTML = `
+    <button class="bo-back-btn show-on-mobile" onclick="boShowAdmin('onboarding-packet')">← Back to Packet</button>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:18px;">
+      <div>
+        <div style="font-size:11px;color:#00FF88;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:6px;">Signed</div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:34px;color:#fff;line-height:1.1;">${cfg.icon} ${escapeHtml(cfg.label)}</h1>
+      </div>
+      <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('onboarding-packet')" style="padding:7px 14px;font-size:12px;">← Back</button>
+    </div>
+
+    <div class="bo-card" style="background:linear-gradient(135deg,rgba(0,255,136,0.08),rgba(0,255,136,0));border:1px solid rgba(0,255,136,0.3);">
+      <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+        <div style="width:54px;height:54px;border-radius:50%;background:rgba(0,255,136,0.15);display:flex;align-items:center;justify-content:center;font-size:30px;color:#00FF88;flex-shrink:0;">✓</div>
+        <div style="flex:1;min-width:200px;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#00FF88;letter-spacing:1px;">Signed &amp; Submitted</div>
+          <div style="font-size:13px;color:rgba(255,255,255,0.7);margin-top:4px;">Signed ${new Date(consent.signed_at).toLocaleString()}${consent.ip_address ? ' from IP ' + escapeHtml(consent.ip_address) : ''}</div>
+        </div>
+        ${pdfUrl ? `<a href="${pdfUrl}" target="_blank" class="bo-btn bo-btn-primary" style="padding:8px 14px;font-size:12px;">📥 Download PDF</a>` : ''}
+      </div>
+    </div>
+
+    <div class="bo-card" style="margin-top:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:14px;color:#FFC800;letter-spacing:1.5px;margin-bottom:10px;">SIGNED ON RECORD</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 18px;font-size:13px;line-height:1.6;">
+        <div><span style="color:rgba(255,255,255,0.5);font-size:11px;letter-spacing:1px;font-weight:700;">FULL LEGAL NAME</span><div style="color:#fff;">${escapeHtml(consent.full_legal_name)}</div></div>
+        ${consent.date_of_birth ? `<div><span style="color:rgba(255,255,255,0.5);font-size:11px;letter-spacing:1px;font-weight:700;">DATE OF BIRTH</span><div style="color:#fff;">${consent.date_of_birth}</div></div>` : ''}
+        ${consent.phone ? `<div><span style="color:rgba(255,255,255,0.5);font-size:11px;letter-spacing:1px;font-weight:700;">PHONE</span><div style="color:#fff;">${escapeHtml(consent.phone)}</div></div>` : ''}
+        ${consent.email ? `<div><span style="color:rgba(255,255,255,0.5);font-size:11px;letter-spacing:1px;font-weight:700;">EMAIL</span><div style="color:#fff;">${escapeHtml(consent.email)}</div></div>` : ''}
+      </div>
+      ${consent.signature_data ? `
+        <div style="margin-top:14px;">
+          <div style="font-size:11px;color:rgba(255,255,255,0.5);letter-spacing:1.5px;font-weight:700;margin-bottom:6px;">YOUR SIGNATURE</div>
+          <img src="${consent.signature_data}" style="max-width:280px;background:#fff;padding:6px;border-radius:6px;"/>
+        </div>
+      ` : ''}
+    </div>`;
+}
+
+// Submit a consent form: capture audit trail, save to DB, generate PDF.
+async function submitConsent(consentType){
+  const cfg = CONSENT_FORM_CONFIG[consentType];
+  const msg = document.getElementById('cs-msg');
+  if(!cfg){ msg.innerHTML = '<span style="color:#F87171;">Bad form type.</span>'; return; }
+
+  // Validate
+  const get = id => document.getElementById(id)?.value?.trim() || '';
+  const fullName = get('cs-name');
+  if(!fullName){ msg.innerHTML = '<span style="color:#F87171;">Type your full legal name.</span>'; return; }
+
+  if(!document.getElementById('cs-confirm')?.checked){
+    msg.innerHTML = '<span style="color:#F87171;">Check the agreement box before signing.</span>';
+    return;
+  }
+
+  const sigData = document.getElementById('cs-sig-data')?.value || '';
+  if(!sigData){ msg.innerHTML = '<span style="color:#F87171;">Draw your signature in the box above.</span>'; return; }
+
+  // Validate fields
+  let dob = null, ssn = null, dl = null, dlState = null;
+  let street = null, city = null, state = null, postal = null;
+  let phone = null, email = null;
+
+  if(cfg.fields.includes('dob')){
+    dob = get('cs-dob');
+    if(!dob){ msg.innerHTML = '<span style="color:#F87171;">Date of birth required.</span>'; return; }
+  }
+  if(cfg.fields.includes('ssn')){
+    const raw = get('cs-ssn').replace(/\D/g, '');
+    if(raw.length !== 9){ msg.innerHTML = '<span style="color:#F87171;">SSN must be 9 digits.</span>'; return; }
+    ssn = raw.substring(0,3) + '-' + raw.substring(3,5) + '-' + raw.substring(5);
+  }
+  if(cfg.fields.includes('drivers_license')){
+    dl = get('cs-dl') || null;
+    dlState = (get('cs-dl-state') || '').toUpperCase() || null;
+  }
+  if(cfg.fields.includes('street_address')){
+    street = get('cs-street');
+    city = get('cs-city');
+    state = (get('cs-state') || '').toUpperCase();
+    postal = get('cs-postal');
+    if(!street || !city || !state || !postal){
+      msg.innerHTML = '<span style="color:#F87171;">Address fields required.</span>'; return;
+    }
+  }
+  if(cfg.fields.includes('phone')){
+    phone = get('cs-phone');
+    email = get('cs-email');
+    if(!phone || !email){ msg.innerHTML = '<span style="color:#F87171;">Phone and email required.</span>'; return; }
+  }
+
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">🌐 Capturing audit trail…</span>';
+
+  // Capture IP from a free public service
+  let ipAddress = null;
+  try {
+    const r = await fetch('https://api.ipify.org?format=json');
+    const j = await r.json();
+    ipAddress = j.ip || null;
+  } catch(_){ /* no big deal — DB row still saves */ }
+
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">💾 Saving signature…</span>';
+
+  const payload = {
+    user_id: currentProfile.id,
+    form_type: consentType,
+    full_legal_name: fullName,
+    date_of_birth: dob,
+    ssn: ssn,
+    drivers_license: dl,
+    drivers_license_state: dlState,
+    street_address: street,
+    city: city,
+    state_province: state,
+    postal_code: postal,
+    phone: phone,
+    email: email,
+    signature_data: sigData,
+    signed_at: new Date().toISOString(),
+    ip_address: ipAddress,
+    user_agent: navigator.userAgent.substring(0, 500),
+    status: 'submitted'
+  };
+
+  // Upsert (re-signing replaces existing row)
+  const { data: row, error } = await sb.from('consent_signatures')
+    .upsert(payload, { onConflict: 'user_id,form_type' })
+    .select()
+    .single();
+  if(error){ msg.innerHTML = '<span style="color:#F87171;">Save failed: ' + error.message + '</span>'; return; }
+
+  // Generate PDF via edge function
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">📄 Generating signed PDF…</span>';
+  try {
+    await sb.functions.invoke('generate-consent-pdf', { body: { consentId: row.id } });
+  } catch(e){ console.warn('PDF gen failed (signature still saved):', e); }
+
+  // Notify Owner + Onboarding
+  try {
+    await _notifyOnboardingFormSubmitted(consentType, currentProfile.full_name || currentProfile.email || 'Agent');
+  } catch(_){}
+
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Signed and submitted! Returning to packet…</span>';
+  setTimeout(() => boShowAdmin('onboarding-packet'), 1100);
+}
+
+window.renderOnboardingConsentForm = renderOnboardingConsentForm;
+window.submitConsent = submitConsent;
+window._csOnNameChange = _csOnNameChange;
 
 // ─── ACH BANKING FORM ──────────────────────────────────────────────
 async function renderOnboardingAchForm(el){
@@ -8322,11 +8870,18 @@ async function renderOnboardingProfile(el){
 
   el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading agent onboarding…</div>';
 
-  const [{ data: agent }, { data: intake }, { data: ach }, statuses] = await Promise.all([
+  const [
+    { data: agent },
+    { data: intake },
+    { data: ach },
+    { data: consents },
+    stepStatuses
+  ] = await Promise.all([
     sb.from('profiles').select('id, full_name, email, phone, role, market_id, reports_to, created_at').eq('id', agentId).maybeSingle(),
     sb.from('onboarding_intake').select('*').eq('user_id', agentId).maybeSingle(),
     sb.from('onboarding_ach').select('*').eq('user_id', agentId).maybeSingle(),
-    _loadFormStatuses(agentId)
+    sb.from('consent_signatures').select('*').eq('user_id', agentId),
+    _loadStepStatuses(agentId)
   ]);
 
   if(!agent){ el.innerHTML = '<div class="bo-card" style="color:#F87171;">Agent not found.</div>'; return; }
@@ -8342,6 +8897,17 @@ async function renderOnboardingProfile(el){
     }
   }
 
+  // Generate signed URLs for consent PDFs
+  const consentByType = {};
+  const consentPdfUrls = {};
+  for(const c of (consents || [])){
+    consentByType[c.form_type] = c;
+    if(c.pdf_path){
+      const { data } = await sb.storage.from('onboarding-docs').createSignedUrl(c.pdf_path, 3600);
+      consentPdfUrls[c.form_type] = data?.signedUrl || null;
+    }
+  }
+
   el.innerHTML = `
     <button class="bo-back-btn show-on-mobile" onclick="boShowAdmin('agents')">← Back to Team</button>
     <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:18px;">
@@ -8353,27 +8919,54 @@ async function renderOnboardingProfile(el){
       <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('agents')" style="padding:7px 14px;font-size:12px;">← Back to Team</button>
     </div>
 
-    <!-- Status overview -->
+    <!-- Status overview using sequential step statuses (all 6 steps) -->
     <div class="bo-card" style="margin-bottom:14px;">
-      <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#FFC800;letter-spacing:1.5px;margin-bottom:10px;">📊 Form Status</div>
-      ${ONBOARDING_FORMS.map(f => {
-        const s = statuses[f.id];
-        const status = s?.status || 'pending';
-        const colors = { pending:'rgba(255,255,255,0.4)', submitted:'#FFC800', approved:'#00FF88', rejected:'#F87171' };
-        const labels = { pending:'NOT STARTED', submitted:'SUBMITTED', approved:'APPROVED', rejected:'REJECTED' };
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#FFC800;letter-spacing:1.5px;margin-bottom:10px;">📊 Onboarding Step Status</div>
+      ${ONBOARDING_FORMS.map((f, idx) => {
+        const st = stepStatuses[f.id] || {};
+        const isComplete = st.complete;
+        const isLocked = st.locked;
+        const color = isComplete ? '#00FF88' : isLocked ? 'rgba(255,255,255,0.4)' : '#FFC800';
+        const label = isComplete ? '✓ COMPLETE' : isLocked ? '🔒 LOCKED' : '⏰ AWAITING AGENT';
+        let timestamp = '—';
+        if(f.kind === 'contract' && st.sourceRow?.signed_at) timestamp = new Date(st.sourceRow.signed_at).toLocaleString();
+        else if(f.kind === 'consent' && st.sourceRow?.signed_at) timestamp = new Date(st.sourceRow.signed_at).toLocaleString();
+        else if(st.sourceRow?.completed_at) timestamp = new Date(st.sourceRow.completed_at).toLocaleString();
         return `
           <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:rgba(255,255,255,0.03);border-radius:8px;margin-bottom:6px;flex-wrap:wrap;gap:8px;">
             <div style="display:flex;align-items:center;gap:10px;">
+              <div style="width:26px;height:26px;border-radius:50%;background:${color}22;color:${color};display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;border:1px solid ${color};flex-shrink:0;">${idx + 1}</div>
               <div style="font-size:24px;">${f.icon}</div>
               <div>
                 <div style="font-size:14px;color:#fff;font-weight:600;">${escapeHtml(f.label)}</div>
-                <div style="font-size:11px;color:rgba(255,255,255,0.5);">${s?.completed_at ? new Date(s.completed_at).toLocaleString() : '—'}</div>
+                <div style="font-size:11px;color:rgba(255,255,255,0.5);">${timestamp}</div>
               </div>
             </div>
-            <div style="background:${colors[status]}22;color:${colors[status]};padding:4px 10px;border-radius:50px;font-size:10.5px;font-weight:700;letter-spacing:1px;border:1px solid ${colors[status]}55;">${labels[status]}</div>
+            <div style="background:${color}22;color:${color};padding:4px 10px;border-radius:50px;font-size:10.5px;font-weight:700;letter-spacing:1px;border:1px solid ${color}55;">${label}</div>
           </div>`;
       }).join('')}
     </div>
+
+    <!-- Signed Consent Documents (PDFs) -->
+    ${(consents || []).length > 0 ? `
+      <div class="bo-card" style="margin-bottom:14px;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#00C6FF;letter-spacing:1.5px;margin-bottom:14px;">📄 Signed Consent Documents</div>
+        <div style="display:grid;gap:8px;">
+          ${(consents || []).map(c => {
+            const formMeta = ONBOARDING_FORMS.find(f => f.consentType === c.form_type);
+            const pdfUrl = consentPdfUrls[c.form_type];
+            return `
+              <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 14px;background:rgba(0,198,255,0.04);border:1px solid rgba(0,198,255,0.18);border-radius:8px;flex-wrap:wrap;gap:8px;">
+                <div style="min-width:0;flex:1;">
+                  <div style="font-size:13.5px;color:#fff;font-weight:600;">${formMeta ? formMeta.icon + ' ' + escapeHtml(formMeta.label) : escapeHtml(c.form_type)}</div>
+                  <div style="font-size:11px;color:rgba(255,255,255,0.55);margin-top:3px;">Signed ${new Date(c.signed_at).toLocaleString()}${c.ip_address ? ' · IP ' + escapeHtml(c.ip_address) : ''}</div>
+                </div>
+                ${pdfUrl ? `<a href="${pdfUrl}" target="_blank" class="bo-btn bo-btn-ghost" style="padding:6px 12px;font-size:11.5px;">📥 Download PDF</a>` : '<span style="font-size:11px;color:rgba(255,255,255,0.4);">PDF generating…</span>'}
+              </div>`;
+          }).join('')}
+        </div>
+      </div>
+    ` : ''}
 
     <!-- Reliant Intake details -->
     ${intake ? `
