@@ -4138,9 +4138,13 @@ async function openAgentProfile(userId){
   const role = currentProfile?.role;
   const isOwner = role === 'owner';
   const isAdmin = isOwner || role === 'admin';
+  const isManager = role === 'manager' || role === 'team_lead';
   const isOnboarding = currentProfile?.has_master_center_access === true;
   const canManage = isAdmin;
-  const canViewOnboarding = isOwner || isOnboarding;
+  // Onboarding summary card: Owner + Onboarding + MMs (managers oversee their
+  // agents' onboarding progress and need visibility). The full-detail page
+  // (openAgentOnboarding) is still gated separately to Owner + Onboarding.
+  const canViewOnboarding = isOwner || isOnboarding || isManager;
 
   const el = document.getElementById('bo-content');
   el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading agent profile…</div>';
@@ -4155,6 +4159,9 @@ async function openAgentProfile(userId){
   let contracts = [];
   let intakeStatus = null; // Phase 3.5 onboarding status (only fetched if user can view)
   let achStatus = null;
+  let b2bIntakeStatus = null;  // Phase 3.12 B2B intake — separate table
+  let bgConsentStatus = null;  // Phase 3.7 background consent (used by both flows)
+  let signedContractRow = null; // Whether this agent has a SIGNED contract (any program)
   let queryErrors = [];
 
   try {
@@ -4173,17 +4180,22 @@ async function openAgentProfile(userId){
     if(!r.error) contracts = r.data || [];
   } catch(e){ /* silent */ }
 
-  // Phase 3.5: pull onboarding form-status rows for the summary card.
-  // Only fetched if current user can view onboarding (Owner + Onboarding).
+  // Phase 3.5/3.7/3.12: pull all relevant onboarding rows. Owner + Onboarding view.
+  // We fetch BOTH retail (onboarding_intake) and B2B (b2b_intake) so we can
+  // show the right summary card regardless of which program the agent is in.
   if(canViewOnboarding){
     try {
-      const [iRes, aRes] = await Promise.all([
+      const [iRes, aRes, bRes, cRes] = await Promise.all([
         sb.from('onboarding_intake').select('id, status, submitted_at, sent_to_reliant_at').eq('user_id', userId).maybeSingle(),
-        sb.from('onboarding_ach').select('id, status, submitted_at').eq('user_id', userId).maybeSingle()
+        sb.from('onboarding_ach').select('id, status, submitted_at').eq('user_id', userId).maybeSingle(),
+        sb.from('b2b_intake').select('id, status, submitted_at').eq('user_id', userId).maybeSingle(),
+        sb.from('consent_signatures').select('id, status, signed_at').eq('user_id', userId).eq('form_type', 'background_consent').maybeSingle()
       ]);
       intakeStatus = iRes?.data || null;
       achStatus = aRes?.data || null;
-    } catch(e){ /* silent */ }
+      b2bIntakeStatus = bRes?.data || null;
+      bgConsentStatus = cRes?.data || null;
+    } catch(e){ /* silent — table may not exist on older installs */ }
   }
 
   if(!agent){
@@ -4264,37 +4276,43 @@ async function openAgentProfile(userId){
 
       ${canManage ? `
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:18px;padding-top:18px;border-top:1px solid rgba(255,255,255,0.07);">
-          <button class="bo-btn bo-btn-primary" onclick="openSendPacketModal('${agent.id}')">📨 Send Onboarding Packet</button>
-          <button class="bo-btn bo-btn-primary" onclick="openSendContractToAgentModal('${agent.id}')">📄 Send Contract</button>
           ${(isOwner || currentProfile.has_master_center_access) ? `<button class="bo-btn bo-btn-primary" style="background:linear-gradient(135deg,#00C6FF,#0078D7);" onclick="openAgentOnboarding('${agent.id}')">📋 View Onboarding</button>` : ''}
+          <button class="bo-btn bo-btn-primary" onclick="openSendContractToAgentModal('${agent.id}')">📄 Send Contract</button>
           <button class="bo-btn bo-btn-ghost" onclick="openAgentModal('${agent.id}')">✏️ Edit Profile</button>
           <button class="bo-btn bo-btn-ghost" onclick="openResetPasswordModal('${agent.id}')">🔑 Manage Password</button>
           <button class="bo-btn bo-btn-ghost" onclick="emailLoginToAgent('${agent.id}')">📧 Resend Welcome</button>
           <button class="bo-btn bo-btn-ghost" onclick="copyLoginLink('${agent.id}')">🔗 Copy Login Link</button>
+          <button class="bo-btn bo-btn-ghost" style="border-color:rgba(255,200,0,0.4);color:#FFC800;" onclick="cancelPendingContractsFor('${agent.id}', '${(agent.full_name || agent.email).replace(/'/g,"\\'")}')">🚫 Cancel Pending Contracts</button>
           <button class="bo-btn bo-btn-ghost" style="border-color:rgba(198,40,40,0.4);color:#F87171;" onclick="openUrgentMessageModal('${agent.id}')">🚨 Send Urgent</button>
         </div>
       ` : ''}
     </div>
 
-    <!-- PHASE 3.5 HYBRID ONBOARDING SUMMARY (visible to Owner + Onboarding only) -->
-    ${canViewOnboarding ? `
-      <div class="bo-card" style="margin-bottom:18px;border:1px solid rgba(0,198,255,0.25);background:linear-gradient(135deg, rgba(0,198,255,0.04), rgba(0,198,255,0.0));">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
-          <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#00C6FF;letter-spacing:1.5px;">📋 RELIANT ONBOARDING</div>
-          <button class="bo-btn bo-btn-primary" style="padding:6px 14px;font-size:12px;background:linear-gradient(135deg,#00C6FF,#0078D7);" onclick="openAgentOnboarding('${agent.id}')">View Full Onboarding →</button>
-        </div>
-        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;">
-          ${(() => {
-            const intakeLabel = !intakeStatus ? { color:'rgba(255,255,255,0.4)', text:'NOT STARTED', sub:'Agent has not submitted intake yet' }
-              : intakeStatus.status === 'sent' ? { color:'#00FF88', text:'✓ SENT TO RELIANT', sub: 'Sent ' + new Date(intakeStatus.sent_to_reliant_at).toLocaleDateString() }
-              : intakeStatus.status === 'rejected' ? { color:'#F87171', text:'✗ REJECTED', sub:'Awaiting agent re-submission' }
-              : intakeStatus.status === 'reviewed' ? { color:'#00C6FF', text:'👁 REVIEWED', sub:'Ready to dispatch to Reliant' }
-              : { color:'#FFC800', text:'⏳ SUBMITTED', sub: 'Submitted ' + (intakeStatus.submitted_at ? new Date(intakeStatus.submitted_at).toLocaleDateString() : '—') };
-            const achLabel = !achStatus ? { color:'rgba(255,255,255,0.4)', text:'NOT STARTED', sub:'Agent has not submitted banking yet' }
-              : achStatus.status === 'approved' ? { color:'#00FF88', text:'✓ APPROVED', sub:'Internal use only' }
-              : achStatus.status === 'rejected' ? { color:'#F87171', text:'✗ REJECTED', sub:'Awaiting re-submission' }
-              : { color:'#FFC800', text:'⏳ SUBMITTED', sub: 'Submitted ' + (achStatus.submitted_at ? new Date(achStatus.submitted_at).toLocaleDateString() : '—') };
-            return `
+    <!-- PROGRAM-AWARE ONBOARDING SUMMARY (visible to Owner + Onboarding only) -->
+    ${canViewOnboarding ? (() => {
+      // Decide which flow this agent is on. Agents in BOTH retail and B2B see Reliant
+      // (since Reliant is the more regulated/structured flow).
+      const agentProgs = agent.programs || [];
+      const isRetail = agentProgs.includes('retail');
+      const isB2B = agentProgs.includes('b2b') && !isRetail;
+
+      if(isRetail){
+        const intakeLabel = !intakeStatus ? { color:'rgba(255,255,255,0.4)', text:'NOT STARTED', sub:'Agent has not submitted intake yet' }
+          : intakeStatus.status === 'sent' ? { color:'#00FF88', text:'✓ SENT TO RELIANT', sub: 'Sent ' + new Date(intakeStatus.sent_to_reliant_at).toLocaleDateString() }
+          : intakeStatus.status === 'rejected' ? { color:'#F87171', text:'✗ REJECTED', sub:'Awaiting agent re-submission' }
+          : intakeStatus.status === 'reviewed' ? { color:'#00C6FF', text:'👁 REVIEWED', sub:'Ready to dispatch to Reliant' }
+          : { color:'#FFC800', text:'⏳ SUBMITTED', sub: 'Submitted ' + (intakeStatus.submitted_at ? new Date(intakeStatus.submitted_at).toLocaleDateString() : '—') };
+        const achLabel = !achStatus ? { color:'rgba(255,255,255,0.4)', text:'NOT STARTED', sub:'Agent has not submitted banking yet' }
+          : achStatus.status === 'approved' ? { color:'#00FF88', text:'✓ APPROVED', sub:'Internal use only' }
+          : achStatus.status === 'rejected' ? { color:'#F87171', text:'✗ REJECTED', sub:'Awaiting re-submission' }
+          : { color:'#FFC800', text:'⏳ SUBMITTED', sub: 'Submitted ' + (achStatus.submitted_at ? new Date(achStatus.submitted_at).toLocaleDateString() : '—') };
+        return `
+          <div class="bo-card" style="margin-bottom:18px;border:1px solid rgba(0,198,255,0.25);background:linear-gradient(135deg, rgba(0,198,255,0.04), rgba(0,198,255,0.0));">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
+              <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#00C6FF;letter-spacing:1.5px;">📋 RELIANT ONBOARDING</div>
+              ${(isOwner || isOnboarding) ? `<button class="bo-btn bo-btn-primary" style="padding:6px 14px;font-size:12px;background:linear-gradient(135deg,#00C6FF,#0078D7);" onclick="openAgentOnboarding('${agent.id}')">View Full Onboarding →</button>` : ''}
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;">
               <div style="padding:12px 14px;background:rgba(0,0,0,0.2);border-radius:8px;border:1px solid ${intakeLabel.color}33;">
                 <div style="font-size:11px;color:rgba(255,255,255,0.45);letter-spacing:1.5px;font-weight:700;margin-bottom:4px;">📝 INTAKE</div>
                 <div style="font-size:12.5px;color:${intakeLabel.color};font-weight:700;letter-spacing:0.5px;">${intakeLabel.text}</div>
@@ -4304,99 +4322,108 @@ async function openAgentProfile(userId){
                 <div style="font-size:11px;color:rgba(255,255,255,0.45);letter-spacing:1.5px;font-weight:700;margin-bottom:4px;">🏦 BANKING</div>
                 <div style="font-size:12.5px;color:${achLabel.color};font-weight:700;letter-spacing:0.5px;">${achLabel.text}</div>
                 <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:3px;">${achLabel.sub}</div>
-              </div>`;
-          })()}
-        </div>
-        <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:10px;font-style:italic;">SSN, photos, and banking details are visible on the full onboarding page.</div>
-      </div>
-    ` : ''}
-
-    <!-- TWO-COLUMN LAYOUT: Onboarding | Contracts -->
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
-
-      <!-- ONBOARDING COLUMN -->
-      <div class="bo-card">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-          <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;">🎯 ONBOARDING</div>
-          ${canManage ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="openSendPacketModal('${agent.id}')">+ Send Packet</button>` : ''}
-        </div>
-        ${(packets || []).length === 0 ? `
-          <div style="color:rgba(255,255,255,0.4);font-size:13px;padding:20px;text-align:center;background:rgba(255,255,255,0.02);border-radius:8px;">No onboarding packets assigned yet.${canManage ? ' Click "+ Send Packet" above.' : ''}</div>
-        ` : `
-          ${activePackets.length > 0 ? `
-            <div style="font-size:11px;color:rgba(255,255,255,0.4);letter-spacing:1.5px;font-weight:700;margin-bottom:6px;">⏳ ACTIVE (${activePackets.length})</div>
-            ${activePackets.map(p => {
-              const snap = p.packet_snapshot || {};
-              const prog = allPrograms.find(x => x.id === snap.program_id);
-              return `
-                <div style="background:rgba(255,107,0,0.05);border:1px solid rgba(255,107,0,0.2);border-radius:8px;padding:10px 12px;margin-bottom:6px;cursor:pointer;" onclick="viewAgentOnboardingDetail('${agent.id}')">
-                  <div style="font-size:13px;font-weight:600;color:#fff;">${escapeHtml(snap.name || 'Packet')}</div>
-                  <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:2px;">${prog ? prog.icon + ' ' + prog.name : ''} · Assigned ${new Date(p.assigned_at).toLocaleDateString()} · <span style="color:#FF6B00;">${(p.status || 'in_progress').toUpperCase()}</span></div>
-                </div>`;
-            }).join('')}
-          ` : ''}
-          ${completedPackets.length > 0 ? `
-            <div style="font-size:11px;color:rgba(255,255,255,0.4);letter-spacing:1.5px;font-weight:700;margin-top:12px;margin-bottom:6px;">✓ COMPLETED (${completedPackets.length})</div>
-            ${completedPackets.map(p => {
-              const snap = p.packet_snapshot || {};
-              const prog = allPrograms.find(x => x.id === snap.program_id);
-              return `
-                <div style="background:rgba(0,255,136,0.04);border:1px solid rgba(0,255,136,0.18);border-radius:8px;padding:10px 12px;margin-bottom:6px;cursor:pointer;" onclick="viewAgentOnboardingDetail('${agent.id}')">
-                  <div style="font-size:13px;font-weight:600;color:#fff;">${escapeHtml(snap.name || 'Packet')}</div>
-                  <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:2px;">${prog ? prog.icon + ' ' + prog.name : ''} · Completed ${p.completed_at ? new Date(p.completed_at).toLocaleDateString() : '—'}</div>
-                </div>`;
-            }).join('')}
-          ` : ''}
-          ${canManage && agent.onboarding_status === 'complete' && !agent.codes_unlocked ? `
-            <div style="margin-top:12px;padding:12px;background:linear-gradient(90deg,rgba(0,198,255,0.1),rgba(0,255,136,0.06));border:1px solid rgba(0,198,255,0.3);border-radius:8px;">
-              <div style="font-size:12px;color:#00C6FF;font-weight:700;margin-bottom:6px;">⚡ READY FOR CODES</div>
-              <div style="font-size:12px;color:rgba(255,255,255,0.7);margin-bottom:8px;">This agent finished onboarding. Unlock their access to Training Calls, Meetings, and Codes.</div>
-              <button class="bo-btn bo-btn-primary" style="padding:6px 14px;font-size:12px;" onclick="unlockCodesForAgent('${agent.id}')">✓ Unlock Codes</button>
+              </div>
             </div>
-          ` : ''}
-        `}
-      </div>
+            <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:10px;font-style:italic;">SSN, photos, and banking details are visible on the full onboarding page.</div>
+          </div>`;
+      }
+      if(isB2B){
+        const isMgr = agent.role === 'manager' || agent.role === 'team_lead';
+        const intakeLabel = !b2bIntakeStatus ? { color:'rgba(255,255,255,0.4)', text:'NOT STARTED', sub:'No identity validation submitted' }
+          : b2bIntakeStatus.status === 'approved' ? { color:'#00FF88', text:'✓ APPROVED', sub:'ID validated for 1099-NEC' }
+          : b2bIntakeStatus.status === 'rejected' ? { color:'#F87171', text:'✗ REJECTED', sub:'Awaiting re-submission' }
+          : b2bIntakeStatus.status === 'reviewed' ? { color:'#00C6FF', text:'👁 REVIEWED', sub:'Ready to approve' }
+          : { color:'#FFC800', text:'⏳ SUBMITTED', sub: 'Submitted ' + (b2bIntakeStatus.submitted_at ? new Date(b2bIntakeStatus.submitted_at).toLocaleDateString() : '—') };
+        const achLabel = !achStatus ? { color:'rgba(255,255,255,0.4)', text:'NOT STARTED', sub:'No banking submitted yet' }
+          : achStatus.status === 'approved' ? { color:'#00FF88', text:'✓ APPROVED', sub:'Ready for commission payout' }
+          : achStatus.status === 'rejected' ? { color:'#F87171', text:'✗ REJECTED', sub:'Awaiting re-submission' }
+          : { color:'#FFC800', text:'⏳ SUBMITTED', sub: 'Submitted ' + (achStatus.submitted_at ? new Date(achStatus.submitted_at).toLocaleDateString() : '—') };
+        const bgLabel = !bgConsentStatus ? { color:'rgba(255,255,255,0.4)', text:'NOT STARTED', sub:'Background consent not signed' }
+          : { color:'#00FF88', text:'✓ SIGNED', sub: 'Signed ' + (bgConsentStatus.signed_at ? new Date(bgConsentStatus.signed_at).toLocaleDateString() : '—') };
+        return `
+          <div class="bo-card" style="margin-bottom:18px;border:1px solid rgba(255,107,0,0.3);background:linear-gradient(135deg, rgba(255,107,0,0.05), rgba(255,107,0,0));">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
+              <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#FF6B00;letter-spacing:1.5px;">🏢 B2B ${isMgr ? 'MANAGER' : 'AGENT'} ONBOARDING</div>
+              ${(isOwner || isOnboarding) ? `<button class="bo-btn bo-btn-primary" style="padding:6px 14px;font-size:12px;" onclick="openAgentOnboarding('${agent.id}')">View Full Onboarding →</button>` : ''}
+            </div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;">
+              <div style="padding:12px 14px;background:rgba(0,0,0,0.2);border-radius:8px;border:1px solid ${bgLabel.color}33;">
+                <div style="font-size:11px;color:rgba(255,255,255,0.45);letter-spacing:1.5px;font-weight:700;margin-bottom:4px;">🔍 BG CONSENT</div>
+                <div style="font-size:12.5px;color:${bgLabel.color};font-weight:700;letter-spacing:0.5px;">${bgLabel.text}</div>
+                <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:3px;">${bgLabel.sub}</div>
+              </div>
+              <div style="padding:12px 14px;background:rgba(0,0,0,0.2);border-radius:8px;border:1px solid ${intakeLabel.color}33;">
+                <div style="font-size:11px;color:rgba(255,255,255,0.45);letter-spacing:1.5px;font-weight:700;margin-bottom:4px;">📝 IDENTITY</div>
+                <div style="font-size:12.5px;color:${intakeLabel.color};font-weight:700;letter-spacing:0.5px;">${intakeLabel.text}</div>
+                <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:3px;">${intakeLabel.sub}</div>
+              </div>
+              <div style="padding:12px 14px;background:rgba(0,0,0,0.2);border-radius:8px;border:1px solid ${achLabel.color}33;">
+                <div style="font-size:11px;color:rgba(255,255,255,0.45);letter-spacing:1.5px;font-weight:700;margin-bottom:4px;">🏦 BANKING</div>
+                <div style="font-size:12.5px;color:${achLabel.color};font-weight:700;letter-spacing:0.5px;">${achLabel.text}</div>
+                <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:3px;">${achLabel.sub}</div>
+              </div>
+            </div>
+            <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:10px;font-style:italic;">SSN, ID photos, and banking are stored internally. Never sent to a third party.</div>
+          </div>`;
+      }
+      // Agent has neither retail nor b2b — show generic
+      return `
+        <div class="bo-card" style="margin-bottom:18px;background:rgba(255,255,255,0.02);border:1px dashed rgba(255,255,255,0.15);">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:rgba(255,255,255,0.55);letter-spacing:1.5px;">📋 ONBOARDING</div>
+          <div style="font-size:12.5px;color:rgba(255,255,255,0.5);margin-top:6px;">This agent isn't assigned to a Reliant or B2B program. Edit the profile to assign one.</div>
+        </div>`;
+    })() : ''}
 
-      <!-- CONTRACTS COLUMN -->
-      <div class="bo-card">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-          <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;">📄 CONTRACTS</div>
+    <!-- CONTRACTS (full-width — legacy ONBOARDING column removed; the new
+         program-aware summary card above + the View Onboarding button on the
+         action bar covers everything the legacy column showed.) -->
+    <div class="bo-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;">📄 CONTRACTS</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
           ${canManage ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="openSendContractToAgentModal('${agent.id}')">+ Send Contract</button>` : ''}
+          ${canManage && pendingContracts.length > 0 ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;color:#FFC800;border-color:rgba(255,200,0,0.4);" onclick="cancelPendingContractsFor('${agent.id}', '${(agent.full_name || agent.email).replace(/'/g,"\\'")}')">🚫 Cancel ${pendingContracts.length} Pending</button>` : ''}
         </div>
-        ${(contracts || []).length === 0 ? `
-          <div style="color:rgba(255,255,255,0.4);font-size:13px;padding:20px;text-align:center;background:rgba(255,255,255,0.02);border-radius:8px;">No contracts sent yet.${canManage ? ' Click "+ Send Contract" above.' : ''}</div>
-        ` : `
-          ${pendingContracts.length > 0 ? `
-            <div style="font-size:11px;color:rgba(255,255,255,0.4);letter-spacing:1.5px;font-weight:700;margin-bottom:6px;">⏳ PENDING (${pendingContracts.length})</div>
-            ${pendingContracts.map(c => {
-              const snap = c.template_snapshot || {};
-              return `
-                <div style="background:rgba(255,215,0,0.04);border:1px solid rgba(255,215,0,0.2);border-radius:8px;padding:10px 12px;margin-bottom:6px;">
-                  <div style="font-size:13px;font-weight:600;color:#fff;">${escapeHtml(snap.title || 'Contract')}</div>
-                  <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:2px;">Sent ${new Date(c.assigned_at).toLocaleDateString()} · <span style="color:#FFD700;">AWAITING SIGNATURE</span></div>
-                </div>`;
-            }).join('')}
-          ` : ''}
-          ${signedContracts.length > 0 ? `
-            <div style="font-size:11px;color:rgba(255,255,255,0.4);letter-spacing:1.5px;font-weight:700;margin-top:12px;margin-bottom:6px;">✓ SIGNED (${signedContracts.length})</div>
-            ${signedContracts.map(c => {
-              const snap = c.template_snapshot || {};
-              return `
-                <div style="background:rgba(0,255,136,0.04);border:1px solid rgba(0,255,136,0.2);border-radius:8px;padding:10px 12px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
-                  <div style="flex:1;min-width:0;">
-                    <div style="font-size:13px;font-weight:600;color:#fff;">${escapeHtml(snap.title || 'Contract')}</div>
-                    <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:2px;">Signed ${new Date(c.signed_at).toLocaleDateString()}${c.ip_address ? ' · IP ' + escapeHtml(c.ip_address) : ''}</div>
-                  </div>
-                  <div style="display:flex;gap:4px;">
-                    <button class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:11px;" onclick="viewSignedContract('${c.id}')">👁</button>
-                    <button class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:11px;" onclick="downloadSignedContract('${c.id}')">📥</button>
-                  </div>
-                </div>`;
-            }).join('')}
-          ` : ''}
-        `}
       </div>
-
+      ${(contracts || []).length === 0 ? `
+        <div style="color:rgba(255,255,255,0.4);font-size:13px;padding:20px;text-align:center;background:rgba(255,255,255,0.02);border-radius:8px;">No contracts sent yet.${canManage ? ' Click "+ Send Contract" above.' : ''}</div>
+      ` : `
+        ${pendingContracts.length > 0 ? `
+          <div style="font-size:11px;color:rgba(255,255,255,0.4);letter-spacing:1.5px;font-weight:700;margin-bottom:6px;">⏳ PENDING (${pendingContracts.length})</div>
+          ${pendingContracts.map(c => {
+            const snap = c.template_snapshot || {};
+            return `
+              <div style="background:rgba(255,215,0,0.04);border:1px solid rgba(255,215,0,0.2);border-radius:8px;padding:10px 12px;margin-bottom:6px;">
+                <div style="font-size:13px;font-weight:600;color:#fff;">${escapeHtml(snap.title || 'Contract')}</div>
+                <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:2px;">Sent ${new Date(c.assigned_at).toLocaleDateString()} · <span style="color:#FFD700;">AWAITING SIGNATURE</span></div>
+              </div>`;
+          }).join('')}
+        ` : ''}
+        ${signedContracts.length > 0 ? `
+          <div style="font-size:11px;color:rgba(255,255,255,0.4);letter-spacing:1.5px;font-weight:700;margin-top:12px;margin-bottom:6px;">✓ SIGNED (${signedContracts.length})</div>
+          ${signedContracts.map(c => {
+            const snap = c.template_snapshot || {};
+            return `
+              <div style="background:rgba(0,255,136,0.04);border:1px solid rgba(0,255,136,0.2);border-radius:8px;padding:10px 12px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+                <div style="flex:1;min-width:0;">
+                  <div style="font-size:13px;font-weight:600;color:#fff;">${escapeHtml(snap.title || 'Contract')}</div>
+                  <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:2px;">Signed ${new Date(c.signed_at).toLocaleDateString()}${c.ip_address ? ' · IP ' + escapeHtml(c.ip_address) : ''}</div>
+                </div>
+                <div style="display:flex;gap:4px;">
+                  <button class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:11px;" onclick="viewSignedContract('${c.id}')">👁</button>
+                  <button class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:11px;" onclick="downloadSignedContract('${c.id}')">📥</button>
+                </div>
+              </div>`;
+          }).join('')}
+        ` : ''}
+        ${canManage && agent.onboarding_status === 'complete' && !agent.codes_unlocked ? `
+          <div style="margin-top:12px;padding:12px;background:linear-gradient(90deg,rgba(0,198,255,0.1),rgba(0,255,136,0.06));border:1px solid rgba(0,198,255,0.3);border-radius:8px;">
+            <div style="font-size:12px;color:#00C6FF;font-weight:700;margin-bottom:6px;">⚡ READY FOR CODES</div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.7);margin-bottom:8px;">This agent finished onboarding. Unlock their access to Training Calls, Meetings, and Codes.</div>
+            <button class="bo-btn bo-btn-primary" style="padding:6px 14px;font-size:12px;" onclick="unlockCodesForAgent('${agent.id}')">✓ Unlock Codes</button>
+          </div>
+        ` : ''}
+      `}
     </div>`;
 }
 
@@ -4442,17 +4469,26 @@ window.cancelPendingContractsFor = cancelPendingContractsFor;
 // Reverse direction of openSendContractModal: pick agent first, show templates to send.
 async function openSendContractToAgentModal(userId){
   if(!['owner','admin'].includes(currentProfile.role)){ alert('Access denied'); return; }
-  const { data: agent } = await sb.from('profiles').select('full_name,email,programs').eq('id', userId).single();
+  const { data: agent } = await sb.from('profiles').select('full_name,email,programs,role').eq('id', userId).single();
   if(!agent){ alert('Agent not found'); return; }
 
+  // Filter contract templates by BOTH program AND role bucket.
+  // Without this, an owner can mistakenly send the Manager Agreement to an
+  // agent (or vice-versa) — the original cause of the wrong-contract bug.
+  const isMgr = agent.role === 'manager' || agent.role === 'team_lead';
+  const myRoleBucket = isMgr ? 'manager' : 'agent';
+
   // Find contract templates matching their programs (or with no program = any)
+  // AND matching their role bucket (or 'all' = role-agnostic templates).
   const { data: templates } = await sb.from('contract_templates_v2')
     .select('*').eq('active', true)
-    .or('program_id.is.null,program_id.in.(' + (agent.programs || []).join(',') + ')');
+    .or('program_id.is.null,program_id.in.(' + (agent.programs || []).join(',') + ')')
+    .or(`target_role.eq.${myRoleBucket},target_role.eq.all`);
 
   document.getElementById('modal-box').innerHTML = `
     <h2 style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:#fff;margin-bottom:6px;letter-spacing:1px;">📄 Send Contract</h2>
-    <div style="font-size:13px;color:rgba(255,255,255,0.55);margin-bottom:14px;">To: <strong style="color:#fff;">${escapeHtml(agent.full_name || agent.email)}</strong></div>
+    <div style="font-size:13px;color:rgba(255,255,255,0.55);margin-bottom:6px;">To: <strong style="color:#fff;">${escapeHtml(agent.full_name || agent.email)}</strong></div>
+    <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-bottom:14px;">Showing only <strong style="color:${isMgr ? '#00C6FF' : '#00FF88'};">${isMgr ? 'MANAGER' : 'AGENT'}</strong> contracts (+ general/all-roles) for their programs. Wrong-role contracts are filtered out.</div>
 
     ${(templates || []).length === 0 ? `
       <div style="background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.3);border-radius:10px;padding:14px;color:#F87171;font-size:13px;line-height:1.55;">
@@ -4696,7 +4732,7 @@ function renderAgentModalUI(existing, editId, availablePrograms, isOwner, isAdmi
   const isSelf = isEdit && e.id === currentProfile.id;
   const programCheckboxes = availablePrograms.map(p => `
     <label class="prog-checkbox-row">
-      <input type="checkbox" value="${p.id}" ${(e.programs || []).includes(p.id) ? 'checked' : ''} onchange="refreshMarketDropdown()"/>
+      <input type="checkbox" class="ag-prog-cb" value="${p.id}" ${(e.programs || []).includes(p.id) ? 'checked' : ''} onchange="refreshMarketDropdown(); refreshReportsToDropdown();"/>
       <span style="font-size:18px;">${p.icon}</span>
       <span style="flex:1;">${p.name}</span>
     </label>`).join('');
@@ -4856,7 +4892,10 @@ function renderAgentModalUI(existing, editId, availablePrograms, isOwner, isAdmi
 function refreshMarketDropdown(){
   const sel = document.getElementById('ag-market');
   if(!sel) return;
-  const checkedPrograms = Array.from(document.querySelectorAll('#modal-box input[type=checkbox]:checked')).map(c => c.value);
+  // CRITICAL: scope to .ag-prog-cb only — querying every checkbox in the modal
+  // pollutes the programs list with values from SMS-opt-in / Tool Builder /
+  // can_host_meetings checkboxes (whose `value` is the HTML default "on").
+  const checkedPrograms = Array.from(document.querySelectorAll('#modal-box input.ag-prog-cb:checked')).map(c => c.value);
   const relevantMarkets = checkedPrograms.length === 0
     ? allMarkets
     : allMarkets.filter(m => checkedPrograms.includes(m.program_id));
@@ -4872,7 +4911,8 @@ function refreshReportsToDropdown(){
   if(!sel) return;
   const roleSel = document.getElementById('ag-role');
   const role = roleSel ? roleSel.value : 'agent';
-  const checkedPrograms = Array.from(document.querySelectorAll('#modal-box input[type=checkbox]:checked')).map(c => c.value);
+  // Same scoping fix as refreshMarketDropdown — read program checkboxes only.
+  const checkedPrograms = Array.from(document.querySelectorAll('#modal-box input.ag-prog-cb:checked')).map(c => c.value);
   const leaders = window._agentModalLeaders || [];
   // Agents report to team_leads or managers; team_leads report to managers; managers can optionally report to admin/owner
   const validReportRoles = {
@@ -4892,7 +4932,7 @@ async function saveAgent(editId){
   const email = document.getElementById('ag-email').value.trim().toLowerCase();
   const phone = document.getElementById('ag-phone').value.trim();
   const role = document.getElementById('ag-role').value;
-  const programs = Array.from(document.querySelectorAll('#modal-box input[type=checkbox]:checked')).map(c => c.value);
+  const programs = Array.from(document.querySelectorAll('#modal-box input.ag-prog-cb:checked')).map(c => c.value);
   const market_id = document.getElementById('ag-market').value || null;
   const reports_to = document.getElementById('ag-reports-to').value || null;
   const phone_carrier = document.getElementById('ag-carrier').value || null;
@@ -7821,12 +7861,19 @@ const ONBOARDING_FLOWS = {
     { id: 'agent_contract',     label: 'Field Sales Agent Contract', icon: '📜', description: 'Independent contractor agreement with CSI. Unlocks after BG passes.', view: 'onboarding-contract',                   kind: 'contract',       requiresStage: 'bg_passed' },
     { id: 'ach_banking',        label: 'Direct Deposit',             icon: '🏦', description: 'Banking info for payroll. Internal only — never sent to Reliant.', view: 'onboarding-ach-form',                   kind: 'ach',            requiresStage: 'bg_passed' }
   ],
-  // B2B COMMERCIAL ENERGY (b2b) — lighter flow, pure 1099 commission
-  b2b: [
-    { id: 'agent_contract',     label: 'B2B Sales Agreement',         icon: '📜', description: 'Sign your Independent Sales Agent or Manager Agreement (auto-assigned by role).', view: 'onboarding-contract',                   kind: 'contract' },
-    { id: 'background_consent', label: 'CSI Background Consent',      icon: '🔍', description: 'Authorize CSI to run a background check on you.',                                view: 'onboarding-consent-background_consent', kind: 'consent', consentType: 'background_consent' },
-    { id: 'b2b_intake',         label: 'Identity & Validation',       icon: '📝', description: 'Government ID, headshot, last-4 SSN, mailing address (for 1099-NEC).',          view: 'onboarding-b2b-intake',                  kind: 'b2b_intake' },
-    { id: 'ach_banking',        label: 'Direct Deposit',              icon: '🏦', description: 'Banking info for commission payouts.',                                          view: 'onboarding-ach-form',                    kind: 'ach' }
+  // B2B AGENT — Independent Sales Agent (1099 commission)
+  b2b_agent: [
+    { id: 'agent_contract',     label: 'Independent Sales Agent Agreement', icon: '📜', description: 'Master 1099 commission agreement. Auto-assigned to B2B agents.',    view: 'onboarding-contract',                   kind: 'contract' },
+    { id: 'background_consent', label: 'CSI Background Consent',            icon: '🔍', description: 'Authorize CSI to run a background check on you.',                   view: 'onboarding-consent-background_consent', kind: 'consent', consentType: 'background_consent' },
+    { id: 'b2b_intake',         label: 'Identity & Validation',             icon: '📝', description: 'Government ID, headshot, last-4 SSN, mailing address (for 1099-NEC).', view: 'onboarding-b2b-intake',                  kind: 'b2b_intake' },
+    { id: 'ach_banking',        label: 'Direct Deposit',                    icon: '🏦', description: 'Banking info for commission payouts.',                              view: 'onboarding-ach-form',                    kind: 'ach' }
+  ],
+  // B2B MANAGER — Independent Sales Manager (oversees agents + earns overrides)
+  b2b_manager: [
+    { id: 'agent_contract',     label: 'Independent Sales Manager Agreement', icon: '📜', description: 'Master Manager Agreement. Includes override structure + agent oversight clauses. Auto-assigned to B2B managers.', view: 'onboarding-contract',                   kind: 'contract' },
+    { id: 'background_consent', label: 'CSI Background Consent',              icon: '🔍', description: 'Authorize CSI to run a background check on you.',                                                              view: 'onboarding-consent-background_consent', kind: 'consent', consentType: 'background_consent' },
+    { id: 'b2b_intake',         label: 'Identity & Validation',               icon: '📝', description: 'Government ID, headshot, last-4 SSN, mailing address (for 1099-NEC).',                                            view: 'onboarding-b2b-intake',                  kind: 'b2b_intake' },
+    { id: 'ach_banking',        label: 'Direct Deposit',                      icon: '🏦', description: 'Banking info for commission + override payouts.',                                                                view: 'onboarding-ach-form',                    kind: 'ach' }
   ],
   // FALLBACK — agent in no specific program
   default: [
@@ -7835,13 +7882,18 @@ const ONBOARDING_FLOWS = {
   ]
 };
 
-// Pick the right flow for the current user based on their programs.
-// Reliant takes priority over B2B if they have both (since Reliant is more
-// regulated and the screening flow is required).
-function _resolveOnboardingFlow(userPrograms){
+// Pick the right flow for the current user based on programs + role.
+// Reliant takes priority over B2B if they're in both (Reliant is more regulated).
+// For B2B, the role determines whether they see the Agent or Manager variant.
+function _resolveOnboardingFlow(userPrograms, userRole){
   const programs = userPrograms || [];
+  const role = userRole || 'agent';
   if(programs.includes('retail')) return ONBOARDING_FLOWS.retail;
-  if(programs.includes('b2b'))    return ONBOARDING_FLOWS.b2b;
+  if(programs.includes('b2b')){
+    return (role === 'manager' || role === 'team_lead')
+      ? ONBOARDING_FLOWS.b2b_manager
+      : ONBOARDING_FLOWS.b2b_agent;
+  }
   return ONBOARDING_FLOWS.default;
 }
 
@@ -7851,7 +7903,7 @@ function _resolveOnboardingFlow(userPrograms){
 // Defaults to Reliant flow until currentProfile is loaded.
 let ONBOARDING_FORMS = ONBOARDING_FLOWS.retail;
 function _refreshOnboardingForms(){
-  ONBOARDING_FORMS = _resolveOnboardingFlow(currentProfile?.programs);
+  ONBOARDING_FORMS = _resolveOnboardingFlow(currentProfile?.programs, currentProfile?.role);
 }
 window._refreshOnboardingForms = _refreshOnboardingForms;
 
@@ -7883,12 +7935,14 @@ async function _loadStepStatuses(userId){
   // target agent's programs.
   let agentPrograms = [];
   let agentStage = 'coded';
+  let agentRole = 'agent';
   try {
-    const { data: prof } = await sb.from('profiles').select('programs, candidate_stage').eq('id', userId).maybeSingle();
+    const { data: prof } = await sb.from('profiles').select('programs, candidate_stage, role').eq('id', userId).maybeSingle();
     agentPrograms = prof?.programs || [];
     agentStage = prof?.candidate_stage || 'coded';
+    agentRole = prof?.role || 'agent';
   } catch(_){}
-  const flow = _resolveOnboardingFlow(agentPrograms);
+  const flow = _resolveOnboardingFlow(agentPrograms, agentRole);
 
   // 1. Form-status rows (covers reliant_intake + ach_banking)
   const statuses = await _loadFormStatuses(userId);
@@ -13548,37 +13602,33 @@ async function emailLoginToAgent(userId){
   const { data: profile } = await sb.from('profiles').select('*').eq('id', userId).single();
   if(!profile){ alert('User not found'); return; }
 
-  // We don't have their password (bcrypt hashed). Two options:
-  // (1) Send password reset link (user sets their own)
-  // (2) Prompt owner for a new temporary password to include in the email
-  const choice = confirm('How do you want to send their login?\n\nOK = Generate a temp password and email it (recommended)\nCancel = Send a password reset link instead (they set their own)');
+  // Honest flow: we send a password-reset link via Supabase auth + a friendly
+  // welcome email pointing to that link. The agent sets their own password.
+  // (The previous version generated a fake temp password it never actually
+  // used — confused both us and the agent.)
+  const ok = confirm(
+    'Send a fresh welcome email to ' + (profile.full_name || profile.email) + '?\n\n' +
+    'They will receive:\n' +
+    '  • A password-reset link they can click to set their own password\n' +
+    '  • A welcome email with the back office URL\n\n' +
+    'No temporary password is generated. They pick their own.'
+  );
+  if(!ok) return;
 
-  if(choice){
-    // Generate a secure temporary password and update it
-    const tempPassword = generateTempPassword();
-    // We can't directly set another user's password from client without admin API.
-    // Workaround: use Supabase's resetPasswordForEmail which sends them a link.
-    // For now, we'll send a welcome email containing a reset link.
-    try {
-      await sb.auth.resetPasswordForEmail(profile.email, {
-        redirectTo: window.location.origin
-      });
-      await sendEmailViaFunction('welcome', profile.email, {
-        full_name: profile.full_name,
-        email: profile.email,
-        password: 'Check your inbox — we also sent you a password-setup link. Click it to choose your own password.',
-        role_label: roleLabel(profile.role),
-        programs: (profile.programs || []).map(pid => (allPrograms.find(p=>p.id===pid)||{}).name).filter(Boolean)
-      });
-      alert('✓ Welcome email sent to ' + profile.email + '. They\'ll receive a link to set their password.');
-    } catch(e){ alert('Error: ' + (e.message || 'email send failed')); }
-  } else {
-    try {
-      await sb.auth.resetPasswordForEmail(profile.email, {
-        redirectTo: window.location.origin
-      });
-      alert('✓ Password reset link sent to ' + profile.email);
-    } catch(e){ alert('Error: ' + (e.message || 'email send failed')); }
+  try {
+    await sb.auth.resetPasswordForEmail(profile.email, {
+      redirectTo: window.location.origin
+    });
+    await sendEmailViaFunction('welcome', profile.email, {
+      full_name: profile.full_name,
+      email: profile.email,
+      password: 'Click the password-setup link we just sent in a separate email to choose your own password.',
+      role_label: roleLabel(profile.role),
+      programs: (profile.programs || []).map(pid => (allPrograms.find(p=>p.id===pid)||{}).name).filter(Boolean)
+    });
+    alert('✓ Sent. ' + profile.email + ' will receive a password-setup link + welcome email.');
+  } catch(e){
+    alert('Error: ' + (e.message || 'email send failed'));
   }
 }
 
