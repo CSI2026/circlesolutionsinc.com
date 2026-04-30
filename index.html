@@ -1976,6 +1976,14 @@ footer{
           <option>Fiber Internet (D2D)</option>
           <option>Open to any / Let's discuss</option>
         </select>
+        <div style="margin-top:16px;">
+          <label class="form-label">Preferred Manager (optional)</label>
+          <select id="app-preferred-manager" class="form-input" style="background:#1a1a1a;">
+            <option value="">— No preference —</option>
+            <!-- Populated dynamically by loadPublicManagerList() on page show -->
+          </select>
+          <div style="font-size:12px;color:rgba(255,255,255,0.4);margin-top:6px;line-height:1.5;">If a Circle Solutions manager referred you or you have someone you want to work under, pick them here. They'll be notified about your application.</div>
+        </div>
       </div>
 
       <!-- AVAILABILITY -->
@@ -2129,7 +2137,48 @@ function showPage(id){
     mainNav.style.display = (id === 'backoffice') ? 'none' : '';
   }
   window.scrollTo({top:0, behavior:'instant'});
+
+  // When the apply page is shown, populate the Preferred Manager dropdown
+  // with the live list of active managers from Supabase.
+  if(id === 'apply-page'){
+    loadPublicManagerList();
+  }
 }
+
+// Load the list of active managers into the public Preferred Manager dropdown.
+// This runs on the public site (no auth) so it relies on the Supabase anon key
+// having SELECT access to a small subset of the profiles table.
+async function loadPublicManagerList(){
+  const sel = document.getElementById('app-preferred-manager');
+  if(!sel) return;
+  // Avoid double-loading
+  if(sel.dataset.loaded === 'true') return;
+  try {
+    const { data: managers } = await sb.from('profiles')
+      .select('id, full_name, email, programs')
+      .eq('role', 'manager')
+      .eq('active', true)
+      .order('full_name');
+    if(!managers || managers.length === 0) return;
+    // Add manager options in alphabetical order
+    for(const m of managers){
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      // Show name + program(s) so applicants know who covers what
+      const programLabels = (m.programs || []).map(pid => {
+        const p = (typeof allPrograms !== 'undefined' ? allPrograms : []).find(x => x.id === pid);
+        return p ? p.name : pid;
+      }).filter(Boolean).join(' · ');
+      opt.textContent = (m.full_name || m.email) + (programLabels ? ' — ' + programLabels : '');
+      sel.appendChild(opt);
+    }
+    sel.dataset.loaded = 'true';
+  } catch(e){
+    // Silently fail — dropdown stays at "No preference"
+    console.warn('Manager list load failed:', e);
+  }
+}
+window.loadPublicManagerList = loadPublicManagerList;
 
 function toggleSubNav(btn){
   const links = btn.parentElement.querySelector('.subpage-nav-links');
@@ -2200,6 +2249,10 @@ async function loadCurrentProfile(){
     const { data: grant } = await sb.from('master_center_access').select('user_id').eq('user_id', user.id).maybeSingle();
     currentProfile.has_master_center_access = !!grant;
   }
+
+  // Resolve which onboarding flow this user sees (Reliant / B2B / default)
+  // based on their assigned programs.
+  if(typeof _refreshOnboardingForms === 'function') _refreshOnboardingForms();
 
   // Load programs once
   if(allPrograms.length === 0){
@@ -2339,7 +2392,7 @@ function renderSidebar(){
     adminNavItems.push({ id:'owner-panel', label:'👑 Owner Panel' });
     adminNavItems.push({ id:'markets', label:'📍 Markets' });
     adminNavItems.push({ id:'stores', label:'🏪 Stores' });
-    adminNavItems.push({ id:'contract-builder', label:'📄 Contract Builder' });
+    adminNavItems.push({ id:'contract-hub', label:'📄 Contract Hub' });
     adminNavItems.push({ id:'forms-admin', label:'📋 All Forms' });
     adminNavItems.push({ id:'applications', label:'📝 Applications' });
     adminNavItems.push({ id:'programs-admin', label:'🎯 Programs' });
@@ -2352,6 +2405,7 @@ function renderSidebar(){
   } else if(currentProfile.has_master_center_access){
     // Onboarding department (non-owner, non-admin) gets stores access too
     adminNavItems.push({ id:'stores', label:'🏪 Stores' });
+    adminNavItems.push({ id:'contract-hub', label:'📄 Contract Hub' });
   }
   if(isOwner || isAdmin || currentProfile.has_master_center_access){
     adminNavItems.push({ id:'recruiting', label:'🎤 Recruiting' });
@@ -2638,6 +2692,7 @@ function renderMainContent(){
   if(activeAdminView === 'global-docs'){ renderGlobalDocuments(el); return; }
   if(activeAdminView === 'contract-builder'){ renderContractBuilder(el); return; }
   if(activeAdminView === 'contract-templates'){ renderContractBuilder(el); return; }  // backward compat
+  if(activeAdminView === 'contract-hub'){ renderContractHub(el); return; }
   if(activeAdminView === 'forms-admin'){ renderFormsAdmin(el); return; }
   if(activeAdminView === 'my-forms'){ renderMyForms(el); return; }
   if(activeAdminView === 'my-contracts'){ renderMyContracts(el); return; }
@@ -2651,6 +2706,7 @@ function renderMainContent(){
   if(activeAdminView === 'interview-response'){ renderInterviewResponseForm(el); return; }
   if(activeAdminView === 'onboarding-packet'){ renderOnboardingPacket(el); return; }
   if(activeAdminView === 'onboarding-intake-form'){ renderOnboardingIntakeForm(el); return; }
+  if(activeAdminView === 'onboarding-b2b-intake'){ renderOnboardingB2bIntake(el); return; }
   if(activeAdminView === 'onboarding-ach-form'){ renderOnboardingAchForm(el); return; }
   if(activeAdminView === 'onboarding-contract'){ renderOnboardingContractStep(el); return; }
   // Consent forms route by suffix: 'onboarding-consent-<form_type>'
@@ -7701,14 +7757,63 @@ window.openTimePicker = openTimePicker;
 // `requiresStage` controls when a step is permitted:
 //   - undefined  → always available subject to sequential order
 //   - 'bg_passed' → step is hidden/locked until candidate is bg_passed or beyond
-const ONBOARDING_FORMS = [
-  { id: 'background_consent', label: 'Background Check Consent',  icon: '🔍', description: 'Authorize CSI to run a background check on you.',                   view: 'onboarding-consent-background_consent', kind: 'consent', consentType: 'background_consent' },
-  { id: 'drug_consent',       label: 'Drug Test Consent',          icon: '🧪', description: 'Authorize CSI to drug test you as a condition of engagement.',     view: 'onboarding-consent-drug_consent',       kind: 'consent', consentType: 'drug_consent' },
-  { id: 'nrg_release',        label: 'NRG Release Form',           icon: '📋', description: 'Authorize CSI to share screening results with NRG/Reliant.',      view: 'onboarding-consent-nrg_release',        kind: 'consent', consentType: 'nrg_release' },
-  { id: 'reliant_intake',     label: 'CSI Personal Upload',        icon: '📝', description: 'Identity, address, photo IDs, headshot. Goes to Reliant.',         view: 'onboarding-intake-form',                kind: 'reliant_intake' },
-  { id: 'agent_contract',     label: 'Field Sales Agent Contract', icon: '📜', description: 'Independent contractor agreement with CSI. Unlocks after BG passes.', view: 'onboarding-contract',                   kind: 'contract',       requiresStage: 'bg_passed' },
-  { id: 'ach_banking',        label: 'Direct Deposit',             icon: '🏦', description: 'Banking info for payroll. Internal only — never sent to Reliant.', view: 'onboarding-ach-form',                   kind: 'ach',            requiresStage: 'bg_passed' }
-];
+// ─── ONBOARDING FLOW DEFINITIONS (per program) ─────────────────────
+// The agent's onboarding packet shows a different sequence of steps
+// depending on which program(s) they are assigned to. This keeps Reliant
+// agents from seeing B2B-only forms and vice versa.
+//
+// PROGRAM PRIORITY: an agent can be in multiple programs. The flow shown
+// is determined by:
+//   1. If they have 'retail' (Reliant) → Reliant flow (background-screened, NRG release, etc.)
+//   2. Else if they have 'b2b'         → B2B flow (lighter — contract + bg consent + ID + ACH)
+//   3. Else                            → Default flow (just contract + ACH)
+//
+// Each flow is a sequential list of steps. Step N is locked until step N-1
+// is complete. Some steps additionally have requiresStage gating.
+
+const ONBOARDING_FLOWS = {
+  // RELIANT ENERGY (retail) — full pre-screening + Reliant intake + post-pass contract
+  retail: [
+    { id: 'background_consent', label: 'Background Check Consent',  icon: '🔍', description: 'Authorize CSI to run a background check on you.',                   view: 'onboarding-consent-background_consent', kind: 'consent', consentType: 'background_consent' },
+    { id: 'drug_consent',       label: 'Drug Test Consent',          icon: '🧪', description: 'Authorize CSI to drug test you as a condition of engagement.',     view: 'onboarding-consent-drug_consent',       kind: 'consent', consentType: 'drug_consent' },
+    { id: 'nrg_release',        label: 'NRG Release Form',           icon: '📋', description: 'Authorize CSI to share screening results with NRG/Reliant.',      view: 'onboarding-consent-nrg_release',        kind: 'consent', consentType: 'nrg_release' },
+    { id: 'reliant_intake',     label: 'CSI Personal Upload',        icon: '📝', description: 'Identity, address, photo IDs, headshot. Goes to Reliant.',         view: 'onboarding-intake-form',                kind: 'reliant_intake' },
+    { id: 'agent_contract',     label: 'Field Sales Agent Contract', icon: '📜', description: 'Independent contractor agreement with CSI. Unlocks after BG passes.', view: 'onboarding-contract',                   kind: 'contract',       requiresStage: 'bg_passed' },
+    { id: 'ach_banking',        label: 'Direct Deposit',             icon: '🏦', description: 'Banking info for payroll. Internal only — never sent to Reliant.', view: 'onboarding-ach-form',                   kind: 'ach',            requiresStage: 'bg_passed' }
+  ],
+  // B2B COMMERCIAL ENERGY (b2b) — lighter flow, pure 1099 commission
+  b2b: [
+    { id: 'agent_contract',     label: 'B2B Sales Agreement',         icon: '📜', description: 'Sign your Independent Sales Agent or Manager Agreement (auto-assigned by role).', view: 'onboarding-contract',                   kind: 'contract' },
+    { id: 'background_consent', label: 'CSI Background Consent',      icon: '🔍', description: 'Authorize CSI to run a background check on you.',                                view: 'onboarding-consent-background_consent', kind: 'consent', consentType: 'background_consent' },
+    { id: 'b2b_intake',         label: 'Identity & Validation',       icon: '📝', description: 'Government ID, headshot, last-4 SSN, mailing address (for 1099-NEC).',          view: 'onboarding-b2b-intake',                  kind: 'b2b_intake' },
+    { id: 'ach_banking',        label: 'Direct Deposit',              icon: '🏦', description: 'Banking info for commission payouts.',                                          view: 'onboarding-ach-form',                    kind: 'ach' }
+  ],
+  // FALLBACK — agent in no specific program
+  default: [
+    { id: 'agent_contract',     label: 'Independent Contractor Agreement', icon: '📜', description: 'Your contractor agreement with CSI.',          view: 'onboarding-contract',  kind: 'contract' },
+    { id: 'ach_banking',        label: 'Direct Deposit',                    icon: '🏦', description: 'Banking info for commission payouts.',         view: 'onboarding-ach-form',  kind: 'ach' }
+  ]
+};
+
+// Pick the right flow for the current user based on their programs.
+// Reliant takes priority over B2B if they have both (since Reliant is more
+// regulated and the screening flow is required).
+function _resolveOnboardingFlow(userPrograms){
+  const programs = userPrograms || [];
+  if(programs.includes('retail')) return ONBOARDING_FLOWS.retail;
+  if(programs.includes('b2b'))    return ONBOARDING_FLOWS.b2b;
+  return ONBOARDING_FLOWS.default;
+}
+
+// BACKWARD-COMPAT: keep ONBOARDING_FORMS pointing to the current user's flow
+// so existing references throughout the file (lookups by id, label-mapping in
+// _notifyOnboardingFormSubmitted, etc.) keep working without per-call refactor.
+// Defaults to Reliant flow until currentProfile is loaded.
+let ONBOARDING_FORMS = ONBOARDING_FLOWS.retail;
+function _refreshOnboardingForms(){
+  ONBOARDING_FORMS = _resolveOnboardingFlow(currentProfile?.programs);
+}
+window._refreshOnboardingForms = _refreshOnboardingForms;
 
 // Order of stages — index into here lets us compare "is this stage at-or-after stage X"
 const _STAGE_ORDER = ['invited','forms_pending','screening_review','bg_passed','dt_passed','coded'];
@@ -7755,6 +7860,13 @@ async function _loadStepStatuses(userId){
     (data || []).forEach(c => { consents[c.form_type] = c; });
   } catch(_){}
 
+  // 4. B2B intake — separate table, status = 'submitted'/'approved'/'reviewed' = complete
+  let b2bIntakeRow = null;
+  try {
+    const { data } = await sb.from('b2b_intake').select('*').eq('user_id', userId).maybeSingle();
+    b2bIntakeRow = data;
+  } catch(_){}
+
   // Build result for each step in ONBOARDING_FORMS
   const result = {};
   let priorComplete = true;
@@ -7770,6 +7882,9 @@ async function _loadStepStatuses(userId){
       const c = consents[step.consentType];
       complete = c && c.status === 'submitted';
       sourceRow = c;
+    } else if(step.kind === 'b2b_intake'){
+      complete = b2bIntakeRow && ['submitted','reviewed','approved'].includes(b2bIntakeRow.status);
+      sourceRow = b2bIntakeRow;
     } else {
       // reliant_intake / ach_banking — use form_status table
       const s = statuses[step.id];
@@ -8227,6 +8342,336 @@ async function requestIntakeEdit(intakeId){
 }
 
 window.requestIntakeEdit = requestIntakeEdit;
+
+// ═══════════════════════════════════════════════════════════════════════
+// B2B INTAKE FORM (Phase 3.12)
+// ═══════════════════════════════════════════════════════════════════════
+// Lighter intake than the Reliant flow — this is for B2B agents/managers who
+// need identity validation for 1099 reporting. Captures:
+//   • Government ID (front + back)
+//   • Headshot
+//   • Legal name + DOB + last-4 SSN
+//   • Mailing address (where 1099-NEC will be sent)
+//   • Phone
+//   • Electronic signature with audit trail
+// ═══════════════════════════════════════════════════════════════════════
+
+async function renderOnboardingB2bIntake(el){
+  // Load existing intake (if any)
+  const { data: existing } = await sb.from('b2b_intake').select('*').eq('user_id', currentProfile.id).maybeSingle();
+  const r = existing || {};
+  const isLocked = existing && ['submitted','reviewed','approved'].includes(existing.status);
+  const isRejected = existing && existing.status === 'rejected';
+
+  if(isLocked){
+    return _renderB2bIntakeLockedView(el, existing);
+  }
+
+  // Pre-fill from profile basics
+  const fullName = currentProfile.full_name || '';
+  const nameParts = fullName.split(' ');
+  const firstGuess = r.first_name || nameParts[0] || '';
+  const lastGuess  = r.last_name  || nameParts.slice(-1)[0] || '';
+  const middleGuess = r.middle_name || (nameParts.length > 2 ? nameParts.slice(1, -1).join(' ') : '');
+
+  el.innerHTML = `
+    <button class="bo-back-btn show-on-mobile" onclick="boShowAdmin('onboarding-packet')">← Back to Packet</button>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:18px;">
+      <div>
+        <div style="font-size:11px;color:#FF6B00;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:6px;">B2B Identity Validation</div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:34px;color:#fff;line-height:1.1;">📝 Identity &amp; 1099 Validation</h1>
+        <p style="font-size:13px;color:rgba(255,255,255,0.55);margin-top:6px;line-height:1.55;max-width:560px;">Quick identity check so we can issue your 1099-NEC at year end and verify the person signing the contractor agreement is who they claim to be.</p>
+      </div>
+      <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('onboarding-packet')" style="padding:7px 14px;font-size:12px;">← Back</button>
+    </div>
+
+    ${isRejected && r.reject_reason ? `
+      <div class="bo-card" style="background:rgba(248,113,113,0.06);border:1px solid rgba(248,113,113,0.4);margin-bottom:14px;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#F87171;letter-spacing:1.5px;margin-bottom:6px;">✗ PREVIOUS SUBMISSION REJECTED</div>
+        <div style="font-size:13px;color:rgba(255,255,255,0.85);line-height:1.55;"><strong>Reason:</strong> ${escapeHtml(r.reject_reason)}</div>
+        <div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-top:6px;">Please correct the issue below and re-submit.</div>
+      </div>
+    ` : ''}
+
+    <!-- IDENTITY -->
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:14px;">👤 Legal Identity</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
+        <div class="form-group"><label class="form-label">First Name *</label><input id="b2b-first" class="form-input" value="${escapeHtml(firstGuess)}"/></div>
+        <div class="form-group"><label class="form-label">Middle Name</label><input id="b2b-middle" class="form-input" value="${escapeHtml(middleGuess)}"/></div>
+        <div class="form-group"><label class="form-label">Last Name *</label><input id="b2b-last" class="form-input" value="${escapeHtml(lastGuess)}"/></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div class="form-group"><label class="form-label">Date of Birth *</label><input id="b2b-dob" class="form-input" type="date" value="${r.dob || ''}"/></div>
+        <div class="form-group">
+          <label class="form-label">Last 4 of SSN *</label>
+          <input id="b2b-ssn4" class="form-input" inputmode="numeric" maxlength="4" placeholder="0000" value="${escapeHtml(r.ssn_last4 || '')}"/>
+          <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">For 1099-NEC reporting. We never store the full SSN.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- MAILING ADDRESS -->
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:14px;">📬 Mailing Address (Where 1099-NEC Goes)</div>
+      <div class="form-group"><label class="form-label">Street Address *</label><input id="b2b-street" class="form-input" value="${escapeHtml(r.street_address || '')}"/></div>
+      <div style="display:grid;grid-template-columns:1fr 2fr 1fr 1fr;gap:12px;">
+        <div class="form-group"><label class="form-label">Apt/Unit</label><input id="b2b-apt" class="form-input" value="${escapeHtml(r.apt_unit || '')}"/></div>
+        <div class="form-group"><label class="form-label">City *</label><input id="b2b-city" class="form-input" value="${escapeHtml(r.city || '')}"/></div>
+        <div class="form-group"><label class="form-label">State *</label><input id="b2b-state" class="form-input" maxlength="2" style="text-transform:uppercase;" value="${escapeHtml(r.state_province || 'TX')}"/></div>
+        <div class="form-group"><label class="form-label">Zip *</label><input id="b2b-zip" class="form-input" maxlength="10" value="${escapeHtml(r.postal_code || '')}"/></div>
+      </div>
+      <div class="form-group"><label class="form-label">Phone *</label><input id="b2b-phone" class="form-input" type="tel" value="${escapeHtml(r.phone || currentProfile.phone || '')}"/></div>
+    </div>
+
+    <!-- PHOTOS -->
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:14px;">📸 Photo Validation</div>
+      <p style="font-size:12.5px;color:rgba(255,255,255,0.6);line-height:1.55;margin-bottom:14px;">Upload your government ID and headshot. Photos are stored privately and only visible to Owner + Onboarding.</p>
+
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;">
+        <!-- ID Front -->
+        <div>
+          <div style="font-size:12.5px;color:rgba(255,255,255,0.7);font-weight:600;margin-bottom:6px;">🪪 Government ID — Front *</div>
+          <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-bottom:6px;">All 4 corners visible, clear and readable</div>
+          <input id="b2b-id-front" type="file" accept="image/*" capture="environment" onchange="_b2bOnFile('idFront', this)" style="display:none;"/>
+          <button type="button" class="bo-btn bo-btn-primary" style="width:100%;padding:12px;font-size:13px;background:linear-gradient(135deg,#FF6B00,#FF0080);" onclick="document.getElementById('b2b-id-front').click()">📸 Upload ID Front</button>
+          <div id="b2b-id-front-preview" style="margin-top:8px;"></div>
+        </div>
+        <!-- ID Back -->
+        <div>
+          <div style="font-size:12.5px;color:rgba(255,255,255,0.7);font-weight:600;margin-bottom:6px;">🪪 Government ID — Back *</div>
+          <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-bottom:6px;">All 4 corners visible, clear and readable</div>
+          <input id="b2b-id-back" type="file" accept="image/*" capture="environment" onchange="_b2bOnFile('idBack', this)" style="display:none;"/>
+          <button type="button" class="bo-btn bo-btn-primary" style="width:100%;padding:12px;font-size:13px;background:linear-gradient(135deg,#FF6B00,#FF0080);" onclick="document.getElementById('b2b-id-back').click()">📸 Upload ID Back</button>
+          <div id="b2b-id-back-preview" style="margin-top:8px;"></div>
+        </div>
+        <!-- Headshot -->
+        <div>
+          <div style="font-size:12.5px;color:rgba(255,255,255,0.7);font-weight:600;margin-bottom:6px;">🤳 Headshot *</div>
+          <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-bottom:6px;">Shoulders-up, clean background, no hat/sunglasses/filters</div>
+          <input id="b2b-headshot" type="file" accept="image/*" capture="user" onchange="_b2bOnFile('headshot', this)" style="display:none;"/>
+          <button type="button" class="bo-btn bo-btn-primary" style="width:100%;padding:12px;font-size:13px;background:linear-gradient(135deg,#FF6B00,#FF0080);" onclick="document.getElementById('b2b-headshot').click()">📸 Take Headshot</button>
+          <div id="b2b-headshot-preview" style="margin-top:8px;"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SIGNATURE -->
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FFC800;letter-spacing:1.5px;margin-bottom:14px;">✍️ Electronic Signature</div>
+      <p style="font-size:12.5px;color:rgba(255,255,255,0.6);margin-bottom:10px;line-height:1.5;">Sign below to certify the information you submitted is true and accurate.</p>
+      <canvas id="b2b-sig-canvas" width="600" height="150" style="background:#fff;border-radius:8px;width:100%;max-width:600px;cursor:crosshair;touch-action:none;"></canvas>
+      <div style="display:flex;gap:8px;margin-top:8px;">
+        <button class="bo-btn bo-btn-ghost" style="padding:6px 12px;font-size:11.5px;" onclick="csiSigClear('b2b-sig-canvas')">Clear</button>
+      </div>
+      <input type="hidden" id="b2b-sig-data" value=""/>
+      <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:10px;line-height:1.6;">Your signature, IP address, browser, and timestamp will be recorded with this submission as your audit trail.</div>
+    </div>
+
+    <div style="display:flex;gap:10px;flex-wrap:wrap;">
+      <button class="bo-btn bo-btn-primary" onclick="submitB2bIntake()">Submit for Review</button>
+      <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('onboarding-packet')">Cancel</button>
+    </div>
+    <div id="b2b-msg" style="margin-top:12px;font-size:13px;"></div>`;
+
+  setTimeout(() => csiSigInit('b2b-sig-canvas', ''), 50);
+}
+
+// In-memory blob storage for B2B intake photos
+let _b2bBlobs = { idFront: null, idBack: null, headshot: null };
+
+function _b2bOnFile(slot, input){
+  const file = input.files?.[0];
+  const previewMap = { idFront:'b2b-id-front-preview', idBack:'b2b-id-back-preview', headshot:'b2b-headshot-preview' };
+  const preview = document.getElementById(previewMap[slot]);
+  if(!file){ preview.innerHTML = ''; _b2bBlobs[slot] = null; return; }
+  _b2bBlobs[slot] = file;
+  const url = URL.createObjectURL(file);
+  preview.innerHTML = `<img src="${url}" style="max-width:160px;border-radius:8px;border:2px solid #00FF88;"/><div style="font-size:11px;color:#00FF88;margin-top:4px;">✓ Captured</div>`;
+}
+
+async function submitB2bIntake(){
+  const msg = document.getElementById('b2b-msg');
+  const get = id => (document.getElementById(id)?.value || '').trim();
+
+  const first = get('b2b-first');
+  const last  = get('b2b-last');
+  const dob   = get('b2b-dob');
+  const ssn4  = get('b2b-ssn4').replace(/\D/g, '');
+  const street = get('b2b-street');
+  const city   = get('b2b-city');
+  const state  = (get('b2b-state') || '').toUpperCase();
+  const zip    = get('b2b-zip');
+  const phone  = get('b2b-phone');
+  const sigData = document.getElementById('b2b-sig-data')?.value || '';
+
+  if(!first || !last){ msg.innerHTML = '<span style="color:#F87171;">First + last name required.</span>'; return; }
+  if(!dob){ msg.innerHTML = '<span style="color:#F87171;">Date of birth required.</span>'; return; }
+  if(ssn4.length !== 4){ msg.innerHTML = '<span style="color:#F87171;">Last 4 of SSN must be 4 digits.</span>'; return; }
+  if(!street || !city || !state || !zip){ msg.innerHTML = '<span style="color:#F87171;">Mailing address required.</span>'; return; }
+  if(!phone){ msg.innerHTML = '<span style="color:#F87171;">Phone required.</span>'; return; }
+  // Photos — check whether existing intake had them OR new file uploaded
+  const { data: existing } = await sb.from('b2b_intake').select('id, id_front_path, id_back_path, headshot_path').eq('user_id', currentProfile.id).maybeSingle();
+  const hasIdFront = !!_b2bBlobs.idFront || !!existing?.id_front_path;
+  const hasIdBack  = !!_b2bBlobs.idBack  || !!existing?.id_back_path;
+  const hasHead    = !!_b2bBlobs.headshot || !!existing?.headshot_path;
+  if(!hasIdFront){ msg.innerHTML = '<span style="color:#F87171;">Upload your government ID front.</span>'; return; }
+  if(!hasIdBack){  msg.innerHTML = '<span style="color:#F87171;">Upload your government ID back.</span>'; return; }
+  if(!hasHead){    msg.innerHTML = '<span style="color:#F87171;">Take your headshot.</span>'; return; }
+  if(!sigData){ msg.innerHTML = '<span style="color:#F87171;">Sign on the canvas above.</span>'; return; }
+
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">📤 Uploading photos…</span>';
+
+  // Upload any new blobs
+  let idFrontPath = existing?.id_front_path || null;
+  let idBackPath  = existing?.id_back_path  || null;
+  let headPath    = existing?.headshot_path || null;
+  try {
+    if(_b2bBlobs.idFront){
+      const path = currentProfile.id + '/b2b-id-front-' + Date.now() + '.jpg';
+      const { error } = await sb.storage.from('onboarding-docs').upload(path, _b2bBlobs.idFront, { upsert: true });
+      if(error) throw error;
+      idFrontPath = path;
+    }
+    if(_b2bBlobs.idBack){
+      const path = currentProfile.id + '/b2b-id-back-' + Date.now() + '.jpg';
+      const { error } = await sb.storage.from('onboarding-docs').upload(path, _b2bBlobs.idBack, { upsert: true });
+      if(error) throw error;
+      idBackPath = path;
+    }
+    if(_b2bBlobs.headshot){
+      const path = currentProfile.id + '/b2b-headshot-' + Date.now() + '.jpg';
+      const { error } = await sb.storage.from('onboarding-docs').upload(path, _b2bBlobs.headshot, { upsert: true });
+      if(error) throw error;
+      headPath = path;
+    }
+  } catch(e){
+    msg.innerHTML = '<span style="color:#F87171;">Photo upload failed: ' + escapeHtml(e.message) + '</span>';
+    return;
+  }
+
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">🌐 Capturing audit trail…</span>';
+  let ipAddress = null;
+  try {
+    const r = await fetch('https://api.ipify.org?format=json');
+    const j = await r.json();
+    ipAddress = j.ip || null;
+  } catch(_){}
+
+  const payload = {
+    user_id: currentProfile.id,
+    first_name: first,
+    middle_name: get('b2b-middle') || null,
+    last_name: last,
+    dob,
+    ssn_last4: ssn4,
+    street_address: street,
+    apt_unit: get('b2b-apt') || null,
+    city, state_province: state, postal_code: zip,
+    phone,
+    id_front_path: idFrontPath,
+    id_back_path: idBackPath,
+    headshot_path: headPath,
+    signature_data: sigData,
+    signed_at: new Date().toISOString(),
+    ip_address: ipAddress,
+    user_agent: navigator.userAgent.substring(0, 500),
+    status: 'submitted',
+    submitted_at: new Date().toISOString(),
+    reject_reason: null,
+    updated_at: new Date().toISOString()
+  };
+
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">💾 Saving…</span>';
+  const { data: row, error } = await sb.from('b2b_intake')
+    .upsert(payload, { onConflict: 'user_id' })
+    .select().single();
+  if(error){ msg.innerHTML = '<span style="color:#F87171;">Save failed: ' + escapeHtml(error.message) + '</span>'; return; }
+
+  // Mark in form_status table for the unified packet view
+  try { await _markFormSubmitted(currentProfile.id, 'b2b_intake', row.id); } catch(_){}
+
+  // Notify Owner + Onboarding
+  try { await _notifyOnboardingFormSubmitted('b2b_intake', currentProfile.full_name || currentProfile.email || 'Agent'); } catch(_){}
+
+  // Reset blobs (they've been uploaded)
+  _b2bBlobs = { idFront: null, idBack: null, headshot: null };
+
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Submitted! Returning to packet…</span>';
+  setTimeout(() => boShowAdmin('onboarding-packet'), 1100);
+}
+
+async function _renderB2bIntakeLockedView(el, intake){
+  // Generate signed URLs for the 3 photos
+  const urls = {};
+  for(const [field, key] of [['id_front','id_front_path'],['id_back','id_back_path'],['headshot','headshot_path']]){
+    if(intake[key]){
+      try {
+        const { data } = await sb.storage.from('onboarding-docs').createSignedUrl(intake[key], 3600);
+        urls[field] = data?.signedUrl || null;
+      } catch(_){}
+    }
+  }
+
+  const statusBadge = intake.status === 'approved'
+    ? '<span style="background:rgba(0,255,136,0.15);color:#00FF88;padding:5px 12px;border-radius:50px;font-size:11px;font-weight:700;letter-spacing:1px;">✓ APPROVED</span>'
+    : intake.status === 'reviewed'
+      ? '<span style="background:rgba(0,198,255,0.15);color:#00C6FF;padding:5px 12px;border-radius:50px;font-size:11px;font-weight:700;letter-spacing:1px;">👁 REVIEWED BY ONBOARDING</span>'
+      : '<span style="background:rgba(255,200,0,0.15);color:#FFC800;padding:5px 12px;border-radius:50px;font-size:11px;font-weight:700;letter-spacing:1px;">⏳ AWAITING REVIEW</span>';
+
+  el.innerHTML = `
+    <button class="bo-back-btn show-on-mobile" onclick="boShowAdmin('onboarding-packet')">← Back to Packet</button>
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:18px;">
+      <div>
+        <div style="font-size:11px;color:#00FF88;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:6px;">Submitted</div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:34px;color:#fff;line-height:1.1;">📝 B2B Identity &amp; Validation</h1>
+      </div>
+      <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('onboarding-packet')" style="padding:7px 14px;font-size:12px;">← Back</button>
+    </div>
+
+    <div class="bo-card" style="background:linear-gradient(135deg,rgba(0,255,136,0.08),rgba(0,255,136,0));border:1px solid rgba(0,255,136,0.3);margin-bottom:14px;">
+      <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+        <div style="width:48px;height:48px;border-radius:50%;background:rgba(0,255,136,0.15);color:#00FF88;display:flex;align-items:center;justify-content:center;font-size:24px;flex-shrink:0;">✓</div>
+        <div style="flex:1;min-width:200px;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#00FF88;letter-spacing:1px;">YOUR INFORMATION IS ON FILE</div>
+          <div style="font-size:12.5px;color:rgba(255,255,255,0.7);margin-top:4px;">Submitted ${intake.submitted_at ? new Date(intake.submitted_at).toLocaleString() : ''}${intake.ip_address ? ' from IP ' + escapeHtml(intake.ip_address) : ''}</div>
+        </div>
+        ${statusBadge}
+      </div>
+    </div>
+
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:14px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">SUBMITTED INFORMATION</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 18px;font-size:13px;line-height:1.6;">
+        <div><span style="color:rgba(255,255,255,0.5);font-size:11px;letter-spacing:1px;font-weight:700;">LEGAL NAME</span><div style="color:#fff;">${escapeHtml((intake.first_name || '') + ' ' + (intake.middle_name ? intake.middle_name + ' ' : '') + (intake.last_name || ''))}</div></div>
+        <div><span style="color:rgba(255,255,255,0.5);font-size:11px;letter-spacing:1px;font-weight:700;">DATE OF BIRTH</span><div style="color:#fff;">${intake.dob || '—'}</div></div>
+        <div><span style="color:rgba(255,255,255,0.5);font-size:11px;letter-spacing:1px;font-weight:700;">SSN (LAST 4)</span><div style="color:#fff;">XXX-XX-${escapeHtml(intake.ssn_last4 || '')}</div></div>
+        <div><span style="color:rgba(255,255,255,0.5);font-size:11px;letter-spacing:1px;font-weight:700;">PHONE</span><div style="color:#fff;">${escapeHtml(intake.phone || '')}</div></div>
+        <div style="grid-column:1/-1;"><span style="color:rgba(255,255,255,0.5);font-size:11px;letter-spacing:1px;font-weight:700;">MAILING ADDRESS</span><div style="color:#fff;">${escapeHtml((intake.street_address || '') + (intake.apt_unit ? ' ' + intake.apt_unit : '') + ', ' + (intake.city || '') + ', ' + (intake.state_province || '') + ' ' + (intake.postal_code || ''))}</div></div>
+      </div>
+    </div>
+
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:14px;color:#FFC800;letter-spacing:1.5px;margin-bottom:12px;">UPLOADED PHOTOS</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;">
+        ${urls.id_front ? `<div><div style="font-size:11px;color:rgba(255,255,255,0.5);margin-bottom:4px;">🪪 ID FRONT</div><img src="${urls.id_front}" style="max-width:100%;border-radius:8px;border:1px solid rgba(255,255,255,0.1);"/></div>` : ''}
+        ${urls.id_back  ? `<div><div style="font-size:11px;color:rgba(255,255,255,0.5);margin-bottom:4px;">🪪 ID BACK</div><img src="${urls.id_back}" style="max-width:100%;border-radius:8px;border:1px solid rgba(255,255,255,0.1);"/></div>` : ''}
+        ${urls.headshot ? `<div><div style="font-size:11px;color:rgba(255,255,255,0.5);margin-bottom:4px;">🤳 HEADSHOT</div><img src="${urls.headshot}" style="max-width:100%;border-radius:8px;border:1px solid rgba(255,255,255,0.1);"/></div>` : ''}
+      </div>
+    </div>
+
+    ${intake.signature_data ? `
+      <div class="bo-card">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:14px;color:#FFC800;letter-spacing:1.5px;margin-bottom:10px;">SIGNATURE</div>
+        <img src="${intake.signature_data}" style="max-width:280px;background:#fff;padding:6px;border-radius:6px;"/>
+      </div>
+    ` : ''}`;
+}
+
+window.renderOnboardingB2bIntake = renderOnboardingB2bIntake;
+window._b2bOnFile = _b2bOnFile;
+window.submitB2bIntake = submitB2bIntake;
 
 // ═══════════════════════════════════════════════════════════════════════
 // STEP 1: CONTRACT (uses the existing Contract Builder + signing system)
@@ -12470,6 +12915,8 @@ async function submitApplication(){
   const why = get('app-why');
   const days = Array.from(document.querySelectorAll('#days-wrap input:checked')).map(c => c.value);
   const industries = Array.from(document.querySelectorAll('#industries-wrap input:checked')).map(c => c.value);
+  // Optional: preferred manager pre-filled from dropdown
+  const preferredManagerId = get('app-preferred-manager') || null;
   const err = document.getElementById('app-error');
   if(!fname||!lname||!phone||!email||!city||!state||!program||!type||!start||!hours||!exp||!d2d||!income||!mgmt||!rejection||!motivate||!source||days.length===0){
     err.style.display='block'; window.scrollTo({top:0, behavior:'smooth'}); return;
@@ -12478,7 +12925,8 @@ async function submitApplication(){
 
   const appData = {
     submitted: new Date().toLocaleString(),
-    fname, lname, phone, email, city, state, program, type, start, hours, days, exp, industries, d2d, income, mgmt, rejection, motivate, source, why
+    fname, lname, phone, email, city, state, program, type, start, hours, days, exp, industries, d2d, income, mgmt, rejection, motivate, source, why,
+    preferred_manager_id: preferredManagerId
   };
 
   // Save to Supabase
@@ -12497,11 +12945,28 @@ async function submitApplication(){
 
 async function notifyAdminsOfNewApplication(data){
   try {
+    // 1. Pull owner + admin + onboarding (anyone with master center access).
+    //    Onboarding department is now included in every application notification
+    //    since they will be the ones to follow up on the application.
     const { data: admins } = await sb.from('profiles')
-      .select('id,email')
-      .in('role', ['owner','admin'])
+      .select('id,email,full_name,role,has_master_center_access')
+      .or('role.eq.owner,role.eq.admin,has_master_center_access.eq.true')
       .eq('active', true);
     if(!admins || admins.length === 0) return;
+
+    // 2. If applicant picked a preferred manager, look them up too. They get
+    //    a separately-formatted notification so they know they were specifically
+    //    requested.
+    let preferredManager = null;
+    if(data.preferred_manager_id){
+      const { data: m } = await sb.from('profiles')
+        .select('id, email, full_name')
+        .eq('id', data.preferred_manager_id)
+        .eq('active', true)
+        .maybeSingle();
+      if(m) preferredManager = m;
+    }
+
     const notesBlock = [
       (data.exp || data.industries?.length) ? 'Experience: ' + (data.exp || '') + (data.industries?.length ? ' · ' + data.industries.join(', ') : '') : null,
       data.d2d ? 'D2D background: ' + data.d2d : null,
@@ -12513,9 +12978,11 @@ async function notifyAdminsOfNewApplication(data){
       data.hours ? 'Hours/week: ' + data.hours : null,
       data.days?.length ? 'Days available: ' + data.days.join(', ') : null,
       data.start ? 'Can start: ' + data.start : null,
+      preferredManager ? 'Preferred Manager: ' + (preferredManager.full_name || preferredManager.email) : null,
       data.why ? '\nNotes: ' + data.why : null
     ].filter(Boolean).join('\n');
 
+    // 3. Notify each admin / onboarding user
     for(const a of admins){
       try {
         await sendEmailViaFunction('new_application_submitted', a.email, {
@@ -12528,15 +12995,38 @@ async function notifyAdminsOfNewApplication(data){
           notes: notesBlock
         });
       } catch(e){ console.warn('new_application email failed for', a.email, e); }
-      // In-app
       try {
         await notifyUser(a.id, {
           type: 'new_application',
           title: '📝 New application: ' + data.fname + ' ' + data.lname,
-          body: data.program + ' · ' + data.city + ', ' + data.state,
+          body: data.program + ' · ' + data.city + ', ' + data.state + (preferredManager ? ' · prefers ' + (preferredManager.full_name || preferredManager.email) : ''),
           link_view: 'applications'
         });
       } catch(e){ console.warn('new_application in-app failed for', a.id, e); }
+    }
+
+    // 4. If a preferred manager was selected AND they are not already in the
+    //    admin list above, notify them separately.
+    if(preferredManager && !admins.some(a => a.id === preferredManager.id)){
+      try {
+        await sendEmailViaFunction('new_application_submitted', preferredManager.email, {
+          applicant_name: data.fname + ' ' + data.lname,
+          applicant_email: data.email,
+          applicant_phone: data.phone,
+          program_interest: data.program + (data.type ? ' · ' + data.type : ''),
+          location: data.city + ', ' + data.state,
+          submitted_at: data.submitted,
+          notes: '🎯 You were selected as their PREFERRED MANAGER.\n\n' + notesBlock
+        });
+      } catch(e){ console.warn('preferred-mgr email failed:', e); }
+      try {
+        await notifyUser(preferredManager.id, {
+          type: 'new_application',
+          title: '🎯 New applicant requested YOU: ' + data.fname + ' ' + data.lname,
+          body: data.program + ' · ' + data.city + ', ' + data.state + ' — they picked you as their preferred manager.',
+          link_view: 'applications'
+        });
+      } catch(e){ console.warn('preferred-mgr in-app failed:', e); }
     }
   } catch(e){ console.warn('notifyAdminsOfNewApplication error:', e); }
 }
@@ -15611,6 +16101,343 @@ async function renderPdfInline(containerEl, pdfSource, opts){
 }
 
 
+// ═══════════════════════════════════════════════════════════════════════
+// CONTRACT HUB (Phase 3.10) — owner + admin + onboarding
+// ═══════════════════════════════════════════════════════════════════════
+// One unified place to see EVERY contract template the company owns,
+// organized by PROGRAM and then by ROLE (Agent / Manager / All).
+//
+// Pulls from BOTH contract_templates_v2 (rich-text + uploaded PDFs)
+// AND the legacy contract_templates (URL-only) tables.
+//
+// Signed/pending contracts live on each agent's profile (intentional —
+// per-agent paperwork stays per-agent). This hub is for TEMPLATE
+// management: see what we have, edit, archive, or send.
+// ═══════════════════════════════════════════════════════════════════════
+
+function _hubAccessOk(){
+  return currentProfile?.role === 'owner'
+      || currentProfile?.role === 'admin'
+      || currentProfile?.has_master_center_access === true;
+}
+
+const ROLE_BUCKETS = [
+  { id:'agent',   label:'AGENT CONTRACTS',   color:'#00FF88', icon:'👤', description:'Field sales agent agreements' },
+  { id:'manager', label:'MANAGER CONTRACTS', color:'#00C6FF', icon:'👔', description:'Market manager / hiring manager agreements' },
+  { id:'all',     label:'GENERAL / ALL ROLES', color:'#A855F7', icon:'📌', description:'NDAs, code of conduct, anything role-agnostic' }
+];
+
+async function renderContractHub(el){
+  if(!_hubAccessOk()){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied. Owner, Admin, or Onboarding only.</div>';
+    return;
+  }
+  const isOwner = currentProfile?.role === 'owner';
+
+  el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading every contract in the company…</div>';
+
+  // Pull EVERY template from BOTH tables in parallel
+  const [v2Result, legacyResult, asgResult] = await Promise.all([
+    sb.from('contract_templates_v2').select('*').order('updated_at', { ascending: false }),
+    sb.from('contract_templates').select('*').order('created_at', { ascending: false }),
+    sb.from('contract_assignments').select('id, status, template_id', { count: 'exact', head: false })
+  ]);
+
+  const v2Templates    = v2Result.data || [];
+  const legacyTemplates = legacyResult.data || [];
+
+  // Count assignments per template (for "X agents have signed this" stat)
+  const assignedCounts = {};
+  const signedCounts = {};
+  for(const a of (asgResult.data || [])){
+    if(!a.template_id) continue;
+    assignedCounts[a.template_id] = (assignedCounts[a.template_id] || 0) + 1;
+    if(a.status === 'signed') signedCounts[a.template_id] = (signedCounts[a.template_id] || 0) + 1;
+  }
+
+  // Build a unified row list with normalized fields
+  const allContracts = [
+    ...v2Templates.map(t => ({
+      id:           t.id,
+      title:        t.title,
+      description:  t.description,
+      program_id:   t.program_id,
+      target_role:  t.target_role || 'agent',
+      kind:         t.source_type === 'upload' ? 'uploaded' : 'rich_text',
+      auto_assign:  t.auto_assign,
+      active:       t.active !== false,
+      updated_at:   t.updated_at,
+      created_at:   t.created_at,
+      source_table: 'v2',
+      assignment_count: assignedCounts[t.id] || 0,
+      signed_count:     signedCounts[t.id] || 0
+    })),
+    ...legacyTemplates.map(t => ({
+      id:           t.id,
+      title:        t.title,
+      description:  t.description,
+      program_id:   t.program_id,
+      target_role:  t.target_role || 'agent',
+      kind:         'legacy_url',
+      url:          t.url,
+      auto_assign:  t.auto_assign,
+      active:       t.active !== false,
+      updated_at:   t.created_at,
+      created_at:   t.created_at,
+      source_table: 'legacy',
+      assignment_count: 0,
+      signed_count: 0
+    }))
+  ];
+
+  // Build the program list — every program PLUS a "no-program" bucket for orphans
+  const programOptions = [...(allPrograms || [])];
+  // Group by program_id
+  const byProgram = {};
+  for(const p of programOptions) byProgram[p.id] = { program: p, contracts: [] };
+  byProgram['__none__'] = { program: { id:null, name:'No Program / General', icon:'📌', color:'#A855F7' }, contracts: [] };
+  for(const c of allContracts){
+    const key = c.program_id || '__none__';
+    if(!byProgram[key]) byProgram[key] = { program: { id:c.program_id, name:'Unknown Program', icon:'❓', color:'#666' }, contracts: [] };
+    byProgram[key].contracts.push(c);
+  }
+
+  // Filter logic — view state
+  window._hubFilter = window._hubFilter || { program: 'all', role: 'all', activeOnly: true };
+  const f = window._hubFilter;
+
+  // Apply filters to a working list
+  let filtered = allContracts.slice();
+  if(f.program !== 'all') filtered = filtered.filter(c => (c.program_id || '__none__') === f.program);
+  if(f.role !== 'all') filtered = filtered.filter(c => c.target_role === f.role);
+  if(f.activeOnly) filtered = filtered.filter(c => c.active);
+
+  // Funnel summary at the top
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:24px;">
+      <div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;line-height:1;">📄 Contract Hub</h1>
+        <p style="font-size:14px;color:rgba(255,255,255,0.55);margin-top:6px;line-height:1.55;max-width:600px;">Every contract template the company owns, organized by program and role. Per-agent signed contracts stay on agent profiles.</p>
+      </div>
+      ${isOwner ? `<button class="bo-btn bo-btn-primary" onclick="boShowAdmin('contract-builder')" style="padding:10px 20px;font-size:13px;">+ New Template</button>` : ''}
+    </div>
+
+    <!-- AT-A-GLANCE PROGRAM SUMMARY CARDS -->
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-bottom:24px;">
+      ${[...programOptions, byProgram['__none__'].program].filter(Boolean).map(p => {
+        const bucket = byProgram[p.id || '__none__'];
+        if(!bucket) return '';
+        const total = bucket.contracts.length;
+        if(total === 0 && p.id) return '';  // hide empty program cards (except "No Program")
+        const agentCount   = bucket.contracts.filter(c => c.target_role === 'agent').length;
+        const managerCount = bucket.contracts.filter(c => c.target_role === 'manager').length;
+        const allCount     = bucket.contracts.filter(c => c.target_role === 'all').length;
+        const color = p.color || '#FF6B00';
+        return `
+          <div style="background:rgba(255,255,255,0.025);border:1px solid ${color}33;border-left:4px solid ${color};border-radius:10px;padding:14px;cursor:pointer;transition:transform 0.15s;" onclick="hubFilterByProgram('${p.id || '__none__'}')" onmouseover="this.style.transform='translateY(-2px)';" onmouseout="this.style.transform='';">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+              <div style="font-size:22px;">${p.icon || '📄'}</div>
+              <div style="font-family:'Bebas Neue',sans-serif;font-size:15px;color:${color};letter-spacing:1px;line-height:1;">${escapeHtml(p.name)}</div>
+            </div>
+            <div style="font-size:32px;font-family:'Bebas Neue',sans-serif;color:#fff;line-height:1;">${total}</div>
+            <div style="font-size:10.5px;color:rgba(255,255,255,0.55);margin-top:6px;letter-spacing:0.5px;">
+              ${agentCount > 0 ? '👤 ' + agentCount + ' agent' : ''}
+              ${managerCount > 0 ? (agentCount > 0 ? ' · ' : '') + '👔 ' + managerCount + ' mgr' : ''}
+              ${allCount > 0 ? ((agentCount > 0 || managerCount > 0) ? ' · ' : '') + '📌 ' + allCount + ' general' : ''}
+              ${total === 0 ? '<span style="color:rgba(255,255,255,0.3);">No contracts</span>' : ''}
+            </div>
+          </div>`;
+      }).join('')}
+    </div>
+
+    <!-- FILTERS -->
+    <div class="bo-card" style="margin-bottom:14px;background:rgba(0,0,0,0.15);">
+      <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;">
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span style="font-size:11px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;">PROGRAM:</span>
+          <select id="hub-prog-filter" class="form-input" style="padding:6px 10px;font-size:12px;width:auto;" onchange="hubSetFilter('program', this.value)">
+            <option value="all" ${f.program === 'all' ? 'selected' : ''}>All Programs</option>
+            ${(allPrograms || []).map(p => `<option value="${p.id}" ${f.program === p.id ? 'selected' : ''}>${escapeHtml(p.icon || '')} ${escapeHtml(p.name)}</option>`).join('')}
+            <option value="__none__" ${f.program === '__none__' ? 'selected' : ''}>📌 No Program / General</option>
+          </select>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span style="font-size:11px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;">ROLE:</span>
+          <select id="hub-role-filter" class="form-input" style="padding:6px 10px;font-size:12px;width:auto;" onchange="hubSetFilter('role', this.value)">
+            <option value="all" ${f.role === 'all' ? 'selected' : ''}>All Roles</option>
+            ${ROLE_BUCKETS.map(r => `<option value="${r.id}" ${f.role === r.id ? 'selected' : ''}>${r.icon} ${r.label}</option>`).join('')}
+          </select>
+        </div>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:rgba(255,255,255,0.7);">
+          <input type="checkbox" ${f.activeOnly ? 'checked' : ''} onchange="hubSetFilter('activeOnly', this.checked)" style="width:16px;height:16px;accent-color:#FF6B00;"/>
+          Active only
+        </label>
+        <div style="margin-left:auto;font-size:12px;color:rgba(255,255,255,0.55);">${filtered.length} contract${filtered.length === 1 ? '' : 's'} shown</div>
+      </div>
+    </div>
+
+    ${filtered.length === 0 ? `
+      <div class="bo-card" style="text-align:center;padding:50px;">
+        <div style="font-size:54px;margin-bottom:10px;">📄</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#fff;letter-spacing:1px;margin-bottom:6px;">No contracts match these filters</div>
+        <div style="color:rgba(255,255,255,0.5);font-size:13px;max-width:420px;margin:0 auto 14px;line-height:1.55;">${(allContracts.length === 0 && isOwner) ? 'Click <strong>+ New Template</strong> to add your first contract template.' : 'Adjust the filters above to see other contracts.'}</div>
+      </div>
+    ` : (() => {
+      // Group filtered list by program then by role for display
+      const out = [];
+      const programsToShow = (f.program === 'all')
+        ? [...programOptions, byProgram['__none__'].program]
+        : [byProgram[f.program]?.program].filter(Boolean);
+
+      for(const p of programsToShow){
+        const programContracts = filtered.filter(c => (c.program_id || '__none__') === (p.id || '__none__'));
+        if(programContracts.length === 0) continue;
+        const color = p.color || '#FF6B00';
+        out.push(`
+          <div class="bo-card" style="margin-bottom:14px;border-left:4px solid ${color};">
+            <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:14px;">
+              <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:${color};letter-spacing:1.5px;">${p.icon || '📄'} ${escapeHtml(p.name)}</div>
+              <span style="background:${color}22;color:${color};padding:4px 10px;border-radius:50px;font-size:11px;font-weight:700;letter-spacing:1px;">${programContracts.length} CONTRACT${programContracts.length === 1 ? '' : 'S'}</span>
+            </div>
+
+            ${ROLE_BUCKETS.map(role => {
+              const roleContracts = programContracts.filter(c => c.target_role === role.id);
+              if(roleContracts.length === 0) return '';
+              return `
+                <div style="margin-bottom:12px;">
+                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid rgba(255,255,255,0.06);">
+                    <span style="font-size:14px;">${role.icon}</span>
+                    <span style="font-size:11px;color:${role.color};font-weight:700;letter-spacing:1.5px;">${role.label}</span>
+                    <span style="font-size:10.5px;color:rgba(255,255,255,0.4);margin-left:auto;">${roleContracts.length}</span>
+                  </div>
+                  ${roleContracts.map(c => _renderContractRow(c, isOwner)).join('')}
+                </div>`;
+            }).join('')}
+          </div>`);
+      }
+      return out.join('');
+    })()}`;
+}
+
+function _renderContractRow(c, isOwner){
+  const updated = c.updated_at ? new Date(c.updated_at).toLocaleDateString() : '—';
+  const kindBadge = c.kind === 'uploaded'
+    ? '<span style="background:rgba(0,198,255,0.15);color:#00C6FF;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">📎 PDF</span>'
+    : c.kind === 'legacy_url'
+      ? '<span style="background:rgba(168,85,247,0.15);color:#A855F7;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">🔗 LINK</span>'
+      : '<span style="background:rgba(255,107,0,0.15);color:#FF6B00;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">📝 RICH TEXT</span>';
+  const autoBadge = c.auto_assign
+    ? '<span style="background:rgba(0,255,136,0.15);color:#00FF88;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">⚡ AUTO-ASSIGN</span>'
+    : '';
+  const inactiveBadge = !c.active
+    ? '<span style="background:rgba(248,113,113,0.15);color:#F87171;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">INACTIVE</span>'
+    : '';
+  // Show usage stats for v2 (legacy doesn't have assignments)
+  const usageBadge = (c.source_table === 'v2' && c.assignment_count > 0)
+    ? `<span style="background:rgba(255,255,255,0.04);color:rgba(255,255,255,0.55);padding:2px 8px;border-radius:50px;font-size:10px;font-weight:600;letter-spacing:0.5px;">📋 ${c.signed_count}/${c.assignment_count} signed</span>`
+    : '';
+
+  // Action buttons
+  let actions = '';
+  if(c.source_table === 'v2'){
+    if(isOwner){
+      actions += `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;" onclick="hubEditTemplate('${c.id}')">✎ Edit</button>`;
+    }
+    actions += `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;" onclick="hubPreviewTemplate('${c.id}')">👁 Preview</button>`;
+    actions += `<button class="bo-btn bo-btn-primary" style="padding:5px 10px;font-size:11px;" onclick="openSendContractModalFromHub('${c.id}')">📨 Send</button>`;
+  } else {
+    // legacy URL
+    if(c.url){
+      actions += `<a href="${escapeHtml(c.url)}" target="_blank" class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;text-decoration:none;display:inline-block;">🔗 Open Link</a>`;
+    }
+  }
+
+  return `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:rgba(255,255,255,0.025);border-radius:8px;margin-bottom:6px;flex-wrap:wrap;gap:8px;">
+      <div style="min-width:0;flex:1;">
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:3px;">
+          <div style="font-size:14px;color:#fff;font-weight:600;">${escapeHtml(c.title)}</div>
+          ${kindBadge}
+          ${autoBadge}
+          ${inactiveBadge}
+          ${usageBadge}
+        </div>
+        ${c.description ? `<div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-top:2px;line-height:1.5;">${escapeHtml(c.description)}</div>` : ''}
+        <div style="font-size:10.5px;color:rgba(255,255,255,0.35);margin-top:3px;">Updated ${updated}</div>
+      </div>
+      <div style="display:flex;gap:5px;flex-shrink:0;flex-wrap:wrap;">${actions}</div>
+    </div>`;
+}
+
+function hubFilterByProgram(programId){
+  window._hubFilter = window._hubFilter || { program:'all', role:'all', activeOnly:true };
+  window._hubFilter.program = programId;
+  renderMainContent();
+}
+
+function hubSetFilter(key, value){
+  window._hubFilter = window._hubFilter || { program:'all', role:'all', activeOnly:true };
+  window._hubFilter[key] = value;
+  renderMainContent();
+}
+
+// Open the existing template editor inside the Contract Builder for a specific template
+function hubEditTemplate(templateId){
+  window._editTemplateId = templateId;
+  boShowAdmin('contract-builder');
+}
+
+// Quick preview — pulls the template body or PDF and shows it in a modal
+async function hubPreviewTemplate(templateId){
+  const { data: t, error } = await sb.from('contract_templates_v2').select('*').eq('id', templateId).maybeSingle();
+  if(error || !t){ alert('Could not load template'); return; }
+  let bodyHtml = '';
+  if(t.source_type === 'upload'){
+    if(t.upload_url){
+      bodyHtml = `<div style="background:#000;border-radius:8px;overflow:hidden;text-align:center;"><iframe src="${escapeHtml(t.upload_url)}" style="width:100%;height:520px;border:none;"></iframe></div>`;
+    } else {
+      bodyHtml = '<div style="color:#F87171;">PDF file is missing.</div>';
+    }
+  } else {
+    bodyHtml = `<div style="background:#fff;color:#000;padding:24px 28px;border-radius:8px;max-height:520px;overflow:auto;font-family:Georgia,serif;line-height:1.7;">${t.body_html || '<em>Empty body.</em>'}</div>`;
+  }
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;margin-bottom:6px;letter-spacing:1px;">👁 ${escapeHtml(t.title)}</h2>
+    <div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-bottom:14px;">${t.description ? escapeHtml(t.description) : 'No description.'}</div>
+    ${bodyHtml}
+    <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap;">
+      <button class="bo-btn bo-btn-primary" onclick="openSendContractModalFromHub('${t.id}')">📨 Send to Agent</button>
+      ${currentProfile.role === 'owner' ? `<button class="bo-btn bo-btn-ghost" onclick="hubEditTemplate('${t.id}');closeAllModals();">✎ Edit Template</button>` : ''}
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Close</button>
+    </div>`;
+  document.getElementById('modal-box').style.maxWidth = '720px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+// Bridge to the existing send-contract-to-agent modal, with the template pre-selected
+async function openSendContractModalFromHub(templateId){
+  closeAllModals();
+  // Use the existing reverse direction modal — pick agent first
+  if(typeof openSendContractToAgentModal === 'function'){
+    // The reverse modal expects an agent selection first. We could enhance to
+    // pre-select the template, but for now just open the picker.
+    // Owner picks the agent then chooses templates — this template will be in the list.
+    alert('Pick the agent you want to send this contract to.');
+    // We don't have a single user-id here, so route to Team list
+    boShowAdmin('agents');
+  } else {
+    boShowAdmin('agents');
+  }
+}
+
+window.renderContractHub = renderContractHub;
+window.hubFilterByProgram = hubFilterByProgram;
+window.hubSetFilter = hubSetFilter;
+window.hubEditTemplate = hubEditTemplate;
+window.hubPreviewTemplate = hubPreviewTemplate;
+window.openSendContractModalFromHub = openSendContractModalFromHub;
+
+
 // ─────────────────────────────────────────────────────────────────────
 // MAIN VIEW: Contract Builder (owner only)
 // ─────────────────────────────────────────────────────────────────────
@@ -15618,6 +16445,14 @@ async function renderContractBuilder(el){
   if(currentProfile.role !== 'owner'){
     el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied — Contract Builder is owner-only.</div>';
     return;
+  }
+
+  // If we arrived here from the Contract Hub clicking ✎ Edit on a template,
+  // auto-open that template in the editor immediately.
+  if(window._editTemplateId){
+    const tid = window._editTemplateId;
+    window._editTemplateId = null;  // consume so we don't loop
+    setTimeout(() => openContractBuilderEditor(null, tid), 50);
   }
 
   // Load templates
@@ -15631,6 +16466,9 @@ async function renderContractBuilder(el){
   }
 
   el.innerHTML = `
+    <div style="margin-bottom:14px;">
+      <button class="bo-btn bo-btn-ghost" style="padding:6px 12px;font-size:12px;" onclick="boShowAdmin('contract-hub')">← Back to Contract Hub</button>
+    </div>
     <div style="margin-bottom:24px;">
       <div style="font-size:11px;color:#FF6B00;font-weight:700;letter-spacing:3px;text-transform:uppercase;margin-bottom:6px;">🔒 Owner Only</div>
       <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">📄 CONTRACT BUILDER</h1>
@@ -15694,6 +16532,7 @@ async function openContractBuilderEditor(sourceType, templateId){
     title: existing?.title || '',
     description: existing?.description || '',
     program_id: existing?.program_id || '',
+    target_role: existing?.target_role || 'agent',
     body_html: existing?.body_html || defaultContractTemplate(),
     upload_url: existing?.upload_url || '',
     upload_path: existing?.upload_path || '',
@@ -15726,12 +16565,19 @@ function renderContractEditor(){
     <h2 style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:#fff;margin-bottom:6px;letter-spacing:1px;">${e.templateId ? 'Edit' : 'New'} Contract — ${isUpload ? '📎 Uploaded PDF' : '✍️ Rich Text Editor'}</h2>
     <div style="font-size:12.5px;color:rgba(255,255,255,0.5);margin-bottom:16px;">${isUpload ? 'Upload your prepared PDF/Word document.' : 'Write the contract below. Use {{tokens}} where the agent\'s details should appear when they sign.'}</div>
 
-    <div style="display:grid;grid-template-columns:2fr 1fr;gap:10px;">
+    <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:10px;">
       <div class="form-group"><label class="form-label">Contract Title *</label><input id="cb-title" class="form-input" value="${escapeHtml(e.title)}" placeholder="e.g. Independent Contractor Agreement"/></div>
       <div class="form-group"><label class="form-label">Program (optional)</label>
         <select id="cb-program" class="form-input" style="background:#1a1a1a;">
           <option value="">— Any program —</option>
           ${allPrograms.map(p => `<option value="${p.id}" ${e.program_id===p.id?'selected':''}>${p.icon} ${p.name}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-group"><label class="form-label">Target Role *</label>
+        <select id="cb-target-role" class="form-input" style="background:#1a1a1a;">
+          <option value="agent" ${e.target_role==='agent'?'selected':''}>👤 Agent</option>
+          <option value="manager" ${e.target_role==='manager'?'selected':''}>👔 Manager</option>
+          <option value="all" ${e.target_role==='all'?'selected':''}>📌 All / General</option>
         </select>
       </div>
     </div>
@@ -15832,11 +16678,13 @@ async function cbHandleUpload(input){
   const titleEl = document.getElementById('cb-title');
   const descEl = document.getElementById('cb-desc');
   const progEl = document.getElementById('cb-program');
+  const roleEl = document.getElementById('cb-target-role');
   const activeEl = document.getElementById('cb-active');
   const autoEl = document.getElementById('cb-auto');
   if(titleEl)  e.title = titleEl.value;
   if(descEl)   e.description = descEl.value;
   if(progEl)   e.program_id = progEl.value;
+  if(roleEl)   e.target_role = roleEl.value;
   if(activeEl) e.active = activeEl.checked;
   if(autoEl)   e.auto_assign = autoEl.checked;
 
@@ -15871,6 +16719,7 @@ async function saveContractTemplateV2(){
   const title = document.getElementById('cb-title').value.trim();
   const description = document.getElementById('cb-desc').value.trim();
   const program_id = document.getElementById('cb-program').value || null;
+  const target_role = document.getElementById('cb-target-role')?.value || 'agent';
   const active = document.getElementById('cb-active').checked;
   const auto_assign = document.getElementById('cb-auto').checked;
   const msg = document.getElementById('cb-msg');
@@ -15887,7 +16736,7 @@ async function saveContractTemplateV2(){
   }
 
   const payload = {
-    title, description: description || null, program_id,
+    title, description: description || null, program_id, target_role,
     source_type: e.sourceType,
     body_html: e.sourceType === 'rich_text' ? body_html : null,
     upload_url: e.upload_url || null,
