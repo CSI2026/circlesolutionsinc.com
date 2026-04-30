@@ -2443,7 +2443,7 @@ function renderSidebar(){
   let openSection = sessionStorage.getItem('bo_open_section');
   if(activeAdminView){
     // If currently viewing an admin item, open the section that contains it
-    const inCompany = ['global-docs','my-forms','my-contracts','photo-audit-checkin','my-inventory'].includes(activeAdminView);
+    const inCompany = ['global-docs','my-forms','my-contracts','my-credentials','photo-audit-checkin','my-inventory'].includes(activeAdminView);
     const inAccount = ['profile','credentials'].includes(activeAdminView);
     if(inCompany) openSection = 'company';
     else if(inAccount) openSection = 'account';
@@ -2489,6 +2489,7 @@ function renderSidebar(){
     { id:'global-docs', label:'📁 Company Library', show:true },
     { id:'my-forms', label:'📋 My Forms', show:true },
     { id:'my-contracts', label:'📄 My Contracts', show:true },
+    { id:'my-credentials', label:'🔐 My Credentials', show:true },
     // Daily Check-In moved into Retail Energy → Tool Box (one-tap access alongside other daily tools)
     { id:'my-inventory', label:'📦 My Inventory', show:'async-myinv' }
   ];
@@ -2696,6 +2697,7 @@ function renderMainContent(){
   if(activeAdminView === 'forms-admin'){ renderFormsAdmin(el); return; }
   if(activeAdminView === 'my-forms'){ renderMyForms(el); return; }
   if(activeAdminView === 'my-contracts'){ renderMyContracts(el); return; }
+  if(activeAdminView === 'my-credentials'){ renderMyCredentials(el); return; }
   if(activeAdminView === 'onboarding-master'){ renderOnboardingMaster(el); return; }
   if(activeAdminView === 'onboarding-pending'){ renderOnboardingPending(el); return; }
   if(activeAdminView === 'stores'){ renderStoresAdmin(el); return; }
@@ -4424,8 +4426,258 @@ async function openAgentProfile(userId){
           </div>
         ` : ''}
       `}
+    </div>
+
+    <!-- PROGRAM CREDENTIALS (Owner + Onboarding only). One row per program
+         the agent is enrolled in. Username is the lookup key for partner
+         commission CSVs; password is masked + reveal-button + audit-logged. -->
+    ${canViewOnboarding ? renderProgramCredentialsBlock(agent) : ''}`;
+}
+
+// Renders the program-credentials card on an agent's profile. Owner/Admin/
+// Onboarding can view + edit. The block fetches credentials lazily after
+// the profile renders so we don't block the main paint.
+function renderProgramCredentialsBlock(agent){
+  // Card stub — populated by _loadProgramCredentialsBlock right after render.
+  const stubId = 'pcred-block-' + agent.id;
+  setTimeout(() => _loadProgramCredentialsBlock(agent.id, stubId), 0);
+  return `
+    <div class="bo-card" id="${stubId}" style="margin-top:14px;border:1px solid rgba(168,85,247,0.25);background:linear-gradient(135deg,rgba(168,85,247,0.05),rgba(168,85,247,0));">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#A855F7;letter-spacing:1.5px;">🔐 PROGRAM CREDENTIALS</div>
+        <div style="font-size:11px;color:rgba(255,255,255,0.4);font-style:italic;">Loading…</div>
+      </div>
     </div>`;
 }
+
+async function _loadProgramCredentialsBlock(userId, stubId){
+  const el = document.getElementById(stubId);
+  if(!el) return;
+  // Get the agent's programs so we can show one slot per program (even empty)
+  const { data: prof } = await sb.from('profiles').select('programs, full_name, email').eq('id', userId).maybeSingle();
+  const programs = (prof?.programs || []).map(pid => allPrograms.find(p => p.id === pid)).filter(Boolean);
+  // Get existing credentials for the agent
+  const { data: creds, error } = await sb.from('program_credentials').select('*').eq('user_id', userId);
+  if(error){
+    el.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#A855F7;letter-spacing:1.5px;">🔐 PROGRAM CREDENTIALS</div>
+      </div>
+      <div style="color:#F87171;font-size:12.5px;">Could not load credentials: ${escapeHtml(error.message)}</div>`;
+    return;
+  }
+  const credsByProgram = {};
+  (creds || []).forEach(c => { credsByProgram[c.program_id] = c; });
+
+  let body = '';
+  if(programs.length === 0){
+    body = '<div style="color:rgba(255,255,255,0.5);font-size:12.5px;padding:18px;text-align:center;background:rgba(255,255,255,0.02);border-radius:8px;">This contractor isn\'t in any programs yet. Edit their profile to assign one before storing credentials.</div>';
+  } else {
+    body = programs.map(prog => {
+      const c = credsByProgram[prog.id];
+      const hasCreds = !!c;
+      return `
+        <div style="background:rgba(255,255,255,0.025);border:1px solid ${prog.color}33;border-left:3px solid ${prog.color};border-radius:8px;padding:12px 14px;margin-bottom:8px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px;">
+            <div style="font-size:13px;font-weight:700;color:${prog.color};letter-spacing:0.5px;">${prog.icon} ${escapeHtml(prog.name)}</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;">
+              <button class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:11px;" onclick="openProgramCredModal('${userId}','${prog.id}')">${hasCreds ? '✎ Edit' : '+ Add'}</button>
+              ${hasCreds ? `<button class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:11px;color:#F87171;border-color:rgba(248,113,113,0.3);" onclick="deleteProgramCred('${c.id}','${escapeHtml(prog.name)}')">🗑</button>` : ''}
+            </div>
+          </div>
+          ${hasCreds ? `
+            <div style="display:grid;grid-template-columns:auto 1fr;gap:6px 12px;font-size:12.5px;align-items:center;">
+              <div style="color:rgba(255,255,255,0.45);font-weight:700;font-size:10.5px;letter-spacing:1.5px;">USERNAME</div>
+              <div style="color:#fff;font-family:Menlo,monospace;display:flex;align-items:center;gap:6px;">
+                <span>${escapeHtml(c.username)}</span>
+                <button class="bo-btn bo-btn-ghost" style="padding:2px 8px;font-size:10px;" onclick="copyToClipboard('${escapeHtml(c.username).replace(/'/g,"\\'")}', this)">📋</button>
+              </div>
+              ${c.password ? `
+                <div style="color:rgba(255,255,255,0.45);font-weight:700;font-size:10.5px;letter-spacing:1.5px;">PASSWORD</div>
+                <div style="color:#fff;font-family:Menlo,monospace;display:flex;align-items:center;gap:6px;">
+                  <span id="pcred-pw-${c.id}" data-revealed="0">••••••••</span>
+                  <button id="pcred-btn-${c.id}" class="bo-btn bo-btn-ghost" style="padding:2px 8px;font-size:10px;" onclick="toggleCredPasswordReveal('${c.id}', '${escapeHtml(c.password).replace(/'/g,"\\'").replace(/"/g,'&quot;')}')">👁 Reveal</button>
+                </div>
+              ` : ''}
+              ${c.portal_url ? `
+                <div style="color:rgba(255,255,255,0.45);font-weight:700;font-size:10.5px;letter-spacing:1.5px;">PORTAL</div>
+                <div><a href="${escapeHtml(c.portal_url)}" target="_blank" style="color:#A855F7;font-size:12px;text-decoration:underline;text-decoration-color:rgba(168,85,247,0.4);text-underline-offset:3px;">${escapeHtml(c.portal_url)} ↗</a></div>
+              ` : ''}
+              ${c.notes ? `
+                <div style="color:rgba(255,255,255,0.45);font-weight:700;font-size:10.5px;letter-spacing:1.5px;">NOTES</div>
+                <div style="color:rgba(255,255,255,0.7);font-size:12px;line-height:1.5;white-space:pre-wrap;">${escapeHtml(c.notes)}</div>
+              ` : ''}
+            </div>
+          ` : `
+            <div style="color:rgba(255,255,255,0.4);font-size:12px;font-style:italic;">No credentials saved yet. Click + Add to enter the username and password the partner program issued for this contractor.</div>
+          `}
+        </div>`;
+    }).join('');
+  }
+
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#A855F7;letter-spacing:1.5px;">🔐 PROGRAM CREDENTIALS</div>
+      <div style="font-size:11px;color:rgba(255,255,255,0.45);">Login info from each partner program. Agent sees their own under <strong style="color:rgba(255,255,255,0.7);">Company → My Credentials</strong>.</div>
+    </div>
+    ${body}`;
+}
+
+// Toggle reveal/hide on a credential password — log every reveal.
+async function toggleCredPasswordReveal(credId, decodedPassword){
+  const span = document.getElementById('pcred-pw-' + credId);
+  const btn  = document.getElementById('pcred-btn-' + credId);
+  if(!span || !btn) return;
+  const isRevealed = span.dataset.revealed === '1';
+  if(isRevealed){
+    span.textContent = '••••••••';
+    span.dataset.revealed = '0';
+    btn.innerHTML = '👁 Reveal';
+    return;
+  }
+  // Reveal — log it
+  span.textContent = decodedPassword;
+  span.dataset.revealed = '1';
+  btn.innerHTML = '🙈 Hide';
+  try {
+    // Look up target user/program for the log row
+    const { data: cred } = await sb.from('program_credentials').select('user_id, program_id').eq('id', credId).maybeSingle();
+    await sb.from('program_credential_reveal_log').insert({
+      credential_id: credId,
+      revealed_by: currentProfile.id,
+      target_user_id: cred?.user_id || null,
+      target_program_id: cred?.program_id || null,
+      action: 'reveal',
+      user_agent: navigator.userAgent
+    });
+  } catch(e){ console.warn('Reveal log failed:', e); }
+}
+
+// Open the credential add/edit modal for a (user, program) pair.
+async function openProgramCredModal(userId, programId){
+  if(!_canManageCreds()){ alert('Access denied'); return; }
+  const program = (allPrograms || []).find(p => p.id === programId);
+  if(!program){ alert('Program not found'); return; }
+  const { data: existing } = await sb.from('program_credentials')
+    .select('*').eq('user_id', userId).eq('program_id', programId).maybeSingle();
+  const e = existing || {};
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#fff;margin-bottom:6px;letter-spacing:1px;">🔐 ${e.id ? 'Edit' : 'Add'} ${escapeHtml(program.name)} Credentials</h2>
+    <div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-bottom:14px;">These are the credentials the partner program assigned to this contractor. The agent will see them under their <strong>Company → My Credentials</strong> tab.</div>
+    <div class="form-group"><label class="form-label">Username *</label><input id="pcm-un" class="form-input" placeholder="e.g. ${programId === 'b2b' ? 'jdoe@united-energy' : programId === 'retail' ? 'reliant_jdoe_4427' : 'fiber_jdoe_001'}" value="${escapeHtml(e.username || '')}"/></div>
+    <div class="form-group">
+      <label class="form-label">Password</label>
+      <div style="display:flex;gap:8px;">
+        <input id="pcm-pw" class="form-input" type="text" placeholder="Partner-issued password" value="${escapeHtml(e.password || '')}"/>
+      </div>
+      <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">If the partner has a temp password the agent must change on first login, type that here and add a note below.</div>
+    </div>
+    <div class="form-group"><label class="form-label">Portal URL (optional)</label><input id="pcm-url" class="form-input" placeholder="https://${programId === 'retail' ? 'learn.trakstar.com' : programId === 'b2b' ? 'unitedenergyservices.com/portal' : 'partner-portal.example.com'}" value="${escapeHtml(e.portal_url || '')}"/></div>
+    <div class="form-group"><label class="form-label">Notes (optional)</label><textarea id="pcm-notes" class="form-input" rows="3" placeholder="e.g. 'Reliant agent ID 4427 — temp password, agent must change on first login'">${escapeHtml(e.notes || '')}</textarea></div>
+    <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;">
+      <button class="bo-btn bo-btn-primary" onclick="saveProgramCred('${userId}','${programId}','${e.id || ''}')">${e.id ? 'Save Changes' : 'Add Credentials'}</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="pcm-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-box').style.maxWidth = '520px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function saveProgramCred(userId, programId, existingId){
+  const msg = document.getElementById('pcm-msg');
+  const username = document.getElementById('pcm-un').value.trim();
+  const password = document.getElementById('pcm-pw').value;
+  const portal_url = document.getElementById('pcm-url').value.trim() || null;
+  const notes = document.getElementById('pcm-notes').value.trim() || null;
+  if(!username){ msg.innerHTML = '<span style="color:#F87171;">Username is required.</span>'; return; }
+
+  const payload = {
+    user_id: userId,
+    program_id: programId,
+    username,
+    password: password || null,
+    portal_url,
+    notes,
+    updated_by: currentProfile.id
+  };
+
+  let res;
+  if(existingId){
+    res = await sb.from('program_credentials').update(payload).eq('id', existingId);
+  } else {
+    payload.created_by = currentProfile.id;
+    res = await sb.from('program_credentials').insert(payload);
+  }
+  if(res.error){ msg.innerHTML = '<span style="color:#F87171;">' + escapeHtml(res.error.message) + '</span>'; return; }
+
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Saved.</span>';
+  // Notify the agent in-app so they know new credentials are available
+  try {
+    const programName = (allPrograms.find(p => p.id === programId) || {}).name || programId;
+    await notifyUser(userId, {
+      type: 'generic',
+      title: '🔐 New ' + programName + ' credentials',
+      body: 'Your office added/updated your login credentials for ' + programName + '. View them under Company → My Credentials.'
+    });
+  } catch(_){}
+
+  setTimeout(() => {
+    closeAllModals();
+    // Refresh just the credentials block
+    const stubId = 'pcred-block-' + userId;
+    if(document.getElementById(stubId)) _loadProgramCredentialsBlock(userId, stubId);
+  }, 800);
+}
+
+async function deleteProgramCred(credId, programName){
+  if(!_canManageCreds()){ alert('Access denied'); return; }
+  if(!confirm('Delete the ' + programName + ' credentials for this contractor?\n\nThis cannot be undone. The agent will no longer see these credentials in their My Credentials tab.')) return;
+  const { error } = await sb.from('program_credentials').delete().eq('id', credId);
+  if(error){ alert('Delete failed: ' + error.message); return; }
+  // Refresh the page to update the block
+  if(window._currentAgentProfileId) openAgentProfile(window._currentAgentProfileId);
+}
+
+function _canManageCreds(){
+  return currentProfile?.role === 'owner'
+      || currentProfile?.role === 'admin'
+      || currentProfile?.has_master_center_access === true;
+}
+
+window.renderProgramCredentialsBlock = renderProgramCredentialsBlock;
+window._loadProgramCredentialsBlock = _loadProgramCredentialsBlock;
+window.toggleCredPasswordReveal = toggleCredPasswordReveal;
+window.openProgramCredModal = openProgramCredModal;
+window.saveProgramCred = saveProgramCred;
+window.deleteProgramCred = deleteProgramCred;
+
+// Generic clipboard helper used by the credential rows + anywhere else.
+// Falls back to the legacy execCommand path if navigator.clipboard isn't
+// available (e.g. older Safari, or non-HTTPS contexts).
+async function copyToClipboard(text, btnEl){
+  try {
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+    if(btnEl){
+      const orig = btnEl.innerHTML;
+      btnEl.innerHTML = '✓';
+      setTimeout(() => { btnEl.innerHTML = orig; }, 900);
+    }
+  } catch(e){
+    alert('Copy failed: ' + e.message);
+  }
+}
+window.copyToClipboard = copyToClipboard;
 
 
 // Cancel ALL pending contract assignments for a specific agent.
@@ -17751,6 +18003,128 @@ window.finalizeContractSignature = finalizeContractSignature;
 window.downloadSignedContract = downloadSignedContract;
 window.viewSignedContract = viewSignedContract;
 window.openAgentContractsModal = openAgentContractsModal;
+
+// ═══════════════════════════════════════════════════════════════════════
+// MY CREDENTIALS — agent's view of their own program logins
+// ═══════════════════════════════════════════════════════════════════════
+// Every contractor sees their own program credentials here. RLS guarantees
+// they only see their own row(s). Office (owner/admin/onboarding) edits
+// these from the agent profile page.
+// ═══════════════════════════════════════════════════════════════════════
+async function renderMyCredentials(el){
+  el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading credentials…</div>';
+
+  const { data: creds, error } = await sb.from('program_credentials')
+    .select('*')
+    .eq('user_id', currentProfile.id)
+    .order('program_id');
+  if(error){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Error loading credentials: ' + escapeHtml(error.message) + '</div>';
+    return;
+  }
+
+  // Map to programs (so we can show even programs with no creds yet, with a
+  // helpful "Office hasn't set this up yet" message).
+  const myPrograms = (currentProfile.programs || []).map(pid => allPrograms.find(p => p.id === pid)).filter(Boolean);
+  const credsByProgram = {};
+  (creds || []).forEach(c => { credsByProgram[c.program_id] = c; });
+
+  el.innerHTML = `
+    <div style="margin-bottom:24px;">
+      <div style="font-size:11px;color:#A855F7;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:6px;">Your logins</div>
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;line-height:1;">🔐 My Credentials</h1>
+      <p style="font-size:14px;color:rgba(255,255,255,0.55);margin-top:8px;line-height:1.55;max-width:600px;">Login info for the partner program portals you work with. The office gives you these once your onboarding is complete. Tap "Reveal" to see your password.</p>
+    </div>
+
+    <div class="bo-card" style="margin-bottom:14px;background:linear-gradient(135deg,rgba(168,85,247,0.06),rgba(168,85,247,0));border:1px solid rgba(168,85,247,0.25);">
+      <div style="display:flex;align-items:flex-start;gap:12px;">
+        <div style="font-size:20px;flex-shrink:0;">🛡️</div>
+        <div style="font-size:12.5px;color:rgba(255,255,255,0.7);line-height:1.55;">
+          <strong style="color:#fff;">Keep these safe.</strong> Treat them like any other password — don't share, don't post in group chats, and let the office know if you think someone else has gotten access. Every reveal is logged.
+        </div>
+      </div>
+    </div>
+
+    ${myPrograms.length === 0 ? `
+      <div class="bo-card" style="text-align:center;padding:36px;">
+        <div style="font-size:42px;margin-bottom:10px;">🔐</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;margin-bottom:6px;">No programs yet</div>
+        <div style="color:rgba(255,255,255,0.55);font-size:13px;max-width:380px;margin:0 auto;line-height:1.5;">You aren't enrolled in any programs yet. Once your office assigns you to one (Reliant, B2B, or Fiber), your login info will show up here.</div>
+      </div>
+    ` : myPrograms.map(prog => {
+      const c = credsByProgram[prog.id];
+      const has = !!c;
+      return `
+        <div class="bo-card" style="margin-bottom:10px;border-left:3px solid ${prog.color};${has ? '' : 'background:rgba(255,255,255,0.015);'}">
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:${has ? '14' : '0'}px;">
+            <div style="font-size:24px;">${prog.icon}</div>
+            <div style="flex:1;min-width:160px;">
+              <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:${prog.color};letter-spacing:1px;">${escapeHtml(prog.name)}</div>
+              ${has ? '' : '<div style="font-size:12px;color:rgba(255,255,255,0.4);font-style:italic;margin-top:3px;">⏳ Your office has not added these yet. Check back after onboarding finishes.</div>'}
+            </div>
+            ${has && c.portal_url ? `<a href="${escapeHtml(c.portal_url)}" target="_blank" class="bo-btn bo-btn-primary" style="padding:6px 14px;font-size:12px;text-decoration:none;background:linear-gradient(135deg,${prog.color},${prog.color}88);">Open Portal ↗</a>` : ''}
+          </div>
+          ${has ? `
+            <div style="display:grid;grid-template-columns:auto 1fr;gap:10px 14px;font-size:13px;align-items:center;background:rgba(0,0,0,0.2);padding:14px;border-radius:8px;">
+              <div style="color:rgba(255,255,255,0.5);font-weight:700;font-size:11px;letter-spacing:1.5px;">USERNAME</div>
+              <div style="color:#fff;font-family:Menlo,monospace;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                <span style="word-break:break-all;">${escapeHtml(c.username)}</span>
+                <button class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:11px;flex-shrink:0;" onclick="copyToClipboard('${escapeHtml(c.username).replace(/'/g,"\\'")}', this); _logCredAction('${c.id}','copy');">📋 Copy</button>
+              </div>
+              ${c.password ? `
+                <div style="color:rgba(255,255,255,0.5);font-weight:700;font-size:11px;letter-spacing:1.5px;">PASSWORD</div>
+                <div style="color:#fff;font-family:Menlo,monospace;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+                  <span id="mycred-pw-${c.id}" data-revealed="0" style="word-break:break-all;">••••••••</span>
+                  <button id="mycred-btn-${c.id}" class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:11px;flex-shrink:0;" onclick="toggleMyCredReveal('${c.id}', '${escapeHtml(c.password).replace(/'/g,"\\'").replace(/"/g,'&quot;')}')">👁 Reveal</button>
+                  <button class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:11px;flex-shrink:0;" onclick="copyToClipboard('${escapeHtml(c.password).replace(/'/g,"\\'").replace(/"/g,'&quot;')}', this); _logCredAction('${c.id}','copy');">📋 Copy</button>
+                </div>
+              ` : ''}
+              ${c.notes ? `
+                <div style="color:rgba(255,255,255,0.5);font-weight:700;font-size:11px;letter-spacing:1.5px;align-self:flex-start;padding-top:3px;">NOTES</div>
+                <div style="color:rgba(255,255,255,0.85);font-size:12.5px;line-height:1.55;white-space:pre-wrap;">${escapeHtml(c.notes)}</div>
+              ` : ''}
+            </div>
+          ` : ''}
+        </div>`;
+    }).join('')}`;
+}
+
+// Agent-side toggle reveal — same as the office-side but logs as 'self_view'
+async function toggleMyCredReveal(credId, decodedPassword){
+  const span = document.getElementById('mycred-pw-' + credId);
+  const btn  = document.getElementById('mycred-btn-' + credId);
+  if(!span || !btn) return;
+  const isRevealed = span.dataset.revealed === '1';
+  if(isRevealed){
+    span.textContent = '••••••••';
+    span.dataset.revealed = '0';
+    btn.innerHTML = '👁 Reveal';
+    return;
+  }
+  span.textContent = decodedPassword;
+  span.dataset.revealed = '1';
+  btn.innerHTML = '🙈 Hide';
+  await _logCredAction(credId, 'self_view');
+}
+
+// Generic action logger — used by reveal + copy
+async function _logCredAction(credId, action){
+  try {
+    const { data: cred } = await sb.from('program_credentials').select('user_id, program_id').eq('id', credId).maybeSingle();
+    await sb.from('program_credential_reveal_log').insert({
+      credential_id: credId,
+      revealed_by: currentProfile.id,
+      target_user_id: cred?.user_id || null,
+      target_program_id: cred?.program_id || null,
+      action: action || 'reveal',
+      user_agent: navigator.userAgent
+    });
+  } catch(_){}
+}
+
+window.renderMyCredentials = renderMyCredentials;
+window.toggleMyCredReveal = toggleMyCredReveal;
+window._logCredAction = _logCredAction;
 window.openAgentProfile = openAgentProfile;
 window.openSendContractToAgentModal = openSendContractToAgentModal;
 window.sendContractsToAgent = sendContractsToAgent;
