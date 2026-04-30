@@ -7836,6 +7836,20 @@ async function _loadFormStatuses(userId){
 // Returns a map keyed by step id with { complete, locked, status, sourceRow }.
 // Sequential rule: step N is locked until step N-1 is complete.
 async function _loadStepStatuses(userId){
+  // CRITICAL: Resolve the onboarding flow based on the AGENT's programs, NOT
+  // the viewer's. Previously this used the global ONBOARDING_FORMS which was
+  // set from currentProfile (the viewer/owner) — meaning when an Owner viewed
+  // a B2B agent, they saw the Reliant flow. Bug fix: always look up the
+  // target agent's programs.
+  let agentPrograms = [];
+  let agentStage = 'coded';
+  try {
+    const { data: prof } = await sb.from('profiles').select('programs, candidate_stage').eq('id', userId).maybeSingle();
+    agentPrograms = prof?.programs || [];
+    agentStage = prof?.candidate_stage || 'coded';
+  } catch(_){}
+  const flow = _resolveOnboardingFlow(agentPrograms);
+
   // 1. Form-status rows (covers reliant_intake + ach_banking)
   const statuses = await _loadFormStatuses(userId);
 
@@ -7846,8 +7860,6 @@ async function _loadStepStatuses(userId){
       .select('id, status, assigned_at, signed_at, template_snapshot')
       .eq('user_id', userId)
       .order('assigned_at', { ascending: false });
-    // Find the FSA-style contract — flag templates that are auto-assign for retail
-    // Use ANY signed contract assigned for the agent as completion.
     contractRow = (contracts || []).find(c => c.status === 'signed') || (contracts || [])[0] || null;
   } catch(_){}
 
@@ -7867,12 +7879,10 @@ async function _loadStepStatuses(userId){
     b2bIntakeRow = data;
   } catch(_){}
 
-  // Build result for each step in ONBOARDING_FORMS
+  // Build result for each step in the AGENT's flow (not the viewer's)
   const result = {};
   let priorComplete = true;
-  // Determine the agent's current candidate stage so we can honor requiresStage
-  const myStage = currentProfile?.candidate_stage || 'coded';
-  for(const step of ONBOARDING_FORMS){
+  for(const step of flow){
     let complete = false;
     let sourceRow = null;
     if(step.kind === 'contract'){
@@ -7886,14 +7896,12 @@ async function _loadStepStatuses(userId){
       complete = b2bIntakeRow && ['submitted','reviewed','approved'].includes(b2bIntakeRow.status);
       sourceRow = b2bIntakeRow;
     } else {
-      // reliant_intake / ach_banking — use form_status table
       const s = statuses[step.id];
       complete = s && (s.status === 'submitted' || s.status === 'approved');
       sourceRow = s;
     }
-    // Stage gate — if step requires a candidate stage, lock it until reached
     let stageLocked = false;
-    if(step.requiresStage && !_stageAtOrAfter(myStage, step.requiresStage)){
+    if(step.requiresStage && !_stageAtOrAfter(agentStage, step.requiresStage)){
       stageLocked = true;
     }
     result[step.id] = {
@@ -7906,6 +7914,10 @@ async function _loadStepStatuses(userId){
     };
     if(!complete) priorComplete = false;  // anything after this is locked sequentially
   }
+  // Attach the resolved flow as a non-enumerable property so callers (e.g.
+  // renderOnboardingProfile) can iterate the AGENT's flow, not the viewer's.
+  Object.defineProperty(result, '__flow', { value: flow, enumerable: false });
+  Object.defineProperty(result, '__agentPrograms', { value: agentPrograms, enumerable: false });
   return result;
 }
 
@@ -7934,10 +7946,14 @@ async function renderOnboardingPacket(el){
   } catch(_){}
 
   // SEQUENTIAL flow: each step locked until the previous is complete.
+  // Use the AGENT's resolved flow (returned via stepStatuses.__flow) — never
+  // the global ONBOARDING_FORMS, which can be stale if the agent's programs
+  // changed mid-session.
   const stepStatuses = await _loadStepStatuses(currentProfile.id);
-  const total = ONBOARDING_FORMS.length;
-  const done = ONBOARDING_FORMS.filter(f => stepStatuses[f.id]?.complete).length;
-  const pct = Math.round((done / total) * 100);
+  const myFlow = stepStatuses.__flow || ONBOARDING_FORMS;
+  const total = myFlow.length;
+  const done = myFlow.filter(f => stepStatuses[f.id]?.complete).length;
+  const pct = total ? Math.round((done / total) * 100) : 0;
 
   // Stage banner content
   const myStage = currentProfile.candidate_stage || 'coded';
@@ -7962,7 +7978,7 @@ async function renderOnboardingPacket(el){
       </div>
     </div>
 
-    ${ONBOARDING_FORMS.map((f, idx) => {
+    ${myFlow.map((f, idx) => {
       const status = stepStatuses[f.id] || { complete:false, locked:true, sourceRow:null };
       const isComplete = status.complete;
       const isLocked = status.locked;
@@ -8036,7 +8052,12 @@ async function _maybeAutoProgressCandidateStage(){
   }
 
   // Step 2: forms_pending → screening_review when all 4 PRE-SCREEN forms are done
+  // (RELIANT-ONLY — B2B agents don't go through this pipeline. Their flow uses
+  // a contract + bg consent + B2B intake + ACH and stays at forms_pending until
+  // onboarding manually reviews.)
   if(stage === 'forms_pending'){
+    const programs = currentProfile?.programs || [];
+    if(!programs.includes('retail')) return;  // only Reliant uses screening_review
     const stepStatuses = await _loadStepStatuses(currentProfile.id);
     const preScreenSteps = ['background_consent','drug_consent','nrg_release','reliant_intake'];
     const allPreDone = preScreenSteps.every(id => stepStatuses[id]?.complete);
@@ -9556,10 +9577,10 @@ async function renderOnboardingProfile(el){
       <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('agents')" style="padding:7px 14px;font-size:12px;">← Back to Team</button>
     </div>
 
-    <!-- Status overview using sequential step statuses (all 6 steps) -->
+    <!-- Status overview using sequential step statuses (per AGENT's flow, not viewer's) -->
     <div class="bo-card" style="margin-bottom:14px;">
-      <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#FFC800;letter-spacing:1.5px;margin-bottom:10px;">📊 Onboarding Step Status</div>
-      ${ONBOARDING_FORMS.map((f, idx) => {
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#FFC800;letter-spacing:1.5px;margin-bottom:10px;">📊 Onboarding Step Status${stepStatuses.__agentPrograms?.length ? ' <span style="font-size:11px;color:rgba(255,255,255,0.5);font-weight:400;letter-spacing:0.5px;">— ' + stepStatuses.__agentPrograms.map(p => { const pr = (allPrograms||[]).find(x => x.id === p); return pr ? pr.name : p; }).join(', ') + ' flow</span>' : ''}</div>
+      ${(stepStatuses.__flow || ONBOARDING_FORMS).map((f, idx) => {
         const st = stepStatuses[f.id] || {};
         const isComplete = st.complete;
         const isLocked = st.locked;
@@ -9590,7 +9611,7 @@ async function renderOnboardingProfile(el){
         <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#00C6FF;letter-spacing:1.5px;margin-bottom:14px;">📄 Signed Consent Documents</div>
         <div style="display:grid;gap:8px;">
           ${(consents || []).map(c => {
-            const formMeta = ONBOARDING_FORMS.find(f => f.consentType === c.form_type);
+            const formMeta = (stepStatuses.__flow || ONBOARDING_FORMS).find(f => f.consentType === c.form_type);
             const pdfUrl = consentPdfUrls[c.form_type];
             return `
               <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 14px;background:rgba(0,198,255,0.04);border:1px solid rgba(0,198,255,0.18);border-radius:8px;flex-wrap:wrap;gap:8px;">
