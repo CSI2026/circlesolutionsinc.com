@@ -11625,18 +11625,37 @@ async function renderPhotoAuditCheckin(el){
   let stores = [];
   let scheduledStoreId = null;
   let mmName = null;
+  let mmEmail = null;
+  let mmPhone = null;
 
-  // Try the new MM-inheritance model first
+  const role = currentProfile?.role;
+  const isOwnerOrAdmin = role === 'owner' || role === 'admin';
+  const isOnboarding = currentProfile?.has_master_center_access === true;
+  const seesAllStores = isOwnerOrAdmin || isOnboarding;
+
+  // If owner/admin/onboarding is opening this page (typically for testing or a
+  // demo), surface ALL active retail stores so the page is functional. Real
+  // agents go through the MM-inheritance path below.
+  if(seesAllStores){
+    const { data: allStores } = await sb.from('stores').select('*').eq('active', true).order('name');
+    stores = allStores || [];
+  }
+
+  // Try the new MM-inheritance model
   if(currentProfile.reports_to){
-    const { data: mmRow } = await sb.from('profiles').select('id,full_name,email')
+    const { data: mmRow } = await sb.from('profiles').select('id,full_name,email,phone')
       .eq('id', currentProfile.reports_to).maybeSingle();
     if(mmRow){
       mmName = mmRow.full_name || mmRow.email;
-      const { data: smRows } = await sb.from('store_managers').select('store_id').eq('user_id', mmRow.id);
-      const mmStoreIds = (smRows || []).map(x => x.store_id);
-      if(mmStoreIds.length > 0){
-        const { data: storeRows } = await sb.from('stores').select('*').in('id', mmStoreIds).eq('active', true).order('name');
-        stores = storeRows || [];
+      mmEmail = mmRow.email;
+      mmPhone = mmRow.phone;
+      if(stores.length === 0){
+        const { data: smRows } = await sb.from('store_managers').select('store_id').eq('user_id', mmRow.id);
+        const mmStoreIds = (smRows || []).map(x => x.store_id);
+        if(mmStoreIds.length > 0){
+          const { data: storeRows } = await sb.from('stores').select('*').in('id', mmStoreIds).eq('active', true).order('name');
+          stores = storeRows || [];
+        }
       }
     }
   }
@@ -11657,11 +11676,30 @@ async function renderPhotoAuditCheckin(el){
   }
 
   if(stores.length === 0){
+    // Helpful empty state — tell them WHO to contact and HOW
+    let helpHtml = '';
+    if(mmName){
+      helpHtml = `
+        <div style="margin-top:14px;padding:14px 16px;background:rgba(0,198,255,0.05);border:1px solid rgba(0,198,255,0.25);border-radius:8px;text-align:left;max-width:420px;margin-left:auto;margin-right:auto;">
+          <div style="font-size:11px;color:#00C6FF;letter-spacing:1.5px;font-weight:700;margin-bottom:8px;">YOUR MANAGER</div>
+          <div style="font-size:14px;color:#fff;font-weight:600;margin-bottom:4px;">${escapeHtml(mmName)}</div>
+          ${mmEmail ? `<div style="font-size:12.5px;margin-bottom:3px;">📧 <a href="mailto:${escapeHtml(mmEmail)}?subject=Need%20store%20assignment" style="color:#00C6FF;">${escapeHtml(mmEmail)}</a></div>` : ''}
+          ${mmPhone ? `<div style="font-size:12.5px;">📞 <a href="tel:${escapeHtml(mmPhone)}" style="color:#00C6FF;">${escapeHtml(mmPhone)}</a></div>` : ''}
+          <div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-top:10px;line-height:1.5;">Reach out and ask them to add you to their weekly store schedule.</div>
+        </div>`;
+    } else {
+      helpHtml = `
+        <div style="margin-top:14px;padding:14px 16px;background:rgba(255,200,0,0.06);border:1px solid rgba(255,200,0,0.25);border-radius:8px;text-align:left;max-width:420px;margin-left:auto;margin-right:auto;">
+          <div style="font-size:11px;color:#FFC800;letter-spacing:1.5px;font-weight:700;margin-bottom:8px;">NO MANAGER ASSIGNED</div>
+          <div style="font-size:12.5px;color:rgba(255,255,255,0.75);line-height:1.55;">You don't have a manager assigned to your account yet. Email <a href="mailto:onboarding@circlesolutionsinc.com" style="color:#FFC800;">onboarding@circlesolutionsinc.com</a> to get this set up.</div>
+        </div>`;
+    }
     el.innerHTML = `
-      <div class="bo-card" style="text-align:center;padding:40px;">
-        <div style="font-size:42px;margin-bottom:10px;">🏪</div>
-        <div style="color:rgba(255,255,255,0.5);font-size:14px;">You're not assigned to any stores yet.</div>
-        <div style="color:rgba(255,255,255,0.4);font-size:12.5px;margin-top:6px;">${mmName ? 'Your manager (' + escapeHtml(mmName) + ') has no stores assigned to them. Ask them or the office to set this up.' : 'Ask your manager to assign you to your store(s) so you can check in.'}</div>
+      <div class="bo-card" style="text-align:center;padding:36px 24px;">
+        <div style="font-size:48px;margin-bottom:10px;">🏪</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;margin-bottom:6px;">No store assigned for today</div>
+        <div style="color:rgba(255,255,255,0.55);font-size:13px;max-width:380px;margin:0 auto;line-height:1.55;">${mmName ? 'Your manager has not scheduled you to a store yet.' : 'You are not set up to check in anywhere yet.'}</div>
+        ${helpHtml}
       </div>`;
     return;
   }
