@@ -2425,7 +2425,7 @@ function renderSidebar(){
   }
   const canInventory = isOwner || isAdmin || isManager || currentProfile.is_inventory_manager;
   if(canInventory){ adminNavItems.push({ id:'inventory', label:'📦 Inventory' }); }
-  if(isOwner || isAdmin || isManager || isTeamLead){
+  if(isOwner || isAdmin || isManager || isTeamLead || currentProfile.has_master_center_access){
     adminNavItems.push({ id:'photo-audits-review', label:'📸 Photo Audits' });
   }
   if(isOwner || isAdmin || currentProfile.is_payroll_manager){
@@ -12126,17 +12126,67 @@ async function notifyOffHoursCheckin(audit, storeName, minutesOff, auditType){
 }
 
 async function renderPhotoAuditsReview(el){
-  const canView = ['owner','admin','manager','team_lead'].includes(currentProfile.role);
+  // Owner + Admin + Manager + Team Lead + Onboarding can view audits.
+  // (Onboarding needs visibility for compliance + dress-code checks.)
+  const role = currentProfile?.role;
+  const canView = ['owner','admin','manager','team_lead'].includes(role)
+                  || currentProfile?.has_master_center_access === true;
   if(!canView){ el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied.</div>'; return; }
 
-  const filter = window._auditFilter || 'all';
-  const { data: audits } = await sb.from('photo_audits')
-    .select('*, stores(name,city), profiles!photo_audits_user_id_fkey(full_name,email,avatar_url)')
-    .order('created_at', { ascending: false }).limit(200);
+  el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading photo audits…</div>';
 
-  const failed = (audits || []).filter(a => !a.geofence_passed);
+  const filter = window._auditFilter || 'all';
+
+  // Run a robust plain query (no embed). The embed FK alias varies by how the
+  // table was created and PostgREST is finicky about it; do the join manually
+  // for reliability. Either way, we always render — never leave blank.
+  let audits = [];
+  let queryError = null;
+  try {
+    const r = await sb.from('photo_audits')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(200);
+    if(r.error) throw r.error;
+    audits = r.data || [];
+
+    // Stitch in stores + profiles (separate queries — no embed)
+    const userIds  = [...new Set(audits.map(a => a.user_id).filter(Boolean))];
+    const storeIds = [...new Set(audits.map(a => a.store_id).filter(Boolean))];
+    const [pr, sr] = await Promise.all([
+      userIds.length  ? sb.from('profiles').select('id,full_name,email,avatar_url').in('id', userIds) : Promise.resolve({ data: [] }),
+      storeIds.length ? sb.from('stores').select('id,name,city,latitude,longitude').in('id', storeIds) : Promise.resolve({ data: [] })
+    ]);
+    const pMap = {}; (pr.data || []).forEach(p => { pMap[p.id] = p; });
+    const sMap = {}; (sr.data || []).forEach(s => { sMap[s.id] = s; });
+    audits.forEach(a => {
+      a.profiles = pMap[a.user_id] || null;
+      a.stores   = sMap[a.store_id] || null;
+    });
+  } catch(e){
+    console.error('Photo audits load failed:', e);
+    queryError = e;
+  }
+
+  if(queryError){
+    el.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:42px;color:#fff;">📸 Photo Audits</h1>
+        <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('agents')" style="padding:7px 14px;font-size:12px;">← Back</button>
+      </div>
+      <div class="bo-card" style="color:#F87171;border:1px solid rgba(248,113,113,0.3);">
+        <div style="font-weight:600;margin-bottom:8px;font-size:14px;">⚠️ Could not load photo audits.</div>
+        <div style="font-size:12.5px;color:rgba(248,113,113,0.85);margin-bottom:8px;">${escapeHtml(queryError.message || String(queryError))}</div>
+        <div style="font-size:12px;color:rgba(255,255,255,0.5);line-height:1.55;">If this persists, the photo_audits table may need its RLS policy updated. Check Supabase logs or contact support.</div>
+      </div>`;
+    return;
+  }
+
+  const failed = audits.filter(a => !a.geofence_passed);
   const today = new Date(); today.setHours(0,0,0,0);
-  const todayAudits = (audits || []).filter(a => new Date(a.created_at) >= today);
+  const todayAudits = audits.filter(a => new Date(a.created_at) >= today);
+  // Off-hours flagged audits (after-hours / before-hours per Phase 3.3)
+  const offHours = audits.filter(a => a.off_hours_check);
 
   el.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px;flex-wrap:wrap;gap:12px;">
@@ -12144,22 +12194,30 @@ async function renderPhotoAuditsReview(el){
         <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">📸 Photo Audits</h1>
         <p style="font-size:14px;color:rgba(255,255,255,0.5);">Daily check-in / check-out submissions with photo + GPS verification.</p>
       </div>
+      <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('agents')" style="padding:7px 14px;font-size:12px;">← Back to Team</button>
     </div>
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:18px;">
-      <div class="stat-card" style="cursor:pointer;${filter==='all'?'border-color:#FF6B00;':''}" onclick="setAuditFilter('all')"><div class="stat-num" style="color:#FFD700;">${(audits || []).length}</div><div class="stat-lbl">Total (recent)</div></div>
+      <div class="stat-card" style="cursor:pointer;${filter==='all'?'border-color:#FF6B00;':''}" onclick="setAuditFilter('all')"><div class="stat-num" style="color:#FFD700;">${audits.length}</div><div class="stat-lbl">Total (recent)</div></div>
       <div class="stat-card" style="cursor:pointer;${filter==='today'?'border-color:#FF6B00;':''}" onclick="setAuditFilter('today')"><div class="stat-num" style="color:#00FF88;">${todayAudits.length}</div><div class="stat-lbl">Today</div></div>
       <div class="stat-card" style="cursor:pointer;${filter==='failed'?'border-color:#FF6B00;':''}" onclick="setAuditFilter('failed')"><div class="stat-num" style="color:#F87171;">${failed.length}</div><div class="stat-lbl">⚠️ Geofence Fails</div></div>
+      ${offHours.length > 0 ? `<div class="stat-card" style="cursor:pointer;${filter==='off_hours'?'border-color:#FF6B00;':''}" onclick="setAuditFilter('off_hours')"><div class="stat-num" style="color:#FFC800;">${offHours.length}</div><div class="stat-lbl">⏰ Off Hours</div></div>` : ''}
     </div>
-    ${(audits || []).length === 0 ? `
-      <div class="bo-card" style="text-align:center;padding:40px;">
-        <div style="font-size:42px;margin-bottom:10px;">📸</div>
-        <div style="color:rgba(255,255,255,0.5);font-size:14px;">No photo audits submitted yet.</div>
+    ${audits.length === 0 ? `
+      <div class="bo-card" style="text-align:center;padding:50px 30px;border:1px solid rgba(255,255,255,0.06);">
+        <div style="font-size:54px;margin-bottom:14px;">📸</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#fff;letter-spacing:1px;margin-bottom:8px;">No audits yet</div>
+        <div style="color:rgba(255,255,255,0.6);font-size:13.5px;max-width:440px;margin:0 auto 18px;line-height:1.6;">Once your retail agents start submitting their daily check-ins (selfie + kiosk photo + GPS), every submission will appear here for compliance review — dress code, location verification, attendance tracking, and off-hours flagging.</div>
+        <div style="background:rgba(0,198,255,0.05);border:1px solid rgba(0,198,255,0.2);border-radius:8px;padding:14px 18px;max-width:440px;margin:0 auto;text-align:left;font-size:12.5px;color:rgba(255,255,255,0.7);line-height:1.6;">
+          <div style="color:#00C6FF;font-weight:700;letter-spacing:1.5px;font-size:11px;margin-bottom:6px;">HOW AGENTS SUBMIT</div>
+          They open <strong>Retail Energy → 🧰 Tool Box → 📸 Daily Check-In</strong> on their phone, take a selfie + kiosk photo, and tap submit. Submissions appear here within seconds.
+        </div>
       </div>
     ` : `
       <div style="display:flex;flex-direction:column;gap:8px;">
-        ${(audits || []).filter(a => {
+        ${audits.filter(a => {
           if(filter === 'today') return new Date(a.created_at) >= today;
           if(filter === 'failed') return !a.geofence_passed;
+          if(filter === 'off_hours') return a.off_hours_check;
           return true;
         }).map(a => renderAuditRow(a)).join('') || '<div style="text-align:center;padding:30px;color:rgba(255,255,255,0.4);">No audits match this filter.</div>'}
       </div>
