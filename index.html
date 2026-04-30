@@ -4101,6 +4101,7 @@ async function renderAgents(el){
                 ${(isOwner || isAdmin) && !isSelf ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" title="Resend welcome email" onclick="emailLoginToAgent('${a.id}')">📧</button>` : ''}
                 ${(isOwner || isAdmin) && !isSelf ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" title="Copy login link" onclick="copyLoginLink('${a.id}')">🔗</button>` : ''}
                 ${canResetPw ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" title="Manage password" onclick="openResetPasswordModal('${a.id}')">🔑</button>` : ''}
+                ${(isOwner || isAdmin) ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;color:#FFC800;border-color:rgba(255,200,0,0.4);" title="Cancel all pending contracts for this agent" onclick="cancelPendingContractsFor('${a.id}', '${(a.full_name || a.email).replace(/'/g,"\\'")}')">🚫 Cancel Pending</button>` : ''}
                 ${canToggleActive ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" onclick="toggleAgentActive('${a.id}', ${a.active})">${a.active ? 'Deactivate' : 'Activate'}</button>` : ''}
                 ${canDelete ? `<button class="bo-btn bo-btn-danger" style="padding:5px 10px;font-size:11px;margin-left:4px;" onclick="deleteAgent('${a.id}', '${(a.full_name || a.email).replace(/'/g,"\\'")}')">🗑️</button>` : ''}
               </td>
@@ -4399,6 +4400,44 @@ async function openAgentProfile(userId){
     </div>`;
 }
 
+
+// Cancel ALL pending contract assignments for a specific agent.
+// Use case: contracts were sent to the wrong agent or the wrong template was
+// auto-assigned. This deletes only PENDING (unsigned) assignments — never
+// touches signed ones.
+async function cancelPendingContractsFor(userId, agentName){
+  if(!['owner','admin'].includes(currentProfile.role)){ alert('Access denied'); return; }
+  // First, count what's pending so the user knows what they're cancelling
+  const { data: pending, error: fetchErr } = await sb.from('contract_assignments')
+    .select('id, template_snapshot, status, assigned_at')
+    .eq('user_id', userId)
+    .eq('status', 'pending');
+  if(fetchErr){ alert('Could not check pending contracts: ' + fetchErr.message); return; }
+  if(!pending || pending.length === 0){
+    alert('No pending contracts for ' + agentName + '. (Signed contracts are never deleted.)');
+    return;
+  }
+  const titles = pending.map(p => '  • ' + (p.template_snapshot?.title || 'Untitled')).join('\n');
+  const confirmMsg = 'Cancel ' + pending.length + ' PENDING contract' + (pending.length === 1 ? '' : 's') + ' for ' + agentName + '?\n\n' + titles + '\n\nThis CANNOT be undone. The contracts will disappear from the agent\'s My Contracts list.\n\nSigned contracts are NEVER deleted by this action.';
+  if(!confirm(confirmMsg)) return;
+
+  const ids = pending.map(p => p.id);
+  const { error: delErr } = await sb.from('contract_assignments').delete().in('id', ids);
+  if(delErr){ alert('Cancel failed: ' + delErr.message); return; }
+
+  // Notify the agent that the assignments were withdrawn
+  try {
+    await notifyUser(userId, {
+      type: 'generic',
+      title: '📄 Pending contracts cancelled',
+      body: pending.length + ' pending contract' + (pending.length === 1 ? '' : 's') + ' withdrawn by office. New ones may be sent shortly.'
+    });
+  } catch(_){}
+
+  alert('✓ Cancelled ' + pending.length + ' pending contract' + (pending.length === 1 ? '' : 's') + ' for ' + agentName + '.');
+  renderMainContent();
+}
+window.cancelPendingContractsFor = cancelPendingContractsFor;
 
 // Reverse direction of openSendContractModal: pick agent first, show templates to send.
 async function openSendContractToAgentModal(userId){
@@ -4933,8 +4972,8 @@ async function saveAgent(editId){
 
     const newUserId = data?.user_id;
 
-    // Auto-assign contracts for this agent's programs
-    if(newUserId) await autoAssignContracts(newUserId, programs);
+    // Auto-assign contracts for this agent's programs (filtered by their role)
+    if(newUserId) await autoAssignContracts(newUserId, programs, role);
 
     // Send welcome email — best-effort
     let emailStatus = '';
@@ -4958,20 +4997,20 @@ async function saveAgent(editId){
 }
 
 // Auto-assign contract templates when a new agent is added to a program
-async function autoAssignContracts(userId, programs){
+async function autoAssignContracts(userId, programs, userRole){
   if(!programs || programs.length === 0) return;
 
-  // Legacy external-link templates (if any still exist)
-  try {
-    const { data: legacyTemplates } = await sb.from('contract_templates').select('*').in('program_id', programs).eq('auto_assign', true);
-    if(legacyTemplates && legacyTemplates.length > 0){
-      const rows = legacyTemplates.map(t => ({
-        user_id: userId, program_id: t.program_id, title: t.title,
-        url: t.url || null, status: 'pending', notes: t.description || null
-      }));
-      await sb.from('contracts').insert(rows);
-    }
-  } catch(e){ /* legacy table may not exist for new installs */ }
+  // Map the user's role to the contract target_role bucket:
+  //   'manager' or 'team_lead' → 'manager' bucket
+  //   anything else            → 'agent' bucket
+  // Templates flagged target_role='all' (general / role-agnostic) go to BOTH.
+  const isMgr = userRole === 'manager' || userRole === 'team_lead';
+  const myRoleBucket = isMgr ? 'manager' : 'agent';
+
+  // Legacy external-link templates (no target_role column on legacy table —
+  // safest to skip auto-assign entirely on legacy until/unless the legacy
+  // table is migrated. This prevents sending the wrong contract.)
+  // (No-op — legacy templates require manual send.)
 
   // NEW in-house contract templates (v2) — creates contract_assignments rows
   try {
@@ -4979,7 +5018,8 @@ async function autoAssignContracts(userId, programs){
       .select('*')
       .in('program_id', programs)
       .eq('auto_assign', true)
-      .eq('active', true);
+      .eq('active', true)
+      .or(`target_role.eq.${myRoleBucket},target_role.eq.all`);
     if(v2Templates && v2Templates.length > 0){
       const rows = v2Templates.map(t => ({
         template_id: t.id,
