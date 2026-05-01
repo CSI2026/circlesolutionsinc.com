@@ -4868,17 +4868,32 @@ async function _getMySalesAggregates(userId, programId){
   const week  = _scoreboardWeekRange();
   const month = _scoreboardMonthRange();
   const today = new Date().toISOString().slice(0,10);
+
+  // CRITICAL: weeks can straddle months (e.g. Mon Apr 27 → Sun May 3).
+  // If we only query the month range, sales from the prior month that
+  // belong to "this week" are excluded → personal weekly count reads 0
+  // even though the leaderboard correctly counts the same row.
+  // Fix: query the UNION of week + month ranges, then bucket each row
+  // into weekly/monthly/today client-side.
+  const startStr = (week.mondayStr < month.firstStr) ? week.mondayStr : month.firstStr;
+  const endStr   = (week.sundayStr > month.lastStr)  ? week.sundayStr : month.lastStr;
+
   const { data, error } = await sb.from('daily_sales')
-    .select('sale_date, count')
+    .select('sale_date, count, program_id, user_id')
     .eq('user_id', userId)
-    .eq('program_id', programId)
-    .gte('sale_date', month.firstStr)
-    .lte('sale_date', month.lastStr);
+    .gte('sale_date', startStr)
+    .lte('sale_date', endStr);
+
   if(error || !data) return { weekly: 0, monthly: 0, today: 0, week, month };
+
   let weekly = 0, monthly = 0, todayCount = 0;
+  const targetProg = (programId || '').trim().toLowerCase();
   for(const row of data){
-    monthly += row.count;
-    if(row.sale_date >= week.mondayStr && row.sale_date <= week.sundayStr) weekly += row.count;
+    if((row.program_id || '').trim().toLowerCase() !== targetProg) continue;
+    // Bucket each row independently — monthly bucket uses month bounds,
+    // weekly bucket uses week bounds, today bucket uses today.
+    if(row.sale_date >= month.firstStr && row.sale_date <= month.lastStr) monthly += row.count;
+    if(row.sale_date >= week.mondayStr  && row.sale_date <= week.sundayStr) weekly += row.count;
     if(row.sale_date === today) todayCount += row.count;
   }
   return { weekly, monthly, today: todayCount, week, month };
@@ -4886,18 +4901,28 @@ async function _getMySalesAggregates(userId, programId){
 
 async function _getProgramLeaderboard(programId){
   const week = _scoreboardWeekRange();
-  // Pull this week's sales in this program for everyone, then group by user
-  const [{ data: rows }, { data: users }] = await Promise.all([
-    sb.from('daily_sales').select('user_id, count')
-      .eq('program_id', programId)
+
+  // Pull ALL sales rows for this week (no program filter server-side).
+  // Filter program client-side using the same trimmed/lowercase comparison
+  // as _getMySalesAggregates so the two CANNOT diverge.
+  const [{ data: rows, error: rowsErr }, { data: users }] = await Promise.all([
+    sb.from('daily_sales').select('user_id, count, program_id, sale_date')
       .gte('sale_date', week.mondayStr)
       .lte('sale_date', week.sundayStr),
     sb.from('profiles').select('id, full_name, email, role, avatar_url, programs')
       .contains('programs', [programId])
       .eq('active', true)
   ]);
+
+  if(rowsErr) console.warn('[leaderboard] error:', rowsErr);
+
+  const targetProg = (programId || '').trim().toLowerCase();
   const totals = {};
-  (rows || []).forEach(r => { totals[r.user_id] = (totals[r.user_id] || 0) + r.count; });
+  (rows || []).forEach(r => {
+    if((r.program_id || '').trim().toLowerCase() !== targetProg) return;
+    totals[r.user_id] = (totals[r.user_id] || 0) + r.count;
+  });
+
   const leaderboard = (users || []).map(u => ({
     user_id: u.id,
     name: u.full_name || u.email,
