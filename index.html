@@ -2413,6 +2413,10 @@ function renderSidebar(){
     adminNavItems.push({ id:'stores', label:'🏪 Stores' });
     adminNavItems.push({ id:'contract-hub', label:'📄 Contract Hub' });
   }
+  // 📊 Onboarding Status — Owner + Admin + Onboarding + MMs (MMs see only their team)
+  if(isOwner || isAdmin || isManager || isTeamLead || currentProfile.has_master_center_access){
+    adminNavItems.push({ id:'onboarding-status', label:'📊 Onboarding Status' });
+  }
   // 📊 Daily Sales Entry — Owner + Admin + Onboarding + MMs (MMs see only their team)
   if(isOwner || isAdmin || isManager || isTeamLead || currentProfile.has_master_center_access){
     adminNavItems.push({ id:'daily-sales-entry', label:'📊 Sales Entry' });
@@ -2706,6 +2710,7 @@ function renderMainContent(){
   if(activeAdminView === 'programs-admin'){ renderProgramsAdmin(el); return; }
   if(activeAdminView === 'sales-goals'){ renderSalesGoalsAdmin(el); return; }
   if(activeAdminView === 'daily-sales-entry'){ renderDailySalesEntry(el); return; }
+  if(activeAdminView === 'onboarding-status'){ renderOnboardingStatus(el); return; }
   if(activeAdminView === 'owner-panel'){ renderOwnerPanel(el); return; }
   if(activeAdminView === 'markets'){ renderMarketsAdmin(el); return; }
   if(activeAdminView === 'global-docs'){ renderGlobalDocuments(el); return; }
@@ -4303,6 +4308,7 @@ async function openAgentProfile(userId){
       ${canManage ? `
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:18px;padding-top:18px;border-top:1px solid rgba(255,255,255,0.07);">
           ${(isOwner || currentProfile.has_master_center_access) ? `<button class="bo-btn bo-btn-primary" style="background:linear-gradient(135deg,#00C6FF,#0078D7);" onclick="openAgentOnboarding('${agent.id}')">📋 View Onboarding</button>` : ''}
+          <button class="bo-btn bo-btn-primary" onclick="openSendPackageModal('${agent.id}')" style="background:linear-gradient(135deg,#A855F7,#FF0080);">📦 Send Package</button>
           <button class="bo-btn bo-btn-primary" onclick="openSendContractToAgentModal('${agent.id}')">📄 Send Contract</button>
           <button class="bo-btn bo-btn-ghost" onclick="openAgentModal('${agent.id}')">✏️ Edit Profile</button>
           <button class="bo-btn bo-btn-ghost" onclick="openResetPasswordModal('${agent.id}')">🔑 Manage Password</button>
@@ -4455,6 +4461,7 @@ async function openAgentProfile(userId){
     <!-- PROGRAM CREDENTIALS (Owner + Onboarding only). One row per program
          the agent is enrolled in. Username is the lookup key for partner
          commission CSVs; password is masked + reveal-button + audit-logged. -->
+    ${canViewOnboarding ? renderOnboardingChecklistBlock(agent) : ''}
     ${canViewOnboarding ? renderProgramCredentialsBlock(agent) : ''}`;
 }
 
@@ -4473,6 +4480,106 @@ function renderProgramCredentialsBlock(agent){
       </div>
     </div>`;
 }
+
+// Onboarding Checklist — live status of every contract this agent has been
+// assigned, plus credentials state, plus coded status. Same data as the
+// Onboarding Status dashboard but formatted for the agent profile view.
+function renderOnboardingChecklistBlock(agent){
+  const stubId = 'ochecklist-block-' + agent.id;
+  setTimeout(() => _loadOnboardingChecklistBlock(agent.id, stubId), 0);
+  return `
+    <div class="bo-card" id="${stubId}" style="margin-top:14px;border:1px solid rgba(0,198,255,0.25);background:linear-gradient(135deg,rgba(0,198,255,0.04),rgba(0,198,255,0));">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#00C6FF;letter-spacing:1.5px;">📋 ONBOARDING CHECKLIST</div>
+        <div style="font-size:11px;color:rgba(255,255,255,0.4);font-style:italic;">Loading…</div>
+      </div>
+    </div>`;
+}
+
+async function _loadOnboardingChecklistBlock(userId, stubId){
+  const el = document.getElementById(stubId);
+  if(!el) return;
+  // Pull contractor + their assignments + credentials
+  const [pR, aR, cR] = await Promise.all([
+    sb.from('profiles').select('id, full_name, email, role, programs, candidate_stage, b2b_candidate_stage, b2b_coded_at, codes_unlocked, reports_to').eq('id', userId).maybeSingle(),
+    sb.from('contract_assignments').select('id, template_id, template_snapshot, status, signed_at, assigned_at').eq('user_id', userId).order('assigned_at', { ascending: true }),
+    sb.from('program_credentials').select('id, program_id, username').eq('user_id', userId)
+  ]);
+  const person = pR?.data;
+  if(!person){
+    el.innerHTML = '<div style="color:#F87171;">Could not load contractor.</div>';
+    return;
+  }
+  const assignments = aR?.data || [];
+  const creds = cR?.data || [];
+  const status = _computeOnboardingSummary(person, assignments, creds);
+
+  // For each program, render a card
+  const programCards = status.perProgram.map(pp => {
+    // Find this program's contract assignments (program-specific + general)
+    const programAssigns = assignments.filter(a => {
+      const sp = a.template_snapshot?.program_id;
+      return sp === pp.programId || sp === null;
+    });
+    const stageColor = pp.coded ? '#00FF88' : pp.terminal ? '#F87171' : '#FFC800';
+    const stageLabel = pp.coded ? '✅ CODED · ACTIVE' : pp.terminal ? '❌ REJECTED' : pp.stageLabel;
+
+    // Build checklist items for the contracts
+    const contractItems = programAssigns.map(a => {
+      const title = a.template_snapshot?.title || 'Untitled';
+      const isSigned = a.status === 'signed';
+      const icon = isSigned ? '✅' : '⏳';
+      const color = isSigned ? '#00FF88' : '#FFC800';
+      const stamp = isSigned && a.signed_at ? ' · signed ' + new Date(a.signed_at).toLocaleDateString() : ' · sent ' + new Date(a.assigned_at).toLocaleDateString();
+      return `<li style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12.5px;color:rgba(255,255,255,0.85);"><span style="color:${color};font-size:14px;flex-shrink:0;">${icon}</span><span style="flex:1;min-width:0;"><strong>${escapeHtml(title)}</strong><span style="color:rgba(255,255,255,0.45);font-size:11px;">${stamp}</span></span></li>`;
+    }).join('');
+
+    // Credentials checklist row
+    const credIcon = pp.hasCreds ? '✅' : '⏳';
+    const credColor = pp.hasCreds ? '#00FF88' : '#FFC800';
+    const credLabel = pp.hasCreds ? 'Credentials entered' : 'Awaiting credentials from office';
+    const credRow = `<li style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12.5px;color:rgba(255,255,255,0.85);border-top:1px dashed rgba(255,255,255,0.06);margin-top:6px;padding-top:8px;"><span style="color:${credColor};font-size:14px;flex-shrink:0;">${credIcon}</span><span style="flex:1;"><strong>${credLabel}</strong></span></li>`;
+
+    // Coded status row
+    const codedIcon = pp.coded ? '✅' : pp.terminal ? '❌' : '⏳';
+    const codedColor = pp.coded ? '#00FF88' : pp.terminal ? '#F87171' : '#FFC800';
+    const codedLabel = pp.coded ? 'Coded · fully active' : pp.terminal ? 'Terminal: rejected' : 'Pending coding';
+    const codedRow = `<li style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12.5px;color:rgba(255,255,255,0.85);"><span style="color:${codedColor};font-size:14px;flex-shrink:0;">${codedIcon}</span><span style="flex:1;"><strong>${codedLabel}</strong></span></li>`;
+
+    // Mark-as-coded button if eligible
+    const allSigned = programAssigns.length > 0 && programAssigns.every(a => a.status === 'signed');
+    const eligibleToCode = !pp.coded && !pp.terminal && allSigned && pp.hasCreds;
+    const codeButton = eligibleToCode
+      ? `<button class="bo-btn bo-btn-primary" style="padding:5px 12px;font-size:11.5px;margin-top:8px;background:linear-gradient(135deg,#A855F7,#FF0080);" onclick="markContractorCoded('${userId}','${pp.programId}')">⭐ Mark as Coded</button>`
+      : '';
+
+    return `
+      <div style="background:rgba(0,0,0,0.2);border:1px solid ${pp.programColor}33;border-left:3px solid ${pp.programColor};border-radius:8px;padding:12px 14px;margin-bottom:8px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:8px;">
+          <div style="font-size:13px;font-weight:700;color:${pp.programColor};letter-spacing:0.5px;">${pp.programIcon} ${escapeHtml(pp.programName)}</div>
+          <div style="font-size:11px;color:${stageColor};font-weight:700;letter-spacing:1.5px;">${stageLabel}</div>
+        </div>
+        <ul style="list-style:none;padding:0;margin:0;">
+          ${contractItems || '<li style="font-size:12px;color:rgba(255,255,255,0.4);font-style:italic;">No contracts assigned for this program yet.</li>'}
+          ${credRow}
+          ${codedRow}
+        </ul>
+        ${codeButton}
+      </div>`;
+  }).join('');
+
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#00C6FF;letter-spacing:1.5px;">📋 ONBOARDING CHECKLIST</div>
+      <div style="font-size:11px;color:rgba(255,255,255,0.55);">Live view of what is signed, what is pending, and coded status.</div>
+    </div>
+    ${status.perProgram.length === 0
+      ? '<div style="color:rgba(255,255,255,0.5);font-size:12.5px;padding:12px;text-align:center;background:rgba(255,255,255,0.02);border-radius:8px;">This contractor is not in any programs. Edit their profile to assign one.</div>'
+      : programCards}`;
+}
+
+window.renderOnboardingChecklistBlock = renderOnboardingChecklistBlock;
+window._loadOnboardingChecklistBlock = _loadOnboardingChecklistBlock;
 
 async function _loadProgramCredentialsBlock(userId, stubId){
   const el = document.getElementById(stubId);
@@ -5256,6 +5363,309 @@ window._dseSetProgram = _dseSetProgram;
 window._dseSetDate = _dseSetDate;
 window._dseToday = _dseToday;
 
+// ═══════════════════════════════════════════════════════════════════════
+// ONBOARDING STATUS DASHBOARD (Phase 3.17)
+// ═══════════════════════════════════════════════════════════════════════
+// Shows every contractor currently in any onboarding state, with their
+// checklist progress and a "Mark as Coded" action. Owner / Admin / Onboarding
+// see all; MMs see only their direct reports.
+//
+// For each contractor:
+//   • Reliant agents → uses candidate_stage (existing Reliant Pipeline)
+//   • B2B agents/managers → uses b2b_candidate_stage
+//   • Both show: signed contracts (✓), pending contracts (⏳), credentials entered, coded
+// ═══════════════════════════════════════════════════════════════════════
+
+async function renderOnboardingStatus(el){
+  const role = currentProfile?.role;
+  const isOwner = role === 'owner';
+  const isAdmin = isOwner || role === 'admin';
+  const isOnboarding = currentProfile?.has_master_center_access === true;
+  const isMgr = role === 'manager' || role === 'team_lead';
+  const canView = isOwner || isAdmin || isOnboarding || isMgr;
+  if(!canView){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied.</div>';
+    return;
+  }
+
+  el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading onboarding status…</div>';
+
+  // Pull contractors based on scope.
+  let q = sb.from('profiles')
+    .select('id, full_name, email, role, programs, candidate_stage, b2b_candidate_stage, b2b_coded_at, codes_unlocked, market_id, reports_to, active, created_at')
+    .eq('active', true);
+  if(isMgr && !isAdmin && !isOnboarding){
+    q = q.eq('reports_to', currentProfile.id);
+  }
+  const { data: people, error } = await q.order('full_name');
+  if(error){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Error: ' + escapeHtml(error.message) + '</div>';
+    return;
+  }
+
+  // For each person, pull their contract assignments
+  const userIds = (people || []).map(p => p.id);
+  let assignments = [];
+  let credentials = [];
+  if(userIds.length > 0){
+    const [aR, cR] = await Promise.all([
+      sb.from('contract_assignments').select('id, user_id, template_id, template_snapshot, status, signed_at, assigned_at').in('user_id', userIds),
+      sb.from('program_credentials').select('user_id, program_id, username').in('user_id', userIds)
+    ]);
+    assignments = aR.data || [];
+    credentials = cR.data || [];
+  }
+  const assignByUser = {};
+  assignments.forEach(a => {
+    if(!assignByUser[a.user_id]) assignByUser[a.user_id] = [];
+    assignByUser[a.user_id].push(a);
+  });
+  const credsByUser = {};
+  credentials.forEach(c => {
+    if(!credsByUser[c.user_id]) credsByUser[c.user_id] = [];
+    credsByUser[c.user_id].push(c);
+  });
+
+  // Group contractors into 3 buckets:
+  //   IN PROGRESS — anyone whose stage is NOT 'coded' for ALL their programs
+  //   CODED       — fully active across all their programs
+  //   REJECTED    — terminal failure (bg_failed, dt_failed for Reliant, rejected for B2B)
+  const inProgress = [];
+  const coded = [];
+  const rejected = [];
+  (people || []).forEach(p => {
+    const status = _computeOnboardingSummary(p, assignByUser[p.id] || [], credsByUser[p.id] || []);
+    p._status = status;
+    if(status.terminal) rejected.push(p);
+    else if(status.allCoded) coded.push(p);
+    else inProgress.push(p);
+  });
+
+  // ─── Render ──────────────────────────────────────────────────────────
+  el.innerHTML = `
+    <div style="margin-bottom:24px;">
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;line-height:1;">📊 Onboarding Status</h1>
+      <p style="font-size:14px;color:rgba(255,255,255,0.55);margin-top:8px;line-height:1.55;max-width:680px;">${isMgr && !isAdmin && !isOnboarding ? 'Your direct reports. Click a name to see what they have signed and what is pending.' : 'Every contractor currently in onboarding, plus everyone who is fully coded. Click a name for full detail.'}</p>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:18px;">
+      <div class="stat-card" style="border-color:rgba(255,107,0,0.4);"><div class="stat-num" style="color:#FF6B00;">${inProgress.length}</div><div class="stat-lbl">⏳ In Progress</div></div>
+      <div class="stat-card" style="border-color:rgba(0,255,136,0.4);"><div class="stat-num" style="color:#00FF88;">${coded.length}</div><div class="stat-lbl">✅ Coded · Active</div></div>
+      ${rejected.length > 0 ? `<div class="stat-card" style="border-color:rgba(248,113,113,0.4);"><div class="stat-num" style="color:#F87171;">${rejected.length}</div><div class="stat-lbl">❌ Rejected</div></div>` : ''}
+    </div>
+
+    ${inProgress.length > 0 ? `
+      <div class="bo-card" style="margin-bottom:14px;border-left:3px solid #FF6B00;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#FF6B00;letter-spacing:1.5px;margin-bottom:12px;">⏳ IN PROGRESS (${inProgress.length})</div>
+        ${inProgress.map(p => _renderOnboardingRow(p)).join('')}
+      </div>
+    ` : ''}
+
+    ${coded.length > 0 ? `
+      <div class="bo-card" style="margin-bottom:14px;border-left:3px solid #00FF88;">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#00FF88;letter-spacing:1.5px;">✅ CODED · ACTIVE (${coded.length})</div>
+          <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="window._showCoded = !window._showCoded; renderMainContent();">${window._showCoded ? 'Hide' : 'Show'} list</button>
+        </div>
+        ${window._showCoded ? coded.map(p => _renderOnboardingRow(p)).join('') : '<div style="font-size:12px;color:rgba(255,255,255,0.45);font-style:italic;">' + coded.length + ' contractor' + (coded.length === 1 ? ' is' : 's are') + ' fully coded and active. Click "Show list" to see them.</div>'}
+      </div>
+    ` : ''}
+
+    ${rejected.length > 0 ? `
+      <div class="bo-card" style="margin-bottom:14px;border-left:3px solid #F87171;opacity:0.85;">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#F87171;letter-spacing:1.5px;">❌ REJECTED (${rejected.length})</div>
+          <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="window._showRejected = !window._showRejected; renderMainContent();">${window._showRejected ? 'Hide' : 'Show'} list</button>
+        </div>
+        ${window._showRejected ? rejected.map(p => _renderOnboardingRow(p)).join('') : ''}
+      </div>
+    ` : ''}
+
+    ${(people || []).length === 0 ? `
+      <div class="bo-card" style="text-align:center;padding:36px;">
+        <div style="font-size:42px;margin-bottom:10px;">📊</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;margin-bottom:6px;">No contractors yet</div>
+        <div style="color:rgba(255,255,255,0.55);font-size:13px;">Once you create contractors they will show up here with their onboarding status.</div>
+      </div>
+    ` : ''}`;
+}
+
+// Compute onboarding summary for one contractor across their programs.
+// Returns: { perProgram: [{programId, label, signedCount, pendingCount, coded, hasCreds, terminal}], allCoded, terminal }
+function _computeOnboardingSummary(person, assignments, creds){
+  const programs = person.programs || [];
+  const isMgr = person.role === 'manager' || person.role === 'team_lead';
+  const perProgram = programs.map(progId => {
+    const prog = (allPrograms || []).find(p => p.id === progId);
+    if(!prog) return null;
+    // Determine coded status per program
+    let coded = false;
+    let terminal = false;
+    let stageLabel = 'In Progress';
+    if(progId === 'retail'){
+      coded = person.candidate_stage === 'coded';
+      terminal = person.candidate_stage === 'bg_failed' || person.candidate_stage === 'dt_failed';
+      stageLabel = (person.candidate_stage || 'invited').replace(/_/g,' ').toUpperCase();
+    } else if(progId === 'b2b'){
+      coded = person.b2b_candidate_stage === 'coded';
+      terminal = person.b2b_candidate_stage === 'rejected';
+      stageLabel = (person.b2b_candidate_stage || 'pending_signing').replace(/_/g,' ').toUpperCase();
+    } else {
+      // Generic / fiber etc — fall back to codes_unlocked
+      coded = person.codes_unlocked === true;
+      stageLabel = coded ? 'CODED' : 'IN PROGRESS';
+    }
+    // Contracts associated with this program (filter by template_snapshot.program_id)
+    const myAssigns = assignments.filter(a => {
+      const snapProg = a.template_snapshot?.program_id;
+      // Programs of NULL = general (counts toward both)
+      return snapProg === progId || snapProg === null;
+    });
+    const signedCount = myAssigns.filter(a => a.status === 'signed').length;
+    const pendingCount = myAssigns.filter(a => a.status === 'pending').length;
+    const totalCount = myAssigns.length;
+    const hasCreds = (creds || []).some(c => c.program_id === progId);
+    return {
+      programId: progId,
+      programName: prog.name,
+      programIcon: prog.icon,
+      programColor: prog.color,
+      stageLabel,
+      coded, terminal,
+      signedCount, pendingCount, totalCount, hasCreds
+    };
+  }).filter(Boolean);
+  const allCoded = perProgram.length > 0 && perProgram.every(pp => pp.coded);
+  const terminal = perProgram.some(pp => pp.terminal);
+  return { perProgram, allCoded, terminal };
+}
+
+function _renderOnboardingRow(p){
+  const status = p._status || { perProgram: [] };
+  const initials = (p.full_name || p.email || '?').split(' ').map(s => s[0]).slice(0,2).join('').toUpperCase();
+  const roleEmoji = (p.role === 'manager' || p.role === 'team_lead') ? '👔' : '👤';
+  return `
+    <div style="background:rgba(255,255,255,0.025);border-radius:8px;padding:12px 14px;margin-bottom:6px;">
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px;">
+        <div style="width:36px;height:36px;border-radius:50%;background:rgba(255,107,0,0.15);color:#FF6B00;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0;">${escapeHtml(initials)}</div>
+        <div style="flex:1;min-width:200px;cursor:pointer;" onclick="openAgentProfile('${p.id}')">
+          <div style="font-size:14px;color:#fff;font-weight:600;text-decoration:underline;text-decoration-color:rgba(255,255,255,0.2);text-underline-offset:3px;">${escapeHtml(p.full_name || p.email)}</div>
+          <div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-top:2px;">${roleEmoji} ${escapeHtml(roleLabel(p.role))} · ${escapeHtml(p.email)}</div>
+        </div>
+        <button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;flex-shrink:0;" onclick="openAgentProfile('${p.id}')">📋 View</button>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:8px;">
+        ${status.perProgram.map(pp => {
+          const stageColor = pp.coded ? '#00FF88' : pp.terminal ? '#F87171' : '#FFC800';
+          const stageLabel = pp.coded ? '✅ CODED' : pp.terminal ? '❌ REJECTED' : pp.stageLabel;
+          return `
+            <div style="background:rgba(0,0,0,0.25);border:1px solid ${pp.programColor}33;border-left:3px solid ${pp.programColor};border-radius:6px;padding:9px 11px;">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;flex-wrap:wrap;gap:6px;">
+                <div style="font-size:12.5px;color:${pp.programColor};font-weight:700;">${pp.programIcon} ${escapeHtml(pp.programName)}</div>
+                <div style="font-size:10px;color:${stageColor};font-weight:700;letter-spacing:1px;">${stageLabel}</div>
+              </div>
+              <div style="display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:rgba(255,255,255,0.65);">
+                <div>📜 <strong style="color:${pp.signedCount === pp.totalCount && pp.totalCount > 0 ? '#00FF88' : pp.pendingCount > 0 ? '#FFC800' : 'rgba(255,255,255,0.5)'};">${pp.signedCount}/${pp.totalCount}</strong> signed</div>
+                ${pp.pendingCount > 0 ? `<div>⏳ <strong style="color:#FFC800;">${pp.pendingCount}</strong> pending</div>` : ''}
+                <div>🔐 ${pp.hasCreds ? '<strong style="color:#00FF88;">credentials set</strong>' : '<strong style="color:rgba(255,255,255,0.4);">no creds yet</strong>'}</div>
+              </div>
+              ${!pp.coded && !pp.terminal && pp.signedCount === pp.totalCount && pp.totalCount > 0 && pp.hasCreds ? `
+                <div style="margin-top:6px;">
+                  <button class="bo-btn bo-btn-primary" style="padding:4px 10px;font-size:10.5px;background:linear-gradient(135deg,#A855F7,#FF0080);" onclick="markContractorCoded('${p.id}','${pp.programId}')">⭐ Mark as Coded</button>
+                </div>
+              ` : ''}
+            </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+}
+
+// Mark a contractor as coded for a specific program. Sends notifications.
+async function markContractorCoded(userId, programId){
+  if(!['owner','admin'].includes(currentProfile?.role) && !currentProfile?.has_master_center_access){
+    alert('Access denied');
+    return;
+  }
+  const prog = (allPrograms || []).find(p => p.id === programId);
+  if(!prog){ alert('Program not found'); return; }
+
+  if(!confirm('Mark this contractor as CODED for ' + prog.name + '?\n\nThis will:\n  • Set their ' + prog.name + ' status to coded\n  • Notify the contractor\n  • Notify their manager\n  • Notify the office\n\nMake sure their credentials are entered and all required contracts are signed before confirming.')) return;
+
+  // Update the right column based on program
+  let updatePayload = {};
+  if(programId === 'retail'){
+    updatePayload = {
+      candidate_stage: 'coded',
+      candidate_stage_changed_at: new Date().toISOString(),
+      candidate_stage_changed_by: currentProfile.id
+    };
+  } else if(programId === 'b2b'){
+    updatePayload = {
+      b2b_candidate_stage: 'coded',
+      b2b_coded_at: new Date().toISOString(),
+      b2b_coded_by: currentProfile.id
+    };
+  } else {
+    updatePayload = { codes_unlocked: true };
+  }
+
+  const { error } = await sb.from('profiles').update(updatePayload).eq('id', userId);
+  if(error){ alert('Update failed: ' + error.message); return; }
+
+  // Pull contractor + manager for notifications
+  const { data: contractor } = await sb.from('profiles').select('id, full_name, email, reports_to').eq('id', userId).maybeSingle();
+  const managerId = contractor?.reports_to;
+  const contractorName = contractor?.full_name || contractor?.email || 'Contractor';
+
+  // Notify contractor
+  try {
+    await notifyUser(userId, {
+      type: 'generic',
+      title: '🎉 You have been coded for ' + prog.name + '!',
+      body: 'You are officially active for ' + prog.name + '. Open Company → My Credentials to view your login info.'
+    });
+    if(contractor?.email){
+      await sendEmailViaFunction('candidate_coded', contractor.email, {
+        full_name: contractorName,
+        program_name: prog.name,
+        from_name: currentProfile.full_name || 'The Onboarding Team',
+        from_title: 'Onboarding Coordinator'
+      });
+    }
+  } catch(e){ console.warn('Contractor notify failed:', e); }
+
+  // Notify manager
+  if(managerId){
+    try {
+      await notifyUser(managerId, {
+        type: 'generic',
+        title: '✅ ' + contractorName + ' has been coded for ' + prog.name,
+        body: 'Your team member is now active for ' + prog.name + '. They have been given their credentials and can start working.'
+      });
+    } catch(_){}
+  }
+
+  // Notify Owner + Onboarding (besides the person who clicked)
+  try {
+    const { data: officers } = await sb.from('profiles')
+      .select('id').or('role.eq.owner,has_master_center_access.eq.true').eq('active', true);
+    for(const o of (officers || [])){
+      if(o.id === currentProfile.id) continue;
+      await notifyUser(o.id, {
+        type: 'generic',
+        title: '⭐ Coded: ' + contractorName + ' (' + prog.name + ')',
+        body: contractorName + ' was just coded for ' + prog.name + ' by ' + (currentProfile.full_name || 'office') + '.'
+      });
+    }
+  } catch(_){}
+
+  alert('✓ ' + contractorName + ' marked as coded for ' + prog.name + '. Notifications sent.');
+  renderMainContent();
+}
+
+window.renderOnboardingStatus = renderOnboardingStatus;
+window.markContractorCoded = markContractorCoded;
+
 
 // Cancel ALL pending contract assignments for a specific agent.
 // Use case: contracts were sent to the wrong agent or the wrong template was
@@ -5869,19 +6279,56 @@ async function saveAgent(editId){
 async function autoAssignContracts(userId, programs, userRole){
   if(!programs || programs.length === 0) return;
 
-  // Map the user's role to the contract target_role bucket:
-  //   'manager' or 'team_lead' → 'manager' bucket
-  //   anything else            → 'agent' bucket
-  // Templates flagged target_role='all' (general / role-agnostic) go to BOTH.
   const isMgr = userRole === 'manager' || userRole === 'team_lead';
   const myRoleBucket = isMgr ? 'manager' : 'agent';
 
-  // Legacy external-link templates (no target_role column on legacy table —
-  // safest to skip auto-assign entirely on legacy until/unless the legacy
-  // table is migrated. This prevents sending the wrong contract.)
-  // (No-op — legacy templates require manual send.)
+  // PHASE 3.17: package-driven auto-assign.
+  // Find all auto-assign packages matching the user's program(s) + role bucket.
+  // Each matched package's contracts get sent. Falls back to per-template
+  // auto_assign for backward compat with templates not yet bundled.
+  try {
+    const { data: pkgs } = await sb.from('onboarding_packages')
+      .select('id, name, program_id, target_role')
+      .in('program_id', programs)
+      .eq('auto_assign', true)
+      .eq('active', true)
+      .or(`target_role.eq.${myRoleBucket},target_role.eq.all,target_role.is.null`);
 
-  // NEW in-house contract templates (v2) — creates contract_assignments rows
+    const pkgIds = (pkgs || []).map(p => p.id);
+    if(pkgIds.length > 0){
+      // Pull all contracts inside those packages (could be the same template
+      // referenced by multiple packages — dedup by template_id below).
+      const { data: pkgContracts } = await sb.from('onboarding_package_contracts')
+        .select('template_id, sign_order, contract_templates_v2!inner(id, title, program_id, target_role, source_type, body_html, body_text, file_path, active)')
+        .in('package_id', pkgIds)
+        .order('sign_order');
+
+      const seen = new Set();
+      const rows = [];
+      (pkgContracts || []).forEach(pc => {
+        const tpl = pc.contract_templates_v2;
+        if(!tpl || !tpl.active) return;
+        if(seen.has(tpl.id)) return;
+        seen.add(tpl.id);
+        rows.push({
+          template_id: tpl.id,
+          template_snapshot: tpl,
+          user_id: userId,
+          assigned_by: currentProfile.id,
+          status: 'pending'
+        });
+      });
+
+      if(rows.length > 0){
+        const { error } = await sb.from('contract_assignments').insert(rows);
+        if(error) console.warn('Package auto-assign insert failed:', error);
+        else return;  // success — done
+      }
+    }
+  } catch(e){ console.warn('Package auto-assign failed, falling back to per-template:', e); }
+
+  // Fallback: per-template auto_assign (backward compat for any template not
+  // yet bundled into a package).
   try {
     const { data: v2Templates } = await sb.from('contract_templates_v2')
       .select('*')
@@ -5890,6 +6337,7 @@ async function autoAssignContracts(userId, programs, userRole){
       .eq('active', true)
       .or(`target_role.eq.${myRoleBucket},target_role.eq.all`);
     if(v2Templates && v2Templates.length > 0){
+      // Skip any templates already in a package we just processed
       const rows = v2Templates.map(t => ({
         template_id: t.id,
         template_snapshot: t,
@@ -5897,10 +6345,141 @@ async function autoAssignContracts(userId, programs, userRole){
         assigned_by: currentProfile.id,
         status: 'pending'
       }));
-      await sb.from('contract_assignments').insert(rows);
+      // Avoid duplicates if the agent already has one of these
+      const { data: existing } = await sb.from('contract_assignments')
+        .select('template_id').eq('user_id', userId).eq('status', 'pending');
+      const existingIds = new Set((existing || []).map(e => e.template_id));
+      const newRows = rows.filter(r => !existingIds.has(r.template_id));
+      if(newRows.length > 0) await sb.from('contract_assignments').insert(newRows);
     }
   } catch(e){ console.warn('Auto-assign v2 contracts failed:', e); }
 }
+
+// Manually send a named onboarding package to one user. Used by the
+// "Send Package" button on the Contract Hub + agent profile.
+async function sendOnboardingPackage(userId, packageId){
+  if(!['owner','admin'].includes(currentProfile?.role) && !currentProfile?.has_master_center_access){
+    alert('Access denied');
+    return;
+  }
+  const { data: pkg } = await sb.from('onboarding_packages').select('*').eq('id', packageId).maybeSingle();
+  if(!pkg){ alert('Package not found'); return; }
+  const { data: pkgContracts } = await sb.from('onboarding_package_contracts')
+    .select('template_id, sign_order, contract_templates_v2(id, title, program_id, target_role, source_type, body_html, body_text, file_path, active)')
+    .eq('package_id', packageId)
+    .order('sign_order');
+
+  if(!pkgContracts || pkgContracts.length === 0){
+    alert('Package has no contracts. Edit the package to add some.');
+    return;
+  }
+
+  const { data: agent } = await sb.from('profiles').select('full_name, email').eq('id', userId).maybeSingle();
+
+  const list = pkgContracts.map((pc, i) => '  ' + (i+1) + '. ' + (pc.contract_templates_v2?.title || 'Untitled')).join('\n');
+  if(!confirm('Send the "' + pkg.name + '" package to ' + (agent?.full_name || agent?.email) + '?\n\n' + list + '\n\nThis assigns ' + pkgContracts.length + ' contract' + (pkgContracts.length === 1 ? '' : 's') + ' to them at once.')){
+    return;
+  }
+
+  // Skip any templates the agent already has pending or signed
+  const { data: existing } = await sb.from('contract_assignments')
+    .select('template_id, status').eq('user_id', userId).in('status', ['pending','signed']);
+  const existingIds = new Set((existing || []).map(e => e.template_id));
+
+  const rows = (pkgContracts || []).map(pc => {
+    const tpl = pc.contract_templates_v2;
+    if(!tpl || !tpl.active || existingIds.has(tpl.id)) return null;
+    return {
+      template_id: tpl.id,
+      template_snapshot: tpl,
+      user_id: userId,
+      assigned_by: currentProfile.id,
+      status: 'pending'
+    };
+  }).filter(Boolean);
+
+  if(rows.length === 0){
+    alert('All contracts in this package have already been sent or signed for this contractor. Nothing new to send.');
+    return;
+  }
+
+  const { error } = await sb.from('contract_assignments').insert(rows);
+  if(error){ alert('Send failed: ' + error.message); return; }
+
+  try {
+    await notifyUser(userId, {
+      type: 'generic',
+      title: '📄 ' + rows.length + ' new contract' + (rows.length === 1 ? '' : 's') + ' to sign',
+      body: 'Office sent you the "' + pkg.name + '" package. Open My Contracts to review and sign.'
+    });
+  } catch(_){}
+
+  alert('✓ Sent ' + rows.length + ' contract' + (rows.length === 1 ? '' : 's') + ' to ' + (agent?.full_name || agent?.email) + '.');
+  if(window._currentAgentProfileId === userId) openAgentProfile(userId);
+}
+window.sendOnboardingPackage = sendOnboardingPackage;
+
+// Open the "pick a package" modal for a specific agent. Lists every active
+// package matching the agent's program(s) and role bucket, with a count of
+// what's already been sent vs. what would be new.
+async function openSendPackageModal(userId){
+  if(!['owner','admin'].includes(currentProfile?.role) && !currentProfile?.has_master_center_access){
+    alert('Access denied');
+    return;
+  }
+  const { data: agent } = await sb.from('profiles').select('full_name, email, programs, role').eq('id', userId).maybeSingle();
+  if(!agent){ alert('Agent not found'); return; }
+
+  const isMgr = agent.role === 'manager' || agent.role === 'team_lead';
+  const myRoleBucket = isMgr ? 'manager' : 'agent';
+  const programs = agent.programs || [];
+
+  // Filter packages by program + role
+  const { data: pkgs } = await sb.from('onboarding_packages')
+    .select('*')
+    .in('program_id', programs.length ? programs : ['__none__'])
+    .eq('active', true)
+    .or(`target_role.eq.${myRoleBucket},target_role.eq.all,target_role.is.null`);
+
+  const packages = pkgs || [];
+
+  // Count contracts in each package
+  const pkgIds = packages.map(p => p.id);
+  let countByPkg = {};
+  if(pkgIds.length > 0){
+    const { data: counts } = await sb.from('onboarding_package_contracts')
+      .select('package_id').in('package_id', pkgIds);
+    (counts || []).forEach(c => { countByPkg[c.package_id] = (countByPkg[c.package_id] || 0) + 1; });
+  }
+
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#fff;margin-bottom:6px;letter-spacing:1px;">📦 Send Onboarding Package</h2>
+    <div style="font-size:13px;color:rgba(255,255,255,0.55);margin-bottom:6px;">To: <strong style="color:#fff;">${escapeHtml(agent.full_name || agent.email)}</strong></div>
+    <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-bottom:14px;">Showing only <strong style="color:${isMgr ? '#00C6FF' : '#00FF88'};">${isMgr ? 'MANAGER' : 'AGENT'}</strong> packages for their program${programs.length === 1 ? '' : 's'}.</div>
+    ${packages.length === 0 ? `
+      <div style="background:rgba(255,200,0,0.05);border:1px solid rgba(255,200,0,0.25);border-radius:8px;padding:14px;color:rgba(255,255,255,0.7);font-size:12.5px;">
+        No matching packages found. Make sure this agent is assigned to a program (Reliant, B2B, etc) and that program has at least one onboarding package set up.
+      </div>
+    ` : packages.map(pkg => {
+      const program = (allPrograms || []).find(p => p.id === pkg.program_id) || { name:'General', icon:'📌', color:'#A855F7' };
+      const count = countByPkg[pkg.id] || 0;
+      return `
+        <div style="background:rgba(255,255,255,0.03);border:1px solid ${program.color}33;border-left:4px solid ${program.color};border-radius:8px;padding:12px 14px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+          <div style="flex:1;min-width:160px;">
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#fff;letter-spacing:0.5px;">${escapeHtml(pkg.name)}</div>
+            <div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-top:3px;">${count} contract${count === 1 ? '' : 's'} · ${program.icon} ${escapeHtml(program.name)}</div>
+          </div>
+          <button class="bo-btn bo-btn-primary" style="padding:7px 14px;font-size:12px;background:linear-gradient(135deg,#A855F7,#FF0080);" onclick="closeAllModals(); sendOnboardingPackage('${userId}','${pkg.id}');">Send →</button>
+        </div>`;
+    }).join('')}
+    <div style="display:flex;gap:10px;margin-top:14px;">
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>`;
+  document.getElementById('modal-box').style.maxWidth = '560px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+window.openSendPackageModal = openSendPackageModal;
 
 async function toggleAgentActive(id, currentlyActive){
   const goingInactive = currentlyActive === true;
@@ -17172,15 +17751,19 @@ async function renderContractHub(el){
 
   el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading every contract in the company…</div>';
 
-  // Pull EVERY template from BOTH tables in parallel
-  const [v2Result, legacyResult, asgResult] = await Promise.all([
+  // Pull EVERY template from BOTH tables in parallel + packages
+  const [v2Result, legacyResult, asgResult, pkgResult, pkgContractsResult] = await Promise.all([
     sb.from('contract_templates_v2').select('*').order('updated_at', { ascending: false }),
     sb.from('contract_templates').select('*').order('created_at', { ascending: false }),
-    sb.from('contract_assignments').select('id, status, template_id', { count: 'exact', head: false })
+    sb.from('contract_assignments').select('id, status, template_id', { count: 'exact', head: false }),
+    sb.from('onboarding_packages').select('*').order('display_order'),
+    sb.from('onboarding_package_contracts').select('package_id, template_id, sign_order').order('sign_order')
   ]);
 
   const v2Templates    = v2Result.data || [];
   const legacyTemplates = legacyResult.data || [];
+  const packages        = pkgResult.data || [];
+  const pkgContracts    = pkgContractsResult.data || [];
 
   // Count assignments per template (for "X agents have signed this" stat)
   const assignedCounts = {};
@@ -17257,6 +17840,68 @@ async function renderContractHub(el){
       </div>
       ${isOwner ? `<button class="bo-btn bo-btn-primary" onclick="boShowAdmin('contract-builder')" style="padding:10px 20px;font-size:13px;">+ New Template</button>` : ''}
     </div>
+
+    <!-- ONBOARDING PACKAGES — the primary view (named bundles of contracts) -->
+    ${(() => {
+      // Build a template-id → template lookup
+      const tplById = {};
+      v2Templates.forEach(t => { tplById[t.id] = t; });
+      const contractsByPackage = {};
+      pkgContracts.forEach(pc => {
+        if(!contractsByPackage[pc.package_id]) contractsByPackage[pc.package_id] = [];
+        contractsByPackage[pc.package_id].push({ ...pc, template: tplById[pc.template_id] });
+      });
+      if(packages.length === 0){
+        return `
+          <div class="bo-card" style="margin-bottom:18px;background:linear-gradient(135deg,rgba(168,85,247,0.05),rgba(168,85,247,0));border:1px dashed rgba(168,85,247,0.3);text-align:center;padding:22px;">
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#A855F7;letter-spacing:1.5px;margin-bottom:6px;">📦 NO ONBOARDING PACKAGES YET</div>
+            <div style="font-size:12.5px;color:rgba(255,255,255,0.6);max-width:480px;margin:0 auto;line-height:1.55;">Run the latest migration to seed default packages (Reliant Agent, Reliant Manager, B2B Agent, B2B Manager).</div>
+          </div>`;
+      }
+      return `
+        <div style="margin-bottom:24px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
+            <div>
+              <div style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#A855F7;letter-spacing:1.5px;">📦 ONBOARDING PACKAGES</div>
+              <div style="font-size:12px;color:rgba(255,255,255,0.55);margin-top:3px;">Named bundles of contracts. New contractors auto-receive the matching package on creation.</div>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;">
+            ${packages.map(pkg => {
+              const contracts = contractsByPackage[pkg.id] || [];
+              const program = (allPrograms || []).find(p => p.id === pkg.program_id) || { name:'General', icon:'📌', color:'#A855F7' };
+              const roleColor = pkg.target_role === 'manager' ? '#00C6FF' : pkg.target_role === 'agent' ? '#00FF88' : '#A855F7';
+              const roleLabel = (pkg.target_role || 'all').toUpperCase();
+              return `
+                <div class="bo-card" style="background:rgba(255,255,255,0.025);border:1px solid ${program.color}33;border-left:4px solid ${program.color};">
+                  <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:6px;margin-bottom:10px;">
+                    <div style="flex:1;min-width:160px;">
+                      <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#fff;letter-spacing:1px;line-height:1.1;">${escapeHtml(pkg.name)}</div>
+                      <div style="display:flex;gap:6px;margin-top:5px;flex-wrap:wrap;">
+                        <span style="background:${program.color}22;color:${program.color};padding:2px 8px;border-radius:50px;font-size:10.5px;font-weight:700;letter-spacing:1px;">${program.icon} ${escapeHtml(program.name)}</span>
+                        <span style="background:${roleColor}22;color:${roleColor};padding:2px 8px;border-radius:50px;font-size:10.5px;font-weight:700;letter-spacing:1px;">${roleLabel}</span>
+                        ${pkg.auto_assign ? '<span style="background:rgba(255,107,0,0.18);color:#FF6B00;padding:2px 8px;border-radius:50px;font-size:10.5px;font-weight:700;letter-spacing:1px;">⚡ AUTO-ASSIGN</span>' : ''}
+                        ${!pkg.active ? '<span style="background:rgba(248,113,113,0.15);color:#F87171;padding:2px 8px;border-radius:50px;font-size:10.5px;font-weight:700;letter-spacing:1px;">INACTIVE</span>' : ''}
+                      </div>
+                    </div>
+                    <div style="font-family:'Bebas Neue',sans-serif;font-size:32px;color:${program.color};line-height:1;flex-shrink:0;">${contracts.length}</div>
+                  </div>
+                  ${pkg.description ? `<div style="font-size:11.5px;color:rgba(255,255,255,0.6);line-height:1.45;margin-bottom:10px;">${escapeHtml(pkg.description)}</div>` : ''}
+                  <details style="margin-bottom:10px;">
+                    <summary style="cursor:pointer;font-size:11.5px;color:rgba(255,255,255,0.7);letter-spacing:0.5px;font-weight:600;outline:none;user-select:none;padding:5px 0;">📋 ${contracts.length} contract${contracts.length === 1 ? '' : 's'} bundled</summary>
+                    <ul style="list-style:none;padding:8px 0 0 0;margin:0;">
+                      ${contracts.map((c, i) => `
+                        <li style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px;color:rgba(255,255,255,0.8);">
+                          <span style="color:rgba(255,255,255,0.4);font-size:10.5px;width:18px;flex-shrink:0;">${i + 1}.</span>
+                          <span>${escapeHtml(c.template?.title || 'Missing template')}</span>
+                        </li>`).join('') || '<li style="font-size:11px;color:rgba(255,255,255,0.4);font-style:italic;padding:4px 0;">No contracts in this package yet.</li>'}
+                    </ul>
+                  </details>
+                </div>`;
+            }).join('')}
+          </div>
+        </div>`;
+    })()}
 
     <!-- AT-A-GLANCE PROGRAM SUMMARY CARDS -->
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-bottom:24px;">
