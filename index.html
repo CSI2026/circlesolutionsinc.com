@@ -4499,11 +4499,14 @@ function renderOnboardingChecklistBlock(agent){
 async function _loadOnboardingChecklistBlock(userId, stubId){
   const el = document.getElementById(stubId);
   if(!el) return;
-  // Pull contractor + their assignments + credentials
-  const [pR, aR, cR] = await Promise.all([
+  // Pull contractor + assignments + credentials + form statuses (Phase 3.18)
+  const [pR, aR, cR, riR, achR, biR] = await Promise.all([
     sb.from('profiles').select('id, full_name, email, role, programs, candidate_stage, b2b_candidate_stage, b2b_coded_at, codes_unlocked, reports_to').eq('id', userId).maybeSingle(),
     sb.from('contract_assignments').select('id, template_id, template_snapshot, status, signed_at, assigned_at').eq('user_id', userId).order('assigned_at', { ascending: true }),
-    sb.from('program_credentials').select('id, program_id, username').eq('user_id', userId)
+    sb.from('program_credentials').select('id, program_id, username').eq('user_id', userId),
+    sb.from('onboarding_intake').select('user_id, status, submitted_at').eq('user_id', userId).maybeSingle(),
+    sb.from('onboarding_ach').select('user_id, status, submitted_at').eq('user_id', userId).maybeSingle(),
+    sb.from('b2b_intake').select('user_id, status, submitted_at').eq('user_id', userId).maybeSingle()
   ]);
   const person = pR?.data;
   if(!person){
@@ -4512,7 +4515,12 @@ async function _loadOnboardingChecklistBlock(userId, stubId){
   }
   const assignments = aR?.data || [];
   const creds = cR?.data || [];
-  const status = _computeOnboardingSummary(person, assignments, creds);
+  const formStatuses = {
+    reliantIntake: riR?.data || null,
+    ach: achR?.data || null,
+    b2bIntake: biR?.data || null
+  };
+  const status = _computeOnboardingSummary(person, assignments, creds, formStatuses);
 
   // For each program, render a card
   const programCards = status.perProgram.map(pp => {
@@ -4534,21 +4542,36 @@ async function _loadOnboardingChecklistBlock(userId, stubId){
       return `<li style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12.5px;color:rgba(255,255,255,0.85);"><span style="color:${color};font-size:14px;flex-shrink:0;">${icon}</span><span style="flex:1;min-width:0;"><strong>${escapeHtml(title)}</strong><span style="color:rgba(255,255,255,0.45);font-size:11px;">${stamp}</span></span></li>`;
     }).join('');
 
+    // Identity validation row (program-specific)
+    const idIcon = pp.identityApproved ? '✅' : pp.identitySubmitted ? '⏳' : '⏳';
+    const idColor = pp.identityApproved ? '#00FF88' : pp.identitySubmitted ? '#FFC800' : 'rgba(255,255,255,0.55)';
+    const idLabel = pp.programId === 'retail'
+      ? (pp.identityApproved ? 'Reliant intake reviewed/sent to NRG' : pp.identitySubmitted ? 'Reliant intake submitted — pending review' : 'Awaiting Reliant intake (CSI Personal Upload)')
+      : (pp.identityApproved ? 'Identity validated for 1099-NEC' : pp.identitySubmitted ? 'Identity submitted — pending office approval' : 'Awaiting identity validation upload');
+    const idRow = `<li style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12.5px;color:rgba(255,255,255,0.85);border-top:1px dashed rgba(255,255,255,0.06);margin-top:6px;padding-top:8px;"><span style="color:${idColor};font-size:14px;flex-shrink:0;">${idIcon}</span><span style="flex:1;"><strong>${idLabel}</strong></span></li>`;
+
+    // Banking row
+    const bankIcon = pp.bankingApproved ? '✅' : pp.bankingSubmitted ? '⏳' : '⏳';
+    const bankColor = pp.bankingApproved ? '#00FF88' : pp.bankingSubmitted ? '#FFC800' : 'rgba(255,255,255,0.55)';
+    const bankLabel = pp.bankingApproved ? 'Direct deposit approved' : pp.bankingSubmitted ? 'Banking submitted — pending office approval' : 'Awaiting direct deposit upload';
+    const bankRow = `<li style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12.5px;color:rgba(255,255,255,0.85);"><span style="color:${bankColor};font-size:14px;flex-shrink:0;">${bankIcon}</span><span style="flex:1;"><strong>${bankLabel}</strong></span></li>`;
+
     // Credentials checklist row
     const credIcon = pp.hasCreds ? '✅' : '⏳';
     const credColor = pp.hasCreds ? '#00FF88' : '#FFC800';
-    const credLabel = pp.hasCreds ? 'Credentials entered' : 'Awaiting credentials from office';
-    const credRow = `<li style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12.5px;color:rgba(255,255,255,0.85);border-top:1px dashed rgba(255,255,255,0.06);margin-top:6px;padding-top:8px;"><span style="color:${credColor};font-size:14px;flex-shrink:0;">${credIcon}</span><span style="flex:1;"><strong>${credLabel}</strong></span></li>`;
+    const credLabel = pp.hasCreds ? 'Partner credentials entered' : 'Awaiting partner credentials from office';
+    const credRow = `<li style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12.5px;color:rgba(255,255,255,0.85);"><span style="color:${credColor};font-size:14px;flex-shrink:0;">${credIcon}</span><span style="flex:1;"><strong>${credLabel}</strong></span></li>`;
 
     // Coded status row
     const codedIcon = pp.coded ? '✅' : pp.terminal ? '❌' : '⏳';
     const codedColor = pp.coded ? '#00FF88' : pp.terminal ? '#F87171' : '#FFC800';
     const codedLabel = pp.coded ? 'Coded · fully active' : pp.terminal ? 'Terminal: rejected' : 'Pending coding';
-    const codedRow = `<li style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12.5px;color:rgba(255,255,255,0.85);"><span style="color:${codedColor};font-size:14px;flex-shrink:0;">${codedIcon}</span><span style="flex:1;"><strong>${codedLabel}</strong></span></li>`;
+    const codedRow = `<li style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12.5px;color:rgba(255,255,255,0.85);border-top:1px dashed rgba(255,255,255,0.06);margin-top:6px;padding-top:8px;"><span style="color:${codedColor};font-size:14px;flex-shrink:0;">${codedIcon}</span><span style="flex:1;"><strong>${codedLabel}</strong></span></li>`;
 
-    // Mark-as-coded button if eligible
+    // Mark-as-coded button if ALL gates pass: contracts signed, id approved,
+    // banking approved, partner credentials entered.
     const allSigned = programAssigns.length > 0 && programAssigns.every(a => a.status === 'signed');
-    const eligibleToCode = !pp.coded && !pp.terminal && allSigned && pp.hasCreds;
+    const eligibleToCode = !pp.coded && !pp.terminal && allSigned && pp.identityApproved && pp.bankingApproved && pp.hasCreds;
     const codeButton = eligibleToCode
       ? `<button class="bo-btn bo-btn-primary" style="padding:5px 12px;font-size:11.5px;margin-top:8px;background:linear-gradient(135deg,#A855F7,#FF0080);" onclick="markContractorCoded('${userId}','${pp.programId}')">⭐ Mark as Coded</button>`
       : '';
@@ -4561,6 +4584,8 @@ async function _loadOnboardingChecklistBlock(userId, stubId){
         </div>
         <ul style="list-style:none;padding:0;margin:0;">
           ${contractItems || '<li style="font-size:12px;color:rgba(255,255,255,0.4);font-style:italic;">No contracts assigned for this program yet.</li>'}
+          ${idRow}
+          ${bankRow}
           ${credRow}
           ${codedRow}
         </ul>
@@ -5428,17 +5453,26 @@ async function renderOnboardingStatus(el){
     return;
   }
 
-  // For each person, pull their contract assignments
+  // For each person, pull their contract assignments + credentials + form statuses
   const userIds = (people || []).map(p => p.id);
   let assignments = [];
   let credentials = [];
+  let reliantIntakes = [];
+  let achs = [];
+  let b2bIntakes = [];
   if(userIds.length > 0){
-    const [aR, cR] = await Promise.all([
+    const [aR, cR, riR, aR2, biR] = await Promise.all([
       sb.from('contract_assignments').select('id, user_id, template_id, template_snapshot, status, signed_at, assigned_at').in('user_id', userIds),
-      sb.from('program_credentials').select('user_id, program_id, username').in('user_id', userIds)
+      sb.from('program_credentials').select('user_id, program_id, username').in('user_id', userIds),
+      sb.from('onboarding_intake').select('user_id, status, submitted_at').in('user_id', userIds),
+      sb.from('onboarding_ach').select('user_id, status, submitted_at').in('user_id', userIds),
+      sb.from('b2b_intake').select('user_id, status, submitted_at').in('user_id', userIds)
     ]);
     assignments = aR.data || [];
     credentials = cR.data || [];
+    reliantIntakes = riR.data || [];
+    achs = aR2.data || [];
+    b2bIntakes = biR.data || [];
   }
   const assignByUser = {};
   assignments.forEach(a => {
@@ -5450,6 +5484,12 @@ async function renderOnboardingStatus(el){
     if(!credsByUser[c.user_id]) credsByUser[c.user_id] = [];
     credsByUser[c.user_id].push(c);
   });
+  const reliantByUser = {};
+  reliantIntakes.forEach(r => { reliantByUser[r.user_id] = r; });
+  const achByUser = {};
+  achs.forEach(a => { achByUser[a.user_id] = a; });
+  const b2bByUser = {};
+  b2bIntakes.forEach(b => { b2bByUser[b.user_id] = b; });
 
   // Group contractors into 3 buckets:
   //   IN PROGRESS — anyone whose stage is NOT 'coded' for ALL their programs
@@ -5459,7 +5499,16 @@ async function renderOnboardingStatus(el){
   const coded = [];
   const rejected = [];
   (people || []).forEach(p => {
-    const status = _computeOnboardingSummary(p, assignByUser[p.id] || [], credsByUser[p.id] || []);
+    const status = _computeOnboardingSummary(
+      p,
+      assignByUser[p.id] || [],
+      credsByUser[p.id] || [],
+      {
+        reliantIntake: reliantByUser[p.id],
+        ach: achByUser[p.id],
+        b2bIntake: b2bByUser[p.id]
+      }
+    );
     p._status = status;
     if(status.terminal) rejected.push(p);
     else if(status.allCoded) coded.push(p);
@@ -5516,14 +5565,18 @@ async function renderOnboardingStatus(el){
 }
 
 // Compute onboarding summary for one contractor across their programs.
-// Returns: { perProgram: [{programId, label, signedCount, pendingCount, coded, hasCreds, terminal}], allCoded, terminal }
-function _computeOnboardingSummary(person, assignments, creds){
+// Returns: { perProgram: [{...}], allCoded, terminal }
+// formStatuses (optional) — { reliantIntake, ach, b2bIntake } maps containing
+// per-user submission status. Used to surface "identity uploaded" / "banking
+// done" milestones alongside contract signatures so the checklist reflects
+// the full onboarding picture, not just the contract subset.
+function _computeOnboardingSummary(person, assignments, creds, formStatuses){
   const programs = person.programs || [];
   const isMgr = person.role === 'manager' || person.role === 'team_lead';
+  const fs = formStatuses || {};
   const perProgram = programs.map(progId => {
     const prog = (allPrograms || []).find(p => p.id === progId);
     if(!prog) return null;
-    // Determine coded status per program
     let coded = false;
     let terminal = false;
     let stageLabel = 'In Progress';
@@ -5536,20 +5589,36 @@ function _computeOnboardingSummary(person, assignments, creds){
       terminal = person.b2b_candidate_stage === 'rejected';
       stageLabel = (person.b2b_candidate_stage || 'pending_signing').replace(/_/g,' ').toUpperCase();
     } else {
-      // Generic / fiber etc — fall back to codes_unlocked
       coded = person.codes_unlocked === true;
       stageLabel = coded ? 'CODED' : 'IN PROGRESS';
     }
-    // Contracts associated with this program (filter by template_snapshot.program_id)
     const myAssigns = assignments.filter(a => {
       const snapProg = a.template_snapshot?.program_id;
-      // Programs of NULL = general (counts toward both)
       return snapProg === progId || snapProg === null;
     });
     const signedCount = myAssigns.filter(a => a.status === 'signed').length;
     const pendingCount = myAssigns.filter(a => a.status === 'pending').length;
     const totalCount = myAssigns.length;
     const hasCreds = (creds || []).some(c => c.program_id === progId);
+
+    // Form progress — different per program
+    let identitySubmitted = false;
+    let identityApproved = false;
+    let bankingSubmitted = false;
+    let bankingApproved = false;
+    if(progId === 'retail'){
+      const ri = fs.reliantIntake;
+      identitySubmitted = !!ri && ri.status !== 'rejected';
+      identityApproved  = !!ri && (ri.status === 'sent' || ri.status === 'reviewed');
+    } else if(progId === 'b2b'){
+      const bi = fs.b2bIntake;
+      identitySubmitted = !!bi && bi.status !== 'rejected';
+      identityApproved  = !!bi && bi.status === 'approved';
+    }
+    const ach = fs.ach;
+    bankingSubmitted = !!ach && ach.status !== 'rejected';
+    bankingApproved  = !!ach && ach.status === 'approved';
+
     return {
       programId: progId,
       programName: prog.name,
@@ -5557,7 +5626,9 @@ function _computeOnboardingSummary(person, assignments, creds){
       programColor: prog.color,
       stageLabel,
       coded, terminal,
-      signedCount, pendingCount, totalCount, hasCreds
+      signedCount, pendingCount, totalCount, hasCreds,
+      identitySubmitted, identityApproved,
+      bankingSubmitted, bankingApproved
     };
   }).filter(Boolean);
   const allCoded = perProgram.length > 0 && perProgram.every(pp => pp.coded);
@@ -5592,9 +5663,11 @@ function _renderOnboardingRow(p){
               <div style="display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:rgba(255,255,255,0.65);">
                 <div>📜 <strong style="color:${pp.signedCount === pp.totalCount && pp.totalCount > 0 ? '#00FF88' : pp.pendingCount > 0 ? '#FFC800' : 'rgba(255,255,255,0.5)'};">${pp.signedCount}/${pp.totalCount}</strong> signed</div>
                 ${pp.pendingCount > 0 ? `<div>⏳ <strong style="color:#FFC800;">${pp.pendingCount}</strong> pending</div>` : ''}
+                <div>🪪 ${pp.identityApproved ? '<strong style="color:#00FF88;">id approved</strong>' : pp.identitySubmitted ? '<strong style="color:#FFC800;">id submitted</strong>' : '<strong style="color:rgba(255,255,255,0.4);">no id yet</strong>'}</div>
+                <div>🏦 ${pp.bankingApproved ? '<strong style="color:#00FF88;">banking approved</strong>' : pp.bankingSubmitted ? '<strong style="color:#FFC800;">banking submitted</strong>' : '<strong style="color:rgba(255,255,255,0.4);">no banking yet</strong>'}</div>
                 <div>🔐 ${pp.hasCreds ? '<strong style="color:#00FF88;">credentials set</strong>' : '<strong style="color:rgba(255,255,255,0.4);">no creds yet</strong>'}</div>
               </div>
-              ${!pp.coded && !pp.terminal && pp.signedCount === pp.totalCount && pp.totalCount > 0 && pp.hasCreds ? `
+              ${!pp.coded && !pp.terminal && pp.signedCount === pp.totalCount && pp.totalCount > 0 && pp.identityApproved && pp.bankingApproved && pp.hasCreds ? `
                 <div style="margin-top:6px;">
                   <button class="bo-btn bo-btn-primary" style="padding:4px 10px;font-size:10.5px;background:linear-gradient(135deg,#A855F7,#FF0080);" onclick="markContractorCoded('${p.id}','${pp.programId}')">⭐ Mark as Coded</button>
                 </div>
