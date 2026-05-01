@@ -2253,6 +2253,7 @@ async function loadCurrentProfile(){
   // Resolve which onboarding flow this user sees (Reliant / B2B / default)
   // based on their assigned programs.
   if(typeof _refreshOnboardingForms === 'function') _refreshOnboardingForms();
+  if(typeof _prewarmDirectReports === 'function') _prewarmDirectReports();
 
   // Load programs once
   if(allPrograms.length === 0){
@@ -2396,7 +2397,12 @@ function renderSidebar(){
     adminNavItems.push({ id:'forms-admin', label:'📋 All Forms' });
     adminNavItems.push({ id:'applications', label:'📝 Applications' });
     adminNavItems.push({ id:'programs-admin', label:'🎯 Programs' });
-    adminNavItems.push({ id:'reliant-email-settings', label:'📧 Reliant Email' });
+    adminNavItems.push({ id:'sales-goals', label:'🎯 Sales Goals' });
+    // Reliant Email settings only relevant if the user works with the Reliant
+    // (retail) program. Owners can see it if they own retail; otherwise hide.
+    if((currentProfile.programs || []).includes('retail')){
+      adminNavItems.push({ id:'reliant-email-settings', label:'📧 Reliant Email' });
+    }
   } else if(isAdmin){
     adminNavItems.push({ id:'stores', label:'🏪 Stores' });
     adminNavItems.push({ id:'forms-admin', label:'📋 All Forms' });
@@ -2406,6 +2412,10 @@ function renderSidebar(){
     // Onboarding department (non-owner, non-admin) gets stores access too
     adminNavItems.push({ id:'stores', label:'🏪 Stores' });
     adminNavItems.push({ id:'contract-hub', label:'📄 Contract Hub' });
+  }
+  // 📊 Daily Sales Entry — Owner + Admin + Onboarding + MMs (MMs see only their team)
+  if(isOwner || isAdmin || isManager || isTeamLead || currentProfile.has_master_center_access){
+    adminNavItems.push({ id:'daily-sales-entry', label:'📊 Sales Entry' });
   }
   if(isOwner || isAdmin || currentProfile.has_master_center_access){
     adminNavItems.push({ id:'recruiting', label:'🎤 Recruiting' });
@@ -2431,6 +2441,11 @@ function renderSidebar(){
   if(isOwner || isAdmin || currentProfile.is_payroll_manager){
     adminNavItems.push({ id:'payroll', label:'💵 Payroll' });
   }
+  // Sales entry — Owner + Admin + Onboarding can manually enter daily sales
+  // per agent per program. Future: bulk CSV import from Reliant/UES.
+  if(isOwner || isAdmin || currentProfile.has_master_center_access){
+    adminNavItems.push({ id:'sales-entry', label:'📊 Sales Entry' });
+  }
   if(isOwner || currentProfile.has_master_center_access){
     adminNavItems.push({ id:'onboarding-master', label:'🎯 Onboarding Center' });
   }
@@ -2443,7 +2458,7 @@ function renderSidebar(){
   let openSection = sessionStorage.getItem('bo_open_section');
   if(activeAdminView){
     // If currently viewing an admin item, open the section that contains it
-    const inCompany = ['global-docs','my-forms','my-contracts','my-credentials','photo-audit-checkin','my-inventory'].includes(activeAdminView);
+    const inCompany = ['global-docs','my-forms','my-contracts','my-credentials','leaderboard','photo-audit-checkin','my-inventory'].includes(activeAdminView);
     const inAccount = ['profile','credentials'].includes(activeAdminView);
     if(inCompany) openSection = 'company';
     else if(inAccount) openSection = 'account';
@@ -2486,6 +2501,7 @@ function renderSidebar(){
   // 2. COMPANY section — common nav for all users
   const companyItems = [
     { id:'onboarding-packet', label:'📋 Onboarding Packet', show:'async-onboarding' },
+    { id:'leaderboard', label:'🏆 Leaderboard', show:true },
     { id:'global-docs', label:'📁 Company Library', show:true },
     { id:'my-forms', label:'📋 My Forms', show:true },
     { id:'my-contracts', label:'📄 My Contracts', show:true },
@@ -2688,6 +2704,8 @@ function renderMainContent(){
   if(activeAdminView === 'agents'){ renderAgents(el); return; }
   if(activeAdminView === 'applications'){ renderApplications(el); return; }
   if(activeAdminView === 'programs-admin'){ renderProgramsAdmin(el); return; }
+  if(activeAdminView === 'sales-goals'){ renderSalesGoalsAdmin(el); return; }
+  if(activeAdminView === 'daily-sales-entry'){ renderDailySalesEntry(el); return; }
   if(activeAdminView === 'owner-panel'){ renderOwnerPanel(el); return; }
   if(activeAdminView === 'markets'){ renderMarketsAdmin(el); return; }
   if(activeAdminView === 'global-docs'){ renderGlobalDocuments(el); return; }
@@ -2698,6 +2716,8 @@ function renderMainContent(){
   if(activeAdminView === 'my-forms'){ renderMyForms(el); return; }
   if(activeAdminView === 'my-contracts'){ renderMyContracts(el); return; }
   if(activeAdminView === 'my-credentials'){ renderMyCredentials(el); return; }
+  if(activeAdminView === 'sales-entry'){ renderSalesEntry(el); return; }
+  if(activeAdminView === 'leaderboard'){ renderLeaderboard(el); return; }
   if(activeAdminView === 'onboarding-master'){ renderOnboardingMaster(el); return; }
   if(activeAdminView === 'onboarding-pending'){ renderOnboardingPending(el); return; }
   if(activeAdminView === 'stores'){ renderStoresAdmin(el); return; }
@@ -2846,6 +2866,7 @@ async function renderDashboard(el, prog, canManage){
     const recent = (myEnrollments || []).slice(0, 5);
 
     el.innerHTML = `
+      <div id="bo-scoreboard-mount-${prog.id}"></div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:20px;">
         <div class="stat-card"><div class="stat-num" style="color:${prog.color};">${myTotal}</div><div class="stat-lbl">My Enrollments</div></div>
         <div class="stat-card"><div class="stat-num" style="color:#00FF88;">${myActive}</div><div class="stat-lbl">Active</div></div>
@@ -2903,6 +2924,9 @@ async function renderDashboard(el, prog, canManage){
               </tr>`).join('')}</tbody>
           </table>`}
       </div>`;
+
+    // Mount the scoreboard widget at the top after the rest of the page exists
+    try { renderScoreboardWidget(prog.id); } catch(e){ console.warn('Scoreboard mount failed:', e); }
   } catch(err){
     el.innerHTML = `<div class="bo-card" style="color:#F87171;">Failed to load dashboard: ${err.message}</div>`;
   }
@@ -4678,6 +4702,527 @@ async function copyToClipboard(text, btnEl){
   }
 }
 window.copyToClipboard = copyToClipboard;
+
+// ═══════════════════════════════════════════════════════════════════════
+// SALES TRACKING + SCOREBOARD (Phase 3.16)
+// ═══════════════════════════════════════════════════════════════════════
+// Tracks daily sales counts per (agent, program, date). Drives:
+//   • Per-agent scoreboard widget on the dashboard
+//   • Program-level leaderboard ranking
+//   • MM "My Team This Week" panel
+//   • Owner Goals page
+// ═══════════════════════════════════════════════════════════════════════
+
+// ─── Date helpers ─────────────────────────────────────────────────────
+// Pay period = Monday → Sunday, Central Time. We compute boundaries client-
+// side to avoid round-trips, then send queries with explicit date ranges.
+function _scoreboardWeekRange(now){
+  // Returns { mondayDate, sundayDate, daysLeftInWeek } as YYYY-MM-DD strings
+  const d = new Date(now || Date.now());
+  // JS getDay(): Sun=0, Mon=1, ..., Sat=6. Move to Monday of this week.
+  const day = d.getDay();
+  const mondayOffset = (day + 6) % 7;  // Mon→0, Tue→1, ..., Sun→6
+  const monday = new Date(d);
+  monday.setDate(d.getDate() - mondayOffset);
+  monday.setHours(0,0,0,0);
+  const sunday = new Date(monday);
+  sunday.setDate(monday.getDate() + 6);
+  const daysLeft = 6 - mondayOffset;  // Sun=0 left, Mon=6 left
+  const fmt = dt => dt.toISOString().slice(0,10);
+  return { mondayStr: fmt(monday), sundayStr: fmt(sunday), daysLeftInWeek: daysLeft };
+}
+
+function _scoreboardMonthRange(now){
+  const d = new Date(now || Date.now());
+  const first = new Date(d.getFullYear(), d.getMonth(), 1);
+  const last  = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+  const fmt = dt => dt.toISOString().slice(0,10);
+  const today = new Date(d); today.setHours(0,0,0,0);
+  const daysLeftInMonth = Math.max(0, Math.round((last - today) / 86400000));
+  return { firstStr: fmt(first), lastStr: fmt(last), daysLeftInMonth };
+}
+
+// ─── Lookup helpers ───────────────────────────────────────────────────
+async function _getEffectiveSalesGoal(userId, programId, roleBucket){
+  // Per-agent override wins; otherwise fall back to the program default.
+  const [{ data: ovr }, { data: prog }] = await Promise.all([
+    sb.from('agent_sales_goal_overrides').select('weekly_goal, monthly_goal')
+      .eq('user_id', userId).eq('program_id', programId).maybeSingle(),
+    sb.from('program_sales_goals').select('weekly_goal, monthly_goal')
+      .eq('program_id', programId).eq('role_bucket', roleBucket).maybeSingle()
+  ]);
+  return {
+    weeklyGoal:  (ovr?.weekly_goal  ?? prog?.weekly_goal  ?? 0),
+    monthlyGoal: (ovr?.monthly_goal ?? prog?.monthly_goal ?? 0)
+  };
+}
+
+async function _getMySalesAggregates(userId, programId){
+  const week  = _scoreboardWeekRange();
+  const month = _scoreboardMonthRange();
+  const today = new Date().toISOString().slice(0,10);
+  const { data, error } = await sb.from('daily_sales')
+    .select('sale_date, count')
+    .eq('user_id', userId)
+    .eq('program_id', programId)
+    .gte('sale_date', month.firstStr)
+    .lte('sale_date', month.lastStr);
+  if(error || !data) return { weekly: 0, monthly: 0, today: 0, week, month };
+  let weekly = 0, monthly = 0, todayCount = 0;
+  for(const row of data){
+    monthly += row.count;
+    if(row.sale_date >= week.mondayStr && row.sale_date <= week.sundayStr) weekly += row.count;
+    if(row.sale_date === today) todayCount += row.count;
+  }
+  return { weekly, monthly, today: todayCount, week, month };
+}
+
+async function _getProgramLeaderboard(programId){
+  const week = _scoreboardWeekRange();
+  // Pull this week's sales in this program for everyone, then group by user
+  const [{ data: rows }, { data: users }] = await Promise.all([
+    sb.from('daily_sales').select('user_id, count')
+      .eq('program_id', programId)
+      .gte('sale_date', week.mondayStr)
+      .lte('sale_date', week.sundayStr),
+    sb.from('profiles').select('id, full_name, email, role, avatar_url, programs')
+      .contains('programs', [programId])
+      .eq('active', true)
+  ]);
+  const totals = {};
+  (rows || []).forEach(r => { totals[r.user_id] = (totals[r.user_id] || 0) + r.count; });
+  const leaderboard = (users || []).map(u => ({
+    user_id: u.id,
+    name: u.full_name || u.email,
+    role: u.role,
+    avatar_url: u.avatar_url,
+    weekly_count: totals[u.id] || 0
+  }));
+  leaderboard.sort((a, b) => b.weekly_count - a.weekly_count || a.name.localeCompare(b.name));
+  return leaderboard;
+}
+
+// ─── Scoreboard widget ────────────────────────────────────────────────
+async function renderScoreboardWidget(programId){
+  const mountId = 'bo-scoreboard-mount-' + programId;
+  const mount = document.getElementById(mountId);
+  if(!mount) return;
+  const prog = (allPrograms || []).find(p => p.id === programId);
+  if(!prog) return;
+
+  const me = currentProfile;
+  const isMgr = me.role === 'manager' || me.role === 'team_lead';
+  const roleBucket = isMgr ? 'manager' : 'agent';
+
+  const [agg, goals, leaderboard] = await Promise.all([
+    _getMySalesAggregates(me.id, programId),
+    _getEffectiveSalesGoal(me.id, programId, roleBucket),
+    _getProgramLeaderboard(programId)
+  ]);
+
+  // Find my rank
+  const myEntry = leaderboard.find(x => x.user_id === me.id);
+  const myRank = myEntry ? (leaderboard.indexOf(myEntry) + 1) : leaderboard.length + 1;
+  const peerCount = leaderboard.length;
+
+  // For MMs, get team this week (their direct reports + themselves)
+  let myTeam = [];
+  if(isMgr){
+    myTeam = leaderboard.filter(l => l.user_id === me.id || _isMyDirectReport(l.user_id));
+  }
+
+  // Live time
+  const now = new Date();
+  const dateStr = now.toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric', year:'numeric' });
+  const timeStr = now.toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' });
+
+  // Find the agent's market for the header
+  const myMarket = (allMarkets || []).find(m => m.id === me.market_id);
+  const headerSubLine = (myMarket?.name || prog.name) + ' · ' + (roleLabel(me.role) || 'AGENT').toUpperCase()
+    + ' | ' + dateStr.toUpperCase() + ' | <span id="sb-clock-' + programId + '">' + timeStr + '</span>';
+
+  // Roleplay: position label is "AGENT" or "MANAGER" or "TEAM LEAD"
+  const initials = (me.full_name || me.email || '?').split(' ').map(s => s[0]).slice(0,2).join('').toUpperCase();
+
+  // Color theme — use the program color as the accent (Reliant orange, B2B accent, etc).
+  const accent = prog.color || '#FF6B00';
+  const accentDim = accent + '33';
+
+  const weeklyPct = goals.weeklyGoal ? Math.min(100, Math.round((agg.weekly / goals.weeklyGoal) * 100)) : 0;
+
+  // ─── Render ──────────────────────────────────────────────────────────
+  mount.innerHTML = `
+    <div class="bo-scoreboard" style="
+      background:#0a0a0a;
+      border:2px solid ${accent};
+      border-radius:18px;
+      padding:0;
+      margin-bottom:22px;
+      overflow:hidden;
+      box-shadow:0 0 0 1px ${accentDim}, 0 8px 32px rgba(0,0,0,0.45);
+    ">
+      <!-- Header band -->
+      <div style="padding:22px 26px;text-align:center;border-bottom:1px solid ${accentDim};">
+        <div style="display:inline-flex;align-items:center;gap:18px;flex-wrap:wrap;justify-content:center;">
+          <div style="width:62px;height:62px;border-radius:50%;background:linear-gradient(135deg,${accent},#FF0080);color:#fff;display:flex;align-items:center;justify-content:center;font-family:'Bebas Neue',sans-serif;font-size:28px;letter-spacing:1px;flex-shrink:0;">${escapeHtml(initials)}</div>
+          <div style="text-align:left;min-width:0;">
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:42px;line-height:1;color:${accent};letter-spacing:2px;text-transform:uppercase;">${escapeHtml(me.full_name || me.email)}</div>
+            <div style="font-size:11px;color:rgba(255,255,255,0.55);letter-spacing:2px;font-weight:700;text-transform:uppercase;margin-top:6px;">${headerSubLine}</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3 columns -->
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:0;">
+        <!-- COL 1: Monthly Production -->
+        <div style="padding:24px 22px;text-align:center;border-right:1px solid ${accentDim};">
+          <div style="font-size:10.5px;color:rgba(255,255,255,0.55);letter-spacing:3px;font-weight:700;margin-bottom:6px;">— MONTHLY PRODUCTION —</div>
+          <div style="font-size:11px;color:rgba(255,255,255,0.45);letter-spacing:1.5px;font-weight:700;margin-bottom:6px;">${goals.monthlyGoal ? '(GOAL ' + goals.monthlyGoal + ')' : 'SO FAR'}</div>
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:74px;color:${accent};line-height:0.95;letter-spacing:1px;">${agg.monthly}</div>
+          <div style="font-size:11px;color:rgba(255,255,255,0.4);letter-spacing:1.5px;font-weight:700;margin-top:4px;">SO FAR</div>
+          <div style="margin-top:18px;padding-top:18px;border-top:1px solid ${accentDim};">
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:36px;color:${accent};line-height:0.95;">${agg.month.daysLeftInMonth}</div>
+            <div style="font-size:10.5px;color:rgba(255,255,255,0.5);letter-spacing:1.5px;font-weight:700;margin-top:4px;">DAYS LEFT IN MONTH</div>
+          </div>
+        </div>
+
+        <!-- COL 2: Today's Sales (replaces Available Inventory) -->
+        <div style="padding:24px 22px;text-align:center;border-right:1px solid ${accentDim};">
+          <div style="font-size:10.5px;color:rgba(255,255,255,0.55);letter-spacing:3px;font-weight:700;margin-bottom:6px;">TODAY'S SALES</div>
+          <div style="font-size:11px;color:rgba(255,255,255,0.45);letter-spacing:1.5px;font-weight:700;margin-bottom:6px;">JUST TODAY</div>
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:74px;color:${accent};line-height:0.95;letter-spacing:1px;">${agg.today}</div>
+          <div style="font-size:11px;color:rgba(255,255,255,0.4);letter-spacing:1.5px;font-weight:700;margin-top:4px;">SALES TODAY</div>
+          <div style="margin-top:18px;padding-top:18px;border-top:1px solid ${accentDim};">
+            <div style="font-size:11px;color:rgba(255,255,255,0.5);letter-spacing:1.5px;font-weight:700;">CURRENT</div>
+            <div style="font-size:13px;color:#fff;margin-top:5px;font-weight:600;">${agg.today === 0 ? 'NO SALES YET' : agg.today + ' sale' + (agg.today === 1 ? '' : 's')}</div>
+          </div>
+        </div>
+
+        <!-- COL 3: Weekly Production -->
+        <div style="padding:24px 22px;text-align:center;">
+          <div style="font-size:10.5px;color:rgba(255,255,255,0.55);letter-spacing:3px;font-weight:700;margin-bottom:6px;">— WEEKLY PRODUCTION —</div>
+          <div style="font-size:11px;color:rgba(255,255,255,0.45);letter-spacing:1.5px;font-weight:700;margin-bottom:6px;">${goals.weeklyGoal ? '(GOAL ' + goals.weeklyGoal + ')' : 'SO FAR'}</div>
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:74px;color:${accent};line-height:0.95;letter-spacing:1px;">${agg.weekly}</div>
+          <div style="font-size:11px;color:rgba(255,255,255,0.4);letter-spacing:1.5px;font-weight:700;margin-top:4px;">THIS WEEK</div>
+          ${goals.weeklyGoal ? `
+            <div style="margin-top:10px;height:6px;background:rgba(255,255,255,0.08);border-radius:3px;overflow:hidden;">
+              <div style="width:${weeklyPct}%;height:100%;background:linear-gradient(90deg,${accent},#FF0080);transition:width 0.4s ease;"></div>
+            </div>
+          ` : ''}
+          <div style="margin-top:18px;padding-top:18px;border-top:1px solid ${accentDim};">
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:36px;color:${accent};line-height:0.95;">${peerCount > 0 ? '★' + myRank : '—'}</div>
+            <div style="font-size:10.5px;color:rgba(255,255,255,0.5);letter-spacing:1.5px;font-weight:700;margin-top:4px;">RANK IN ${escapeHtml(prog.name.toUpperCase())} (${peerCount} ${peerCount === 1 ? 'PEER' : 'PEERS'})</div>
+            <div style="margin-top:10px;font-family:'Bebas Neue',sans-serif;font-size:24px;color:${accent};">${agg.week.daysLeftInWeek}</div>
+            <div style="font-size:10.5px;color:rgba(255,255,255,0.5);letter-spacing:1.5px;font-weight:700;">DAYS LEFT IN WEEK</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    ${isMgr && myTeam.length > 0 ? `
+      <div class="bo-card" style="margin-bottom:22px;border-left:3px solid ${accent};">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:${accent};letter-spacing:1.5px;">📌 MY TEAM THIS WEEK</div>
+          <div style="font-size:11px;color:rgba(255,255,255,0.55);">${myTeam.length} member${myTeam.length === 1 ? '' : 's'} · goal: ${goals.weeklyGoal} ea</div>
+        </div>
+        ${myTeam.map((m, idx) => `
+          <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:rgba(255,255,255,0.025);border-radius:8px;margin-bottom:5px;">
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:${accent};width:24px;text-align:center;flex-shrink:0;">${idx + 1}</div>
+            <div style="flex:1;min-width:0;font-size:13px;color:#fff;font-weight:600;">${escapeHtml(m.name)}${m.user_id === me.id ? ' <span style="font-size:10px;color:rgba(255,255,255,0.4);">(you)</span>' : ''}</div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:${accent};line-height:1;">${m.weekly_count}</div>
+          </div>
+        `).join('')}
+      </div>
+    ` : ''}
+
+    ${!isMgr && peerCount > 1 ? `
+      <div class="bo-card" style="margin-bottom:22px;border-left:3px solid ${accent};">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:${accent};letter-spacing:1.5px;">🏆 ${escapeHtml(prog.name.toUpperCase())} LEADERBOARD</div>
+          <div style="font-size:11px;color:rgba(255,255,255,0.55);">Week of ${new Date(agg.week.mondayStr).toLocaleDateString('en-US',{month:'short',day:'numeric'})} – ${new Date(agg.week.sundayStr).toLocaleDateString('en-US',{month:'short',day:'numeric'})}</div>
+        </div>
+        ${leaderboard.slice(0, 10).map((m, idx) => {
+          const rank = idx + 1;
+          const medal = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : '';
+          const isMe = m.user_id === me.id;
+          return `
+            <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:${isMe ? 'rgba(255,107,0,0.08)' : 'rgba(255,255,255,0.025)'};border-radius:8px;margin-bottom:5px;${isMe ? 'border:1px solid ' + accent + '55;' : ''}">
+              <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:${rank <= 3 ? accent : 'rgba(255,255,255,0.55)'};width:30px;text-align:center;flex-shrink:0;">${medal || ('#' + rank)}</div>
+              <div style="flex:1;min-width:0;font-size:13px;color:#fff;font-weight:${isMe ? '700' : '600'};">${escapeHtml(m.name)}${isMe ? ' <span style="font-size:10px;color:' + accent + ';">(you)</span>' : ''}</div>
+              <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:${accent};line-height:1;">${m.weekly_count}</div>
+            </div>`;
+        }).join('')}
+      </div>
+    ` : ''}`;
+
+  // Live clock — update every minute
+  if(window._sbClockInterval) clearInterval(window._sbClockInterval);
+  window._sbClockInterval = setInterval(() => {
+    const c = document.getElementById('sb-clock-' + programId);
+    if(!c){ clearInterval(window._sbClockInterval); window._sbClockInterval = null; return; }
+    c.textContent = new Date().toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' });
+  }, 60000);
+}
+
+// Helper for the MM team panel
+function _isMyDirectReport(userId){
+  // Quick lookup — we don't have all profiles cached; rely on the leaderboard
+  // already including reports. Returns true if their reports_to is current user.
+  // Since we can't reliably check from here without an extra query, the logic
+  // is: managers see in their team panel anyone whose reports_to matches their
+  // id. The leaderboard query already returns same-program peers; we filter
+  // by reports_to via a separate quick fetch.
+  const cache = window._myDirectReportIds;
+  return cache ? cache.has(userId) : false;
+}
+
+// Pre-warm the direct-reports cache on profile load (called from initial profile fetch)
+async function _prewarmDirectReports(){
+  if(!currentProfile) return;
+  if(currentProfile.role !== 'manager' && currentProfile.role !== 'team_lead') return;
+  try {
+    const { data } = await sb.from('profiles').select('id').eq('reports_to', currentProfile.id);
+    window._myDirectReportIds = new Set((data || []).map(r => r.id));
+  } catch(_){ window._myDirectReportIds = new Set(); }
+}
+window._prewarmDirectReports = _prewarmDirectReports;
+window.renderScoreboardWidget = renderScoreboardWidget;
+
+// ─── OWNER: SALES GOALS PAGE ──────────────────────────────────────────
+async function renderSalesGoalsAdmin(el){
+  if(currentProfile?.role !== 'owner'){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied. Owner only.</div>';
+    return;
+  }
+  el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading goals…</div>';
+
+  const { data: goals, error } = await sb.from('program_sales_goals').select('*');
+  if(error){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Error: ' + escapeHtml(error.message) + '</div>';
+    return;
+  }
+  const goalsByKey = {};
+  (goals || []).forEach(g => { goalsByKey[g.program_id + ':' + g.role_bucket] = g; });
+
+  el.innerHTML = `
+    <div style="margin-bottom:24px;">
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;line-height:1;">🎯 Sales Goals</h1>
+      <p style="font-size:14px;color:rgba(255,255,255,0.55);margin-top:8px;line-height:1.55;max-width:600px;">Set the weekly + monthly sales goals each program expects from agents and managers. These show up on every contractor's dashboard scoreboard. Owner only.</p>
+    </div>
+
+    <div style="display:grid;gap:14px;">
+      ${(allPrograms || []).map(prog => `
+        <div class="bo-card" style="border-left:3px solid ${prog.color};">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:${prog.color};letter-spacing:1.5px;margin-bottom:14px;">${prog.icon} ${escapeHtml(prog.name)}</div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;">
+            ${['agent','manager'].map(bucket => {
+              const g = goalsByKey[prog.id + ':' + bucket] || { weekly_goal:0, monthly_goal:0, notes:'' };
+              const isMgr = bucket === 'manager';
+              return `
+                <div style="background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.06);border-radius:10px;padding:14px;">
+                  <div style="font-family:'Bebas Neue',sans-serif;font-size:14px;color:${isMgr ? '#00C6FF' : '#00FF88'};letter-spacing:1.5px;margin-bottom:10px;">${isMgr ? '👔 MANAGER' : '👤 AGENT'} GOALS</div>
+                  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                    <div>
+                      <label class="form-label" style="font-size:11px;">WEEKLY</label>
+                      <input id="sg-w-${prog.id}-${bucket}" type="number" min="0" class="form-input" value="${g.weekly_goal || 0}"/>
+                    </div>
+                    <div>
+                      <label class="form-label" style="font-size:11px;">MONTHLY</label>
+                      <input id="sg-m-${prog.id}-${bucket}" type="number" min="0" class="form-input" value="${g.monthly_goal || 0}"/>
+                    </div>
+                  </div>
+                  <label class="form-label" style="font-size:11px;margin-top:8px;">NOTES (optional)</label>
+                  <textarea id="sg-n-${prog.id}-${bucket}" class="form-input" rows="2" placeholder="e.g. 8/week unlocks the bonus tier per the agreement">${escapeHtml(g.notes || '')}</textarea>
+                  <button class="bo-btn bo-btn-primary" style="margin-top:8px;padding:6px 16px;font-size:12px;width:100%;" onclick="saveSalesGoal('${prog.id}','${bucket}')">Save ${isMgr ? 'Manager' : 'Agent'} Goal</button>
+                </div>`;
+            }).join('')}
+          </div>
+        </div>
+      `).join('')}
+    </div>
+    <div id="sg-msg" style="margin-top:14px;font-size:13px;"></div>`;
+}
+
+async function saveSalesGoal(programId, bucket){
+  const weekly  = parseInt(document.getElementById('sg-w-' + programId + '-' + bucket).value, 10) || 0;
+  const monthly = parseInt(document.getElementById('sg-m-' + programId + '-' + bucket).value, 10) || 0;
+  const notes   = document.getElementById('sg-n-' + programId + '-' + bucket).value.trim() || null;
+  const msg = document.getElementById('sg-msg');
+
+  const { error } = await sb.from('program_sales_goals').upsert({
+    program_id: programId,
+    role_bucket: bucket,
+    weekly_goal: weekly,
+    monthly_goal: monthly,
+    notes,
+    updated_by: currentProfile.id
+  }, { onConflict: 'program_id,role_bucket' });
+
+  if(error){
+    msg.innerHTML = '<span style="color:#F87171;">' + escapeHtml(error.message) + '</span>';
+  } else {
+    msg.innerHTML = '<span style="color:#00FF88;">✓ Saved ' + (allPrograms.find(p => p.id === programId)?.name || programId) + ' / ' + bucket + ' goals.</span>';
+    setTimeout(() => { if(msg) msg.innerHTML = ''; }, 2400);
+  }
+}
+
+window.renderSalesGoalsAdmin = renderSalesGoalsAdmin;
+window.saveSalesGoal = saveSalesGoal;
+
+// ─── DAILY SALES ENTRY PAGE (Owner/Admin/MM) ─────────────────────────
+async function renderDailySalesEntry(el){
+  const role = currentProfile?.role;
+  const isOwner = role === 'owner';
+  const isAdmin = isOwner || role === 'admin';
+  const isMgr = role === 'manager' || role === 'team_lead';
+  const isOnboarding = currentProfile?.has_master_center_access === true;
+  const canEnter = isOwner || isAdmin || isOnboarding || isMgr;
+  if(!canEnter){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied.</div>';
+    return;
+  }
+
+  el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading…</div>';
+
+  // Default to today + first program in user's programs
+  const today = new Date().toISOString().slice(0,10);
+  const dateFilter = window._dseDate || today;
+  const programFilter = window._dseProgram || (currentProfile.programs?.[0] || (allPrograms[0] || {}).id);
+
+  // Fetch agents in scope
+  let agentQuery = sb.from('profiles').select('id, full_name, email, role, programs, market_id, reports_to')
+    .eq('active', true)
+    .contains('programs', [programFilter])
+    .order('full_name');
+  if(isMgr && !isAdmin && !isOnboarding){
+    // MM sees only their direct reports + themselves
+    agentQuery = agentQuery.or(`reports_to.eq.${currentProfile.id},id.eq.${currentProfile.id}`);
+  }
+  const { data: agents, error: agentsErr } = await agentQuery;
+  if(agentsErr){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Error loading agents: ' + escapeHtml(agentsErr.message) + '</div>';
+    return;
+  }
+
+  // Fetch existing sales for that date+program for these agents
+  const agentIds = (agents || []).map(a => a.id);
+  let existingByUser = {};
+  if(agentIds.length > 0){
+    const { data: existing } = await sb.from('daily_sales')
+      .select('user_id, count, notes, id')
+      .eq('program_id', programFilter)
+      .eq('sale_date', dateFilter)
+      .in('user_id', agentIds);
+    (existing || []).forEach(r => { existingByUser[r.user_id] = r; });
+  }
+
+  el.innerHTML = `
+    <div style="margin-bottom:22px;">
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;line-height:1;">📊 Daily Sales Entry</h1>
+      <p style="font-size:14px;color:rgba(255,255,255,0.55);margin-top:6px;">Enter the number of sales each agent had for the selected day. Their dashboard scoreboard updates instantly.</p>
+    </div>
+
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;align-items:end;">
+        <div>
+          <label class="form-label">PROGRAM</label>
+          <select id="dse-program" class="form-input" onchange="_dseSetProgram(this.value)">
+            ${(allPrograms || []).map(p => `<option value="${p.id}" ${p.id === programFilter ? 'selected' : ''}>${p.icon} ${escapeHtml(p.name)}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label class="form-label">DATE</label>
+          <input id="dse-date" type="date" class="form-input" value="${dateFilter}" max="${today}" onchange="_dseSetDate(this.value)"/>
+        </div>
+        <div>
+          <button class="bo-btn bo-btn-ghost" style="padding:9px 14px;" onclick="_dseToday()">📅 Today</button>
+        </div>
+      </div>
+    </div>
+
+    ${(agents || []).length === 0 ? `
+      <div class="bo-card" style="text-align:center;padding:36px;">
+        <div style="font-size:42px;margin-bottom:10px;">📊</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#fff;letter-spacing:1px;margin-bottom:6px;">No agents in this program</div>
+        <div style="color:rgba(255,255,255,0.55);font-size:13px;">${isMgr && !isAdmin ? 'You do not have any direct reports in this program yet.' : 'No one is assigned to this program. Add agents in Team admin first.'}</div>
+      </div>
+    ` : `
+      <div class="bo-card">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#FFC800;letter-spacing:1.5px;">${(agents || []).length} CONTRACTOR${agents.length === 1 ? '' : 'S'}</div>
+          <button class="bo-btn bo-btn-primary" onclick="saveAllDailySales('${programFilter}','${dateFilter}')">💾 Save All</button>
+        </div>
+        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+          <thead>
+            <tr style="border-bottom:1px solid rgba(255,255,255,0.1);">
+              <th style="text-align:left;padding:10px 12px;font-size:11px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;">CONTRACTOR</th>
+              <th style="text-align:left;padding:10px 12px;font-size:11px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;">ROLE</th>
+              <th style="text-align:center;padding:10px 12px;font-size:11px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;width:120px;">SALES</th>
+              <th style="text-align:left;padding:10px 12px;font-size:11px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;">NOTES</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${(agents || []).map(a => {
+              const e = existingByUser[a.id] || {};
+              return `
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.05);" data-user-id="${a.id}">
+                  <td style="padding:10px 12px;color:#fff;font-weight:600;">${escapeHtml(a.full_name || a.email)}</td>
+                  <td style="padding:10px 12px;color:rgba(255,255,255,0.65);font-size:11.5px;letter-spacing:0.5px;">${escapeHtml(roleLabel(a.role))}</td>
+                  <td style="padding:10px 12px;text-align:center;"><input type="number" min="0" class="form-input dse-count" data-user-id="${a.id}" value="${e.count ?? 0}" style="text-align:center;width:90px;font-size:18px;font-family:'Bebas Neue',sans-serif;"/></td>
+                  <td style="padding:10px 12px;"><input type="text" class="form-input dse-notes" data-user-id="${a.id}" placeholder="Optional notes" value="${escapeHtml(e.notes || '')}"/></td>
+                </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    `}
+
+    <div id="dse-msg" style="margin-top:14px;font-size:13px;"></div>`;
+}
+
+function _dseSetProgram(pid){ window._dseProgram = pid; renderMainContent(); }
+function _dseSetDate(d){ window._dseDate = d; renderMainContent(); }
+function _dseToday(){ window._dseDate = new Date().toISOString().slice(0,10); renderMainContent(); }
+
+async function saveAllDailySales(programId, dateStr){
+  const msg = document.getElementById('dse-msg');
+  const countInputs = document.querySelectorAll('input.dse-count');
+  const notesInputs = {};
+  document.querySelectorAll('input.dse-notes').forEach(n => { notesInputs[n.dataset.userId] = n.value.trim() || null; });
+
+  const rows = [];
+  countInputs.forEach(c => {
+    const userId = c.dataset.userId;
+    const count = parseInt(c.value, 10);
+    if(isNaN(count)) return;
+    rows.push({
+      user_id: userId,
+      program_id: programId,
+      sale_date: dateStr,
+      count,
+      notes: notesInputs[userId] || null,
+      entered_by: currentProfile.id
+    });
+  });
+
+  if(rows.length === 0){ msg.innerHTML = '<span style="color:#F87171;">Nothing to save.</span>'; return; }
+
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Saving ' + rows.length + ' row' + (rows.length === 1 ? '' : 's') + '…</span>';
+
+  const { error } = await sb.from('daily_sales').upsert(rows, { onConflict: 'user_id,program_id,sale_date' });
+  if(error){
+    msg.innerHTML = '<span style="color:#F87171;">' + escapeHtml(error.message) + '</span>';
+    return;
+  }
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Saved ' + rows.length + ' contractor' + (rows.length === 1 ? '' : 's') + '.</span>';
+  setTimeout(() => { if(msg) msg.innerHTML = ''; }, 2400);
+}
+
+window.renderDailySalesEntry = renderDailySalesEntry;
+window.saveAllDailySales = saveAllDailySales;
+window._dseSetProgram = _dseSetProgram;
+window._dseSetDate = _dseSetDate;
+window._dseToday = _dseToday;
 
 
 // Cancel ALL pending contract assignments for a specific agent.
