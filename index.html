@@ -5186,7 +5186,17 @@ function _dseToday(){ window._dseDate = new Date().toISOString().slice(0,10); re
 
 async function saveAllDailySales(programId, dateStr){
   const msg = document.getElementById('dse-msg');
+  if(!msg){
+    alert('Save UI element missing — refresh the page and try again.');
+    return;
+  }
+
   const countInputs = document.querySelectorAll('input.dse-count');
+  if(countInputs.length === 0){
+    msg.innerHTML = '<span style="color:#F87171;">No agents on the page to save. Pick a program with at least 1 agent.</span>';
+    return;
+  }
+
   const notesInputs = {};
   document.querySelectorAll('input.dse-notes').forEach(n => { notesInputs[n.dataset.userId] = n.value.trim() || null; });
 
@@ -5194,7 +5204,7 @@ async function saveAllDailySales(programId, dateStr){
   countInputs.forEach(c => {
     const userId = c.dataset.userId;
     const count = parseInt(c.value, 10);
-    if(isNaN(count)) return;
+    if(isNaN(count) || count < 0) return;
     rows.push({
       user_id: userId,
       program_id: programId,
@@ -5205,17 +5215,39 @@ async function saveAllDailySales(programId, dateStr){
     });
   });
 
-  if(rows.length === 0){ msg.innerHTML = '<span style="color:#F87171;">Nothing to save.</span>'; return; }
+  console.log('[saveAllDailySales] preparing', rows.length, 'rows for', programId, dateStr, rows);
+
+  if(rows.length === 0){
+    msg.innerHTML = '<span style="color:#F87171;">No valid rows to save (every input is empty or invalid).</span>';
+    return;
+  }
 
   msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Saving ' + rows.length + ' row' + (rows.length === 1 ? '' : 's') + '…</span>';
 
-  const { error } = await sb.from('daily_sales').upsert(rows, { onConflict: 'user_id,program_id,sale_date' });
-  if(error){
-    msg.innerHTML = '<span style="color:#F87171;">' + escapeHtml(error.message) + '</span>';
+  let result;
+  try {
+    result = await sb.from('daily_sales').upsert(rows, { onConflict: 'user_id,program_id,sale_date' });
+  } catch(e){
+    console.error('[saveAllDailySales] thrown:', e);
+    msg.innerHTML = '<span style="color:#F87171;">Network/JS error: ' + escapeHtml(e.message || String(e)) + '</span>';
     return;
   }
+
+  console.log('[saveAllDailySales] result:', result);
+
+  if(result.error){
+    let detail = result.error.message || 'Unknown error';
+    if(result.error.code === '42P01'){
+      detail = 'Table daily_sales does not exist. You need to run PHASE3_16_MIGRATION in Supabase before this page works.';
+    } else if(result.error.code === '42501' || /row-level security/i.test(detail)){
+      detail = 'Permission denied by RLS. Make sure your user role is owner/admin/onboarding/manager. Raw error: ' + detail;
+    }
+    msg.innerHTML = '<div style="color:#F87171;font-weight:600;margin-bottom:4px;">Save failed.</div><div style="color:#F87171;font-size:12px;">' + escapeHtml(detail) + '</div>';
+    return;
+  }
+
   msg.innerHTML = '<span style="color:#00FF88;">✓ Saved ' + rows.length + ' contractor' + (rows.length === 1 ? '' : 's') + '.</span>';
-  setTimeout(() => { if(msg) msg.innerHTML = ''; }, 2400);
+  setTimeout(() => { if(msg && msg.innerHTML.includes('✓ Saved')) msg.innerHTML = ''; }, 2400);
 }
 
 window.renderDailySalesEntry = renderDailySalesEntry;
