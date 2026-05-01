@@ -2440,7 +2440,7 @@ function renderSidebar(){
   const canInventory = isOwner || isAdmin || isManager || currentProfile.is_inventory_manager;
   if(canInventory){ adminNavItems.push({ id:'inventory', label:'📦 Inventory' }); }
   if(isOwner || isAdmin || isManager || isTeamLead || currentProfile.has_master_center_access){
-    adminNavItems.push({ id:'photo-audits-review', label:'📸 Photo Audits' });
+    adminNavItems.push({ id:'photo-audits-review', label:'📸 Photo Audits & Time' });
   }
   if(isOwner || isAdmin || currentProfile.is_payroll_manager){
     adminNavItems.push({ id:'payroll', label:'💵 Payroll' });
@@ -13727,34 +13727,52 @@ async function notifyOffHoursCheckin(audit, storeName, minutesOff, auditType){
 
 async function renderPhotoAuditsReview(el){
   // Owner + Admin + Manager + Team Lead + Onboarding can view audits.
-  // (Onboarding needs visibility for compliance + dress-code checks.)
   const role = currentProfile?.role;
-  const canView = ['owner','admin','manager','team_lead'].includes(role)
-                  || currentProfile?.has_master_center_access === true;
+  const isOwner = role === 'owner';
+  const isAdmin = isOwner || role === 'admin';
+  const isMgr = role === 'manager' || role === 'team_lead';
+  const isOnboarding = currentProfile?.has_master_center_access === true;
+  const canView = isAdmin || isMgr || isOnboarding;
   if(!canView){ el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied.</div>'; return; }
 
   el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading photo audits…</div>';
 
   const filter = window._auditFilter || 'all';
+  const agentFilter = window._auditAgentFilter || '';   // '' = all
+  const dateFilter  = window._auditDateFilter  || 'week'; // today/week/month/all
 
-  // Run a robust plain query (no embed). The embed FK alias varies by how the
-  // table was created and PostgREST is finicky about it; do the join manually
-  // for reliability. Either way, we always render — never leave blank.
+  // Compute date bounds based on date filter
+  const now = new Date();
+  let startDate = null;
+  if(dateFilter === 'today'){
+    startDate = new Date(now); startDate.setHours(0,0,0,0);
+  } else if(dateFilter === 'week'){
+    // Monday of this week
+    startDate = new Date(now);
+    const day = startDate.getDay();
+    const mondayOffset = (day + 6) % 7;
+    startDate.setDate(startDate.getDate() - mondayOffset);
+    startDate.setHours(0,0,0,0);
+  } else if(dateFilter === 'month'){
+    startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+  }
+
+  // ─── Pull audits ────────────────────────────────────────────────────
   let audits = [];
   let queryError = null;
   try {
-    const r = await sb.from('photo_audits')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(200);
+    let q = sb.from('photo_audits').select('*').order('created_at', { ascending: false }).limit(500);
+    if(agentFilter) q = q.eq('user_id', agentFilter);
+    if(startDate)   q = q.gte('created_at', startDate.toISOString());
+    const r = await q;
     if(r.error) throw r.error;
     audits = r.data || [];
 
-    // Stitch in stores + profiles (separate queries — no embed)
+    // Stitch in stores + profiles
     const userIds  = [...new Set(audits.map(a => a.user_id).filter(Boolean))];
     const storeIds = [...new Set(audits.map(a => a.store_id).filter(Boolean))];
     const [pr, sr] = await Promise.all([
-      userIds.length  ? sb.from('profiles').select('id,full_name,email,avatar_url').in('id', userIds) : Promise.resolve({ data: [] }),
+      userIds.length  ? sb.from('profiles').select('id,full_name,email,avatar_url,programs,role,reports_to').in('id', userIds) : Promise.resolve({ data: [] }),
       storeIds.length ? sb.from('stores').select('id,name,city,latitude,longitude').in('id', storeIds) : Promise.resolve({ data: [] })
     ]);
     const pMap = {}; (pr.data || []).forEach(p => { pMap[p.id] = p; });
@@ -13771,58 +13789,372 @@ async function renderPhotoAuditsReview(el){
   if(queryError){
     el.innerHTML = `
       <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px;flex-wrap:wrap;gap:10px;">
-        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:42px;color:#fff;">📸 Photo Audits</h1>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:42px;color:#fff;">📸 Photo Audits & Time Sheets</h1>
         <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('agents')" style="padding:7px 14px;font-size:12px;">← Back</button>
       </div>
       <div class="bo-card" style="color:#F87171;border:1px solid rgba(248,113,113,0.3);">
         <div style="font-weight:600;margin-bottom:8px;font-size:14px;">⚠️ Could not load photo audits.</div>
         <div style="font-size:12.5px;color:rgba(248,113,113,0.85);margin-bottom:8px;">${escapeHtml(queryError.message || String(queryError))}</div>
-        <div style="font-size:12px;color:rgba(255,255,255,0.5);line-height:1.55;">If this persists, the photo_audits table may need its RLS policy updated. Check Supabase logs or contact support.</div>
+        <div style="font-size:12px;color:rgba(255,255,255,0.5);line-height:1.55;">If this persists, run the latest PHASE3_19_MIGRATION which tightens the photo_audits RLS for managers.</div>
       </div>`;
     return;
   }
 
-  const failed = audits.filter(a => !a.geofence_passed);
+  // ─── Pull retail agents in scope (for time sheets + agent dropdown) ──
+  // Only retail agents get time-sheet rows because retail is the only program
+  // we pay hours on. B2B/Fiber are 1099 commission — no hours tracked.
+  let retailAgents = [];
+  try {
+    let aq = sb.from('profiles')
+      .select('id, full_name, email, role, programs, market_id, reports_to, active')
+      .eq('active', true)
+      .contains('programs', ['retail'])
+      .order('full_name');
+    // MMs scope to their direct reports + themselves; office sees all retail
+    if(isMgr && !isAdmin && !isOnboarding){
+      aq = aq.or(`reports_to.eq.${currentProfile.id},id.eq.${currentProfile.id}`);
+    }
+    const ar = await aq;
+    retailAgents = ar.data || [];
+  } catch(e){ console.warn('Retail agents fetch failed:', e); }
+
+  // ─── Compute hours for each retail agent in the selected date range ──
+  const tsRange = (() => {
+    if(dateFilter === 'today'){
+      const s = new Date(now); s.setHours(0,0,0,0);
+      const e = new Date(s); e.setDate(e.getDate() + 1);
+      return { start: s, end: e, label: "Today" };
+    }
+    if(dateFilter === 'week'){
+      const s = new Date(now);
+      const day = s.getDay();
+      const mondayOffset = (day + 6) % 7;
+      s.setDate(s.getDate() - mondayOffset);
+      s.setHours(0,0,0,0);
+      const e = new Date(s); e.setDate(e.getDate() + 7);
+      return { start: s, end: e, label: "This Week" };
+    }
+    if(dateFilter === 'month'){
+      const s = new Date(now.getFullYear(), now.getMonth(), 1);
+      const e = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+      return { start: s, end: e, label: "This Month" };
+    }
+    return null;
+  })();
+
+  // Build time-sheets table data: one row per retail agent with hours + audit count
+  let timesheets = [];
+  if(tsRange && retailAgents.length > 0){
+    // Fetch all audits for these agents in the range in ONE query (efficient)
+    const ids = retailAgents.map(a => a.id);
+    const { data: tsAudits } = await sb.from('photo_audits')
+      .select('user_id, audit_type, created_at, geofence_passed')
+      .in('user_id', ids)
+      .gte('created_at', tsRange.start.toISOString())
+      .lt('created_at', tsRange.end.toISOString())
+      .order('created_at', { ascending: true });
+
+    // Group by user
+    const byUser = {};
+    (tsAudits || []).forEach(a => {
+      if(!byUser[a.user_id]) byUser[a.user_id] = [];
+      byUser[a.user_id].push(a);
+    });
+
+    // Pair check-in/check-out for each agent and compute hours
+    timesheets = retailAgents.map(agent => {
+      const valid = (byUser[agent.id] || []).filter(a => a.geofence_passed);
+      const totalAudits = (byUser[agent.id] || []).length;
+      let totalMs = 0;
+      let pendingCheckIn = null;
+      const MAX_SHIFT_MS = 12 * 3600 * 1000;
+      const shifts = [];  // detailed pair list
+      for(const a of valid){
+        if(a.audit_type === 'check_in'){
+          pendingCheckIn = new Date(a.created_at);
+        } else if(a.audit_type === 'check_out' && pendingCheckIn){
+          let span = new Date(a.created_at) - pendingCheckIn;
+          const original = span;
+          if(span > MAX_SHIFT_MS) span = MAX_SHIFT_MS;
+          if(span > 0){
+            totalMs += span;
+            shifts.push({
+              in: pendingCheckIn,
+              out: new Date(a.created_at),
+              hours: span / 3600000,
+              capped: original > MAX_SHIFT_MS
+            });
+          }
+          pendingCheckIn = null;
+        }
+      }
+      // Open shift (still checked in)
+      let openShift = null;
+      if(pendingCheckIn){
+        const cap = tsRange.end < new Date() ? tsRange.end : new Date();
+        let span = cap - pendingCheckIn;
+        if(span > MAX_SHIFT_MS) span = MAX_SHIFT_MS;
+        if(span > 0){
+          totalMs += span;
+          openShift = { in: pendingCheckIn, hours: span / 3600000 };
+        }
+      }
+      return {
+        agent,
+        hours: totalMs / 3600000,
+        auditCount: totalAudits,
+        validCount: valid.length,
+        shifts,
+        openShift,
+        latest: valid[valid.length - 1] || null
+      };
+    });
+
+    // Sort by hours desc
+    timesheets.sort((a, b) => b.hours - a.hours);
+  }
+
+  // ─── Filter the audit list (for the bottom audit log) ─────────────────
   const today = new Date(); today.setHours(0,0,0,0);
+  const failed = audits.filter(a => !a.geofence_passed);
   const todayAudits = audits.filter(a => new Date(a.created_at) >= today);
-  // Off-hours flagged audits (after-hours / before-hours per Phase 3.3)
   const offHours = audits.filter(a => a.off_hours_check);
 
+  const visibleAudits = audits.filter(a => {
+    if(filter === 'today') return new Date(a.created_at) >= today;
+    if(filter === 'failed') return !a.geofence_passed;
+    if(filter === 'off_hours') return a.off_hours_check;
+    return true;
+  });
+
+  // ─── Render ──────────────────────────────────────────────────────────
   el.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px;flex-wrap:wrap;gap:12px;">
       <div>
-        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">📸 Photo Audits</h1>
-        <p style="font-size:14px;color:rgba(255,255,255,0.5);">Daily check-in / check-out submissions with photo + GPS verification.</p>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">📸 Photo Audits & Time Sheets</h1>
+        <p style="font-size:14px;color:rgba(255,255,255,0.55);">Daily check-in / check-out submissions with photo + GPS verification${isMgr && !isAdmin && !isOnboarding ? '. You see only your direct reports.' : '.'} Time sheets shown for retail energy agents only (the only program we pay hours on).</p>
       </div>
-      <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('agents')" style="padding:7px 14px;font-size:12px;">← Back to Team</button>
     </div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:18px;">
-      <div class="stat-card" style="cursor:pointer;${filter==='all'?'border-color:#FF6B00;':''}" onclick="setAuditFilter('all')"><div class="stat-num" style="color:#FFD700;">${audits.length}</div><div class="stat-lbl">Total (recent)</div></div>
+
+    <!-- ─── Filter row ──────────────────────────────────────────────── -->
+    <div class="bo-card" style="margin-bottom:14px;">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;align-items:end;">
+        <div>
+          <label class="form-label">DATE RANGE</label>
+          <select class="form-input" onchange="window._auditDateFilter = this.value; renderMainContent();">
+            <option value="today" ${dateFilter==='today'?'selected':''}>Today only</option>
+            <option value="week" ${dateFilter==='week'?'selected':''}>This week (Mon-Sun)</option>
+            <option value="month" ${dateFilter==='month'?'selected':''}>This month</option>
+            <option value="all" ${dateFilter==='all'?'selected':''}>All time (recent 500)</option>
+          </select>
+        </div>
+        <div>
+          <label class="form-label">AGENT</label>
+          <select class="form-input" onchange="window._auditAgentFilter = this.value; renderMainContent();">
+            <option value="">— All agents —</option>
+            ${retailAgents.map(a => `<option value="${a.id}" ${agentFilter===a.id?'selected':''}>${escapeHtml(a.full_name || a.email)}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <button class="bo-btn bo-btn-ghost" style="padding:9px 14px;width:100%;" onclick="window._auditAgentFilter=''; window._auditDateFilter='week'; window._auditFilter='all'; renderMainContent();">↺ Reset filters</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ─── Time Sheets (retail only) ──────────────────────────────── -->
+    ${timesheets.length > 0 ? `
+      <div class="bo-card" style="margin-bottom:14px;border:1px solid rgba(255,107,0,0.3);background:linear-gradient(135deg,rgba(255,107,0,0.04),rgba(255,107,0,0));">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
+          <div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#FF6B00;letter-spacing:1.5px;">🕒 TIME SHEETS · ${tsRange?.label.toUpperCase() || ''}</div>
+            <div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-top:3px;">Hours computed from check-in/check-out pairs (retail agents only). Open shifts count up to now. Single shifts capped at 12 hours.</div>
+          </div>
+          <div style="font-size:11px;color:rgba(255,255,255,0.45);">${timesheets.length} agent${timesheets.length === 1 ? '' : 's'}</div>
+        </div>
+        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+          <thead>
+            <tr style="border-bottom:1px solid rgba(255,255,255,0.1);">
+              <th style="text-align:left;padding:8px 10px;font-size:10.5px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;">AGENT</th>
+              <th style="text-align:left;padding:8px 10px;font-size:10.5px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;">ROLE</th>
+              <th style="text-align:right;padding:8px 10px;font-size:10.5px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;width:90px;">HOURS</th>
+              <th style="text-align:center;padding:8px 10px;font-size:10.5px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;width:80px;">AUDITS</th>
+              <th style="text-align:center;padding:8px 10px;font-size:10.5px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;width:90px;">STATUS</th>
+              <th style="text-align:center;padding:8px 10px;font-size:10.5px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;width:80px;">DETAIL</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${timesheets.map(ts => {
+              const isOpen = !!ts.openShift;
+              const hrs = ts.hours;
+              const hrsColor = hrs >= 30 ? '#00FF88' : hrs >= 10 ? '#FFC800' : hrs > 0 ? '#FF6B00' : 'rgba(255,255,255,0.4)';
+              return `
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+                  <td style="padding:9px 10px;color:#fff;font-weight:600;cursor:pointer;" onclick="openAgentProfile('${ts.agent.id}')">${escapeHtml(ts.agent.full_name || ts.agent.email)}</td>
+                  <td style="padding:9px 10px;color:rgba(255,255,255,0.65);font-size:11.5px;">${escapeHtml(roleLabel(ts.agent.role))}</td>
+                  <td style="padding:9px 10px;text-align:right;font-family:'Bebas Neue',sans-serif;font-size:20px;color:${hrsColor};line-height:1;">${hrs.toFixed(1)}</td>
+                  <td style="padding:9px 10px;text-align:center;font-size:12px;color:rgba(255,255,255,0.7);">${ts.validCount}/${ts.auditCount}</td>
+                  <td style="padding:9px 10px;text-align:center;">
+                    ${isOpen
+                      ? '<span style="background:rgba(0,255,136,0.15);color:#00FF88;padding:3px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">🟢 ON CLOCK</span>'
+                      : ts.latest
+                        ? '<span style="background:rgba(255,255,255,0.05);color:rgba(255,255,255,0.55);padding:3px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">OFF</span>'
+                        : '<span style="background:rgba(255,255,255,0.04);color:rgba(255,255,255,0.35);padding:3px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">NO PUNCH</span>'}
+                  </td>
+                  <td style="padding:9px 10px;text-align:center;">
+                    <button class="bo-btn bo-btn-ghost" style="padding:3px 9px;font-size:10.5px;" onclick="openTimesheetDetail('${ts.agent.id}','${tsRange.start.toISOString()}','${tsRange.end.toISOString()}','${escapeHtml((ts.agent.full_name||ts.agent.email).replace(/'/g,'&#39;'))}','${tsRange.label.replace(/'/g,'&#39;')}')">📋 View</button>
+                  </td>
+                </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    ` : ''}
+
+    <!-- ─── Audit log header + filter chips ───────────────────────── -->
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:14px;">
+      <div class="stat-card" style="cursor:pointer;${filter==='all'?'border-color:#FF6B00;':''}" onclick="setAuditFilter('all')"><div class="stat-num" style="color:#FFD700;">${audits.length}</div><div class="stat-lbl">Total in Range</div></div>
       <div class="stat-card" style="cursor:pointer;${filter==='today'?'border-color:#FF6B00;':''}" onclick="setAuditFilter('today')"><div class="stat-num" style="color:#00FF88;">${todayAudits.length}</div><div class="stat-lbl">Today</div></div>
       <div class="stat-card" style="cursor:pointer;${filter==='failed'?'border-color:#FF6B00;':''}" onclick="setAuditFilter('failed')"><div class="stat-num" style="color:#F87171;">${failed.length}</div><div class="stat-lbl">⚠️ Geofence Fails</div></div>
       ${offHours.length > 0 ? `<div class="stat-card" style="cursor:pointer;${filter==='off_hours'?'border-color:#FF6B00;':''}" onclick="setAuditFilter('off_hours')"><div class="stat-num" style="color:#FFC800;">${offHours.length}</div><div class="stat-lbl">⏰ Off Hours</div></div>` : ''}
     </div>
+
     ${audits.length === 0 ? `
       <div class="bo-card" style="text-align:center;padding:50px 30px;border:1px solid rgba(255,255,255,0.06);">
         <div style="font-size:54px;margin-bottom:14px;">📸</div>
         <div style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#fff;letter-spacing:1px;margin-bottom:8px;">No audits yet</div>
-        <div style="color:rgba(255,255,255,0.6);font-size:13.5px;max-width:440px;margin:0 auto 18px;line-height:1.6;">Once your retail agents start submitting their daily check-ins (selfie + kiosk photo + GPS), every submission will appear here for compliance review — dress code, location verification, attendance tracking, and off-hours flagging.</div>
+        <div style="color:rgba(255,255,255,0.6);font-size:13.5px;max-width:440px;margin:0 auto 18px;line-height:1.6;">Once your retail agents start submitting their daily check-ins (selfie + kiosk photo + GPS), every submission will appear here for compliance review and time tracking.</div>
         <div style="background:rgba(0,198,255,0.05);border:1px solid rgba(0,198,255,0.2);border-radius:8px;padding:14px 18px;max-width:440px;margin:0 auto;text-align:left;font-size:12.5px;color:rgba(255,255,255,0.7);line-height:1.6;">
           <div style="color:#00C6FF;font-weight:700;letter-spacing:1.5px;font-size:11px;margin-bottom:6px;">HOW AGENTS SUBMIT</div>
-          They open <strong>Retail Energy → 🧰 Tool Box → 📸 Daily Check-In</strong> on their phone, take a selfie + kiosk photo, and tap submit. Submissions appear here within seconds.
+          They open <strong>Retail Energy → 🧰 Tool Box → 📸 Daily Check-In</strong> on their phone, take a selfie + kiosk photo, and tap submit.
         </div>
       </div>
     ` : `
-      <div style="display:flex;flex-direction:column;gap:8px;">
-        ${audits.filter(a => {
-          if(filter === 'today') return new Date(a.created_at) >= today;
-          if(filter === 'failed') return !a.geofence_passed;
-          if(filter === 'off_hours') return a.off_hours_check;
-          return true;
-        }).map(a => renderAuditRow(a)).join('') || '<div style="text-align:center;padding:30px;color:rgba(255,255,255,0.4);">No audits match this filter.</div>'}
+      <div class="bo-card" style="margin-bottom:14px;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#fff;letter-spacing:1.5px;margin-bottom:10px;">📸 AUDIT LOG (${visibleAudits.length})</div>
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          ${visibleAudits.map(a => renderAuditRow(a)).join('') || '<div style="text-align:center;padding:20px;color:rgba(255,255,255,0.4);">No audits match this filter.</div>'}
+        </div>
       </div>
     `}`;
 }
+
+// Drill-down: show one agent's full timesheet with each shift pair and total hours.
+async function openTimesheetDetail(userId, startIso, endIso, agentName, rangeLabel){
+  const start = new Date(startIso);
+  const end   = new Date(endIso);
+
+  document.getElementById('modal-box').innerHTML = '<div style="color:rgba(255,255,255,0.5);">Loading timesheet…</div>';
+  document.getElementById('modal-box').style.maxWidth = '640px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+
+  const { data: audits } = await sb.from('photo_audits')
+    .select('id, audit_type, created_at, geofence_passed, store_id, photo_path, distance_from_store_meters')
+    .eq('user_id', userId)
+    .gte('created_at', start.toISOString())
+    .lt('created_at', end.toISOString())
+    .order('created_at', { ascending: true });
+
+  // Stitch in stores
+  const storeIds = [...new Set((audits || []).map(a => a.store_id).filter(Boolean))];
+  const { data: stores } = storeIds.length
+    ? await sb.from('stores').select('id, name, city').in('id', storeIds)
+    : { data: [] };
+  const sMap = {}; (stores || []).forEach(s => { sMap[s.id] = s; });
+
+  // Pair check-in/check-out (same logic as the table)
+  const valid = (audits || []).filter(a => a.geofence_passed);
+  const shifts = [];
+  let pendingIn = null;
+  const MAX_SHIFT_MS = 12 * 3600 * 1000;
+  for(const a of valid){
+    if(a.audit_type === 'check_in'){
+      pendingIn = a;
+    } else if(a.audit_type === 'check_out' && pendingIn){
+      let span = new Date(a.created_at) - new Date(pendingIn.created_at);
+      const original = span;
+      if(span > MAX_SHIFT_MS) span = MAX_SHIFT_MS;
+      shifts.push({
+        in: pendingIn,
+        out: a,
+        hours: span / 3600000,
+        capped: original > MAX_SHIFT_MS,
+        store: sMap[pendingIn.store_id]
+      });
+      pendingIn = null;
+    }
+  }
+  // Open shift
+  let openShift = null;
+  if(pendingIn){
+    const cap = end < new Date() ? end : new Date();
+    let span = cap - new Date(pendingIn.created_at);
+    if(span > MAX_SHIFT_MS) span = MAX_SHIFT_MS;
+    openShift = {
+      in: pendingIn,
+      hours: span / 3600000,
+      store: sMap[pendingIn.store_id]
+    };
+  }
+  const totalHours = shifts.reduce((s, x) => s + x.hours, 0) + (openShift ? openShift.hours : 0);
+
+  // Render
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:#fff;margin-bottom:4px;letter-spacing:1px;">🕒 Timesheet · ${escapeHtml(agentName)}</h2>
+    <div style="font-size:12px;color:rgba(255,255,255,0.55);margin-bottom:14px;">${escapeHtml(rangeLabel)} · ${start.toLocaleDateString()} – ${new Date(end - 86400000).toLocaleDateString()}</div>
+
+    <div style="background:linear-gradient(135deg,rgba(255,107,0,0.06),rgba(255,107,0,0));border:1px solid rgba(255,107,0,0.3);border-radius:10px;padding:16px;margin-bottom:14px;text-align:center;">
+      <div style="font-size:11px;color:rgba(255,255,255,0.6);letter-spacing:2px;font-weight:700;">TOTAL HOURS WORKED</div>
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:54px;color:#FF6B00;line-height:1;letter-spacing:1px;margin:4px 0;">${totalHours.toFixed(2)}</div>
+      <div style="font-size:11px;color:rgba(255,255,255,0.5);">${shifts.length} completed shift${shifts.length === 1 ? '' : 's'}${openShift ? ' + 1 open' : ''} · ${valid.length} valid punch${valid.length === 1 ? '' : 'es'}${(audits||[]).length !== valid.length ? ' · ' + ((audits||[]).length - valid.length) + ' invalid (geofence fail)' : ''}</div>
+    </div>
+
+    ${shifts.length === 0 && !openShift ? `
+      <div style="background:rgba(255,255,255,0.025);border:1px dashed rgba(255,255,255,0.15);border-radius:8px;padding:24px;text-align:center;color:rgba(255,255,255,0.55);font-size:13px;">No completed shifts in this range.</div>
+    ` : `
+      <div style="font-size:11px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;margin-bottom:8px;">SHIFT BREAKDOWN</div>
+      ${openShift ? `
+        <div style="background:rgba(0,255,136,0.06);border:1px solid rgba(0,255,136,0.3);border-radius:8px;padding:10px 12px;margin-bottom:6px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <span style="background:rgba(0,255,136,0.18);color:#00FF88;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">🟢 ON CLOCK</span>
+              <span style="font-size:12.5px;color:#fff;font-weight:600;">In: ${new Date(openShift.in.created_at).toLocaleString()}</span>
+            </div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#00FF88;line-height:1;">${openShift.hours.toFixed(2)} hr</div>
+          </div>
+          ${openShift.store ? `<div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:4px;">📍 ${escapeHtml(openShift.store.name)}${openShift.store.city ? ' — ' + escapeHtml(openShift.store.city) : ''}</div>` : ''}
+        </div>
+      ` : ''}
+      ${shifts.map((sh, i) => `
+        <div style="background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.06);border-radius:8px;padding:10px 12px;margin-bottom:6px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:4px;">
+            <div style="font-size:11px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1px;">SHIFT ${i + 1}</div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#FF6B00;line-height:1;">${sh.hours.toFixed(2)} hr ${sh.capped ? '<span style=\"color:#FFC800;font-size:10px;\">(capped)</span>' : ''}</div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;color:rgba(255,255,255,0.7);">
+            <div>
+              <div style="font-size:10px;color:rgba(255,255,255,0.45);letter-spacing:1.5px;font-weight:700;">CHECK IN</div>
+              <div>${new Date(sh.in.created_at).toLocaleString()}</div>
+            </div>
+            <div>
+              <div style="font-size:10px;color:rgba(255,255,255,0.45);letter-spacing:1.5px;font-weight:700;">CHECK OUT</div>
+              <div>${new Date(sh.out.created_at).toLocaleString()}</div>
+            </div>
+          </div>
+          ${sh.store ? `<div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:4px;">📍 ${escapeHtml(sh.store.name)}${sh.store.city ? ' — ' + escapeHtml(sh.store.city) : ''}</div>` : ''}
+          <div style="display:flex;gap:6px;margin-top:6px;">
+            <button class="bo-btn bo-btn-ghost" style="padding:3px 9px;font-size:10.5px;" onclick="viewAuditPhoto('${sh.in.id}','${sh.in.photo_path}')">📸 In Photo</button>
+            <button class="bo-btn bo-btn-ghost" style="padding:3px 9px;font-size:10.5px;" onclick="viewAuditPhoto('${sh.out.id}','${sh.out.photo_path}')">📸 Out Photo</button>
+          </div>
+        </div>
+      `).join('')}
+    `}
+
+    <div style="display:flex;gap:10px;margin-top:14px;">
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Close</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals(); window._auditAgentFilter = '${userId}'; renderMainContent();">📸 See all audits for this agent</button>
+    </div>`;
+}
+window.openTimesheetDetail = openTimesheetDetail;
 
 function renderAuditRow(a){
   const passed = a.geofence_passed;
