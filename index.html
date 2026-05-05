@@ -2384,10 +2384,21 @@ function renderSidebar(){
     return true;
   });
 
-  // Build admin nav items (only for those with admin/manager/team_lead access)
+  // Build admin nav items.
+  // MM permission tightening (Phase 3.20): MMs get a single read-only "👥 My Team"
+  // page instead of full Team admin. They DO NOT see Owner Panel, Markets, Stores
+  // admin, Contract Hub, Forms, Applications, Programs admin, Sales Goals, Reliant
+  // Email, Sales Entry — all of those are admin/owner-only.
+  // MMs DO keep: My Team, Weekly Schedule, My Interviews, Inventory (if inventory
+  // manager), Photo Audits & Time (already team-scoped), Onboarding Status (already
+  // team-scoped). Permissions never delete data — they only hide views.
   const adminNavItems = [];
-  if(isAdmin || isManager || isTeamLead){
+  if(isAdmin){
+    // Owner + Admin only — full Team admin with clickable agent profiles
     adminNavItems.push({ id:'agents', label:'👥 Team' });
+  } else if(isManager || isTeamLead){
+    // MM / TL — read-only My Team summary page
+    adminNavItems.push({ id:'my-team', label:'👥 My Team' });
   }
   if(isOwner){
     adminNavItems.push({ id:'owner-panel', label:'👑 Owner Panel' });
@@ -2398,8 +2409,7 @@ function renderSidebar(){
     adminNavItems.push({ id:'applications', label:'📝 Applications' });
     adminNavItems.push({ id:'programs-admin', label:'🎯 Programs' });
     adminNavItems.push({ id:'sales-goals', label:'🎯 Sales Goals' });
-    // Reliant Email settings only relevant if the user works with the Reliant
-    // (retail) program. Owners can see it if they own retail; otherwise hide.
+    adminNavItems.push({ id:'tool-box-admin', label:'🧰 Tool Box Admin' });
     if((currentProfile.programs || []).includes('retail')){
       adminNavItems.push({ id:'reliant-email-settings', label:'📧 Reliant Email' });
     }
@@ -2408,8 +2418,9 @@ function renderSidebar(){
     adminNavItems.push({ id:'forms-admin', label:'📋 All Forms' });
     adminNavItems.push({ id:'applications', label:'📝 Applications' });
     adminNavItems.push({ id:'programs-admin', label:'🎯 Programs' });
+    adminNavItems.push({ id:'tool-box-admin', label:'🧰 Tool Box Admin' });
   } else if(currentProfile.has_master_center_access){
-    // Onboarding department (non-owner, non-admin) gets stores access too
+    // Onboarding department (non-owner, non-admin)
     adminNavItems.push({ id:'stores', label:'🏪 Stores' });
     adminNavItems.push({ id:'contract-hub', label:'📄 Contract Hub' });
   }
@@ -2417,7 +2428,7 @@ function renderSidebar(){
   if(isOwner || isAdmin || isManager || isTeamLead || currentProfile.has_master_center_access){
     adminNavItems.push({ id:'onboarding-status', label:'📊 Onboarding Status' });
   }
-  // 📊 Daily Sales Entry — Owner + Admin + Onboarding + MMs (MMs see only their team)
+  // 📊 Daily Sales Entry — Owner / Admin / Onboarding / MMs (MMs scoped to team)
   if(isOwner || isAdmin || isManager || isTeamLead || currentProfile.has_master_center_access){
     adminNavItems.push({ id:'daily-sales-entry', label:'📊 Sales Entry' });
   }
@@ -2425,15 +2436,11 @@ function renderSidebar(){
     adminNavItems.push({ id:'recruiting', label:'🎤 Recruiting' });
     adminNavItems.push({ id:'reliant-pipeline', label:'🎯 Reliant Pipeline' });
   }
-  // Manager Market Manager (MM) view of their own assigned interviews + response forms.
-  // Owners + Admin + Onboarding ALSO see this (it's "all interviews assigned to me as
-  // an interviewer"). MMs use this to record post-interview outcomes (show/no-show,
-  // hire/pass). Strict separation by interviewer — RLS enforces it on the row level.
+  // My Interviews — interviewers see interviews assigned to them
   if(isOwner || isAdmin || isManager || currentProfile.has_master_center_access){
     adminNavItems.push({ id:'my-interviews', label:'🎤 My Interviews' });
   }
-  // Weekly Schedule — MMs see this to assign their agents to stores each week
-  // Owner + admin can also see it (oversight)
+  // Weekly Schedule — MMs use this to assign their agents to stores each week
   if(isOwner || isAdmin || isManager){
     adminNavItems.push({ id:'weekly-schedule', label:'📅 Weekly Schedule' });
   }
@@ -2444,11 +2451,6 @@ function renderSidebar(){
   }
   if(isOwner || isAdmin || currentProfile.is_payroll_manager){
     adminNavItems.push({ id:'payroll', label:'💵 Payroll' });
-  }
-  // Sales entry — Owner + Admin + Onboarding can manually enter daily sales
-  // per agent per program. Future: bulk CSV import from Reliant/UES.
-  if(isOwner || isAdmin || currentProfile.has_master_center_access){
-    adminNavItems.push({ id:'sales-entry', label:'📊 Sales Entry' });
   }
   if(isOwner || currentProfile.has_master_center_access){
     adminNavItems.push({ id:'onboarding-master', label:'🎯 Onboarding Center' });
@@ -2706,6 +2708,9 @@ function renderMainContent(){
   if(activeAdminView === 'profile'){ renderMyProfile(el); return; }
   if(activeAdminView === 'credentials'){ el.innerHTML = renderChangePassword(); return; }
   if(activeAdminView === 'agents'){ renderAgents(el); return; }
+  if(activeAdminView === 'my-team'){ renderMyTeamReadOnly(el); return; }
+  if(activeAdminView === 'tool-box-admin'){ renderToolBoxAdmin(el); return; }
+  if(activeAdminView === 'tool-box'){ renderToolBoxAgent(el); return; }
   if(activeAdminView === 'applications'){ renderApplications(el); return; }
   if(activeAdminView === 'programs-admin'){ renderProgramsAdmin(el); return; }
   if(activeAdminView === 'sales-goals'){ renderSalesGoalsAdmin(el); return; }
@@ -3413,17 +3418,28 @@ async function renderToolBox(el, prog, canManage){
 
   el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading tools…</div>';
 
-  // Fetch tools for this program (RLS will filter to ones the user can see)
-  const { data: tools, error } = await sb.from('tools')
-    .select('*')
-    .or(`program_id.eq.${prog.id},program_id.is.null`)
-    .eq('active', true)
-    .order('sort_order', { ascending: true });
+  // Fetch tools for this program AND fetch tool_box_resources (Phase 3.20)
+  // visible to this user (RLS filters to matching audience).
+  const [toolsR, resourcesR] = await Promise.all([
+    sb.from('tools')
+      .select('*')
+      .or(`program_id.eq.${prog.id},program_id.is.null`)
+      .eq('active', true)
+      .order('sort_order', { ascending: true }),
+    sb.from('tool_box_resources')
+      .select('*')
+      .or(`program_id.eq.${prog.id},program_id.is.null`)
+      .eq('active', true)
+      .order('display_order')
+      .order('created_at', { ascending: false })
+  ]);
 
-  if(error){
-    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Error loading tools: ' + escapeHtml(error.message) + '</div>';
+  if(toolsR.error){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Error loading tools: ' + escapeHtml(toolsR.error.message) + '</div>';
     return;
   }
+  const tools = toolsR.data || [];
+  const resources = resourcesR.data || [];
 
   // Built-in (non-DB) tools that should appear in specific program toolboxes.
   // These are program features bolted into the tool box for one-tap access.
@@ -3448,22 +3464,35 @@ async function renderToolBox(el, prog, canManage){
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px;flex-wrap:wrap;gap:12px;">
       <div>
         <div style="font-family:'Bebas Neue',sans-serif;font-size:36px;color:#fff;letter-spacing:1px;line-height:1;">🧰 Tool Box</div>
-        <p style="font-size:13.5px;color:rgba(255,255,255,0.55);margin-top:6px;">Tools available for ${escapeHtml(prog.name)} agents.</p>
+        <p style="font-size:13.5px;color:rgba(255,255,255,0.55);margin-top:6px;">Tools and resources for ${escapeHtml(prog.name)} contractors.</p>
       </div>
-      ${canBuild ? `<button class="bo-btn bo-btn-primary" onclick="openToolBuilder('${prog.id}')">+ Add Tool</button>` : ''}
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        ${canBuild ? `<button class="bo-btn bo-btn-primary" onclick="openToolBuilder('${prog.id}')">+ Add Tool</button>` : ''}
+        ${isAdmin ? `<button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('tool-box-admin')" style="padding:8px 14px;">📚 Manage Resources →</button>` : ''}
+      </div>
     </div>
 
-    ${(tools || []).length === 0 && builtInTiles.length === 0 ? `
+    ${(tools || []).length === 0 && builtInTiles.length === 0 && (resources || []).length === 0 ? `
       <div class="bo-card" style="text-align:center;padding:50px 30px;">
         <div style="font-size:54px;margin-bottom:12px;">🧰</div>
-        <div style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#fff;letter-spacing:1px;margin-bottom:6px;">No tools yet</div>
-        <div style="color:rgba(255,255,255,0.5);font-size:13px;max-width:380px;margin:0 auto;">${canBuild ? 'Click <strong>+ Add Tool</strong> to put one in here.' : 'Check back soon — your manager will add tools as they become available.'}</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#fff;letter-spacing:1px;margin-bottom:6px;">Nothing here yet</div>
+        <div style="color:rgba(255,255,255,0.5);font-size:13px;max-width:380px;margin:0 auto;">${canBuild ? 'Click <strong>+ Add Tool</strong> for interactive tools, or <strong>Manage Resources</strong> for links / docs / flyers.' : 'Check back soon — your manager will add tools as they become available.'}</div>
       </div>
     ` : `
-      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px;">
-        ${builtInTiles.map(t => renderBuiltInTile(t)).join('')}
-        ${(tools || []).map(t => renderToolCard(t, prog, canBuild)).join('')}
-      </div>
+      ${(tools.length > 0 || builtInTiles.length > 0) ? `
+        <div style="font-size:11px;color:rgba(255,255,255,0.45);font-weight:700;letter-spacing:2px;margin-bottom:10px;">⚙️ TOOLS</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px;margin-bottom:24px;">
+          ${builtInTiles.map(t => renderBuiltInTile(t)).join('')}
+          ${(tools || []).map(t => renderToolCard(t, prog, canBuild)).join('')}
+        </div>
+      ` : ''}
+
+      ${(resources || []).length > 0 ? `
+        <div style="font-size:11px;color:rgba(255,255,255,0.45);font-weight:700;letter-spacing:2px;margin-bottom:10px;">📚 RESOURCES · LINKS · PAPERWORK</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;">
+          ${(resources || []).map(r => _renderToolBoxAgentCard(r)).join('')}
+        </div>
+      ` : ''}
     `}`;
 }
 
@@ -4163,19 +4192,27 @@ function roleBadgeColor(r){ return {owner:'#FFD700',admin:'#FF0080',manager:'#00
 // Action buttons: Send Packet, Send Contract, Edit, Manage Password, Resend Welcome.
 // ═══════════════════════════════════════════════════════════════════════
 async function openAgentProfile(userId){
-  // Define ALL needed permission flags up front. Previously isOwner was
-  // referenced below without being defined here, which threw a ReferenceError
-  // and left the page stuck on the "Loading agent profile..." spinner.
   const role = currentProfile?.role;
   const isOwner = role === 'owner';
   const isAdmin = isOwner || role === 'admin';
   const isManager = role === 'manager' || role === 'team_lead';
   const isOnboarding = currentProfile?.has_master_center_access === true;
+  // Phase 3.20 access gate: MMs/TLs cannot open the full agent profile.
+  // They get a read-only My Team summary only. Onboarding still allowed
+  // (compliance review). Self-view always allowed.
+  if(!isAdmin && !isOnboarding && currentProfile?.id !== userId){
+    if(isManager){
+      // Redirect MM to their My Team page
+      activeAdminView = 'my-team';
+      renderMainContent();
+      return;
+    }
+    document.getElementById('bo-content').innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied. Agent profiles are restricted to Owner / Admin / Onboarding.</div>';
+    return;
+  }
   const canManage = isAdmin;
-  // Onboarding summary card: Owner + Onboarding + MMs (managers oversee their
-  // agents' onboarding progress and need visibility). The full-detail page
-  // (openAgentOnboarding) is still gated separately to Owner + Onboarding.
-  const canViewOnboarding = isOwner || isOnboarding || isManager;
+  // Onboarding summary card: Owner + Onboarding (MM redirected above already).
+  const canViewOnboarding = isOwner || isOnboarding;
 
   const el = document.getElementById('bo-content');
   el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading agent profile…</div>';
@@ -4309,6 +4346,7 @@ async function openAgentProfile(userId){
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:18px;padding-top:18px;border-top:1px solid rgba(255,255,255,0.07);">
           ${(isOwner || currentProfile.has_master_center_access) ? `<button class="bo-btn bo-btn-primary" style="background:linear-gradient(135deg,#00C6FF,#0078D7);" onclick="openAgentOnboarding('${agent.id}')">📋 View Onboarding</button>` : ''}
           <button class="bo-btn bo-btn-primary" onclick="openSendPackageModal('${agent.id}')" style="background:linear-gradient(135deg,#A855F7,#FF0080);">📦 Send Package</button>
+          ${isAdmin ? `<button class="bo-btn bo-btn-ghost" style="border-color:rgba(220,38,38,0.5);color:#dc2626;" onclick="startImpersonation('${agent.id}')" title="Log in as this user">👁 View As</button>` : ''}
           <button class="bo-btn bo-btn-primary" onclick="openSendContractToAgentModal('${agent.id}')">📄 Send Contract</button>
           <button class="bo-btn bo-btn-ghost" onclick="openAgentModal('${agent.id}')">✏️ Edit Profile</button>
           <button class="bo-btn bo-btn-ghost" onclick="openResetPasswordModal('${agent.id}')">🔑 Manage Password</button>
@@ -14155,6 +14193,651 @@ async function openTimesheetDetail(userId, startIso, endIso, agentName, rangeLab
     </div>`;
 }
 window.openTimesheetDetail = openTimesheetDetail;
+
+// ═══════════════════════════════════════════════════════════════════════
+// MM "MY TEAM" READ-ONLY SUMMARY (Phase 3.20)
+// ═══════════════════════════════════════════════════════════════════════
+// MMs/TLs see a roster of their direct reports with: onboarding status,
+// this week's sales, hours worked. Read-only — no clickable agent profiles,
+// no edits, no contracts, no credentials, no photo audit drill-down.
+// Owner/Admin/Onboarding routed to standard Team admin instead.
+// ═══════════════════════════════════════════════════════════════════════
+async function renderMyTeamReadOnly(el){
+  const role = currentProfile?.role;
+  const isMgr = role === 'manager' || role === 'team_lead';
+  if(!isMgr){
+    // Should not happen — admin/owner have their own page. Defensive.
+    activeAdminView = 'agents';
+    renderMainContent();
+    return;
+  }
+
+  el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading your team…</div>';
+
+  // Direct reports + self
+  const { data: people, error } = await sb.from('profiles')
+    .select('id, full_name, email, role, programs, candidate_stage, b2b_candidate_stage, market_id, active, created_at')
+    .eq('active', true)
+    .or(`reports_to.eq.${currentProfile.id},id.eq.${currentProfile.id}`)
+    .order('full_name');
+  if(error){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Error loading team: ' + escapeHtml(error.message) + '</div>';
+    return;
+  }
+  const team = (people || []).filter(p => p.id !== currentProfile.id);
+
+  // For each agent: this-week sales (per program) + this-week hours (retail only)
+  const ids = team.map(t => t.id);
+  let salesByUser = {};
+  let hoursByUser = {};
+  if(ids.length > 0){
+    const week = _scoreboardWeekRange();
+    // Sales — sum count grouped by (user, program)
+    const { data: salesRows } = await sb.from('daily_sales')
+      .select('user_id, program_id, count')
+      .in('user_id', ids)
+      .gte('sale_date', week.mondayStr)
+      .lte('sale_date', week.sundayStr);
+    (salesRows || []).forEach(r => {
+      if(!salesByUser[r.user_id]) salesByUser[r.user_id] = {};
+      salesByUser[r.user_id][r.program_id] = (salesByUser[r.user_id][r.program_id] || 0) + r.count;
+    });
+    // Hours — only count for retail agents
+    const retailIds = team.filter(t => (t.programs || []).includes('retail')).map(t => t.id);
+    if(retailIds.length > 0){
+      const start = new Date(week.mondayStr + 'T00:00:00');
+      const end = new Date(week.sundayStr + 'T00:00:00');
+      end.setDate(end.getDate() + 1);
+      const { data: audits } = await sb.from('photo_audits')
+        .select('user_id, audit_type, created_at, geofence_passed')
+        .in('user_id', retailIds)
+        .gte('created_at', start.toISOString())
+        .lt('created_at', end.toISOString())
+        .order('created_at', { ascending: true });
+      // Group by user, pair check_in/out
+      const byUser = {};
+      (audits || []).forEach(a => {
+        if(!a.geofence_passed) return;
+        if(!byUser[a.user_id]) byUser[a.user_id] = [];
+        byUser[a.user_id].push(a);
+      });
+      const MAX_SHIFT_MS = 12 * 3600 * 1000;
+      for(const uid of Object.keys(byUser)){
+        let totalMs = 0; let pendingIn = null;
+        for(const a of byUser[uid]){
+          if(a.audit_type === 'check_in') pendingIn = new Date(a.created_at);
+          else if(a.audit_type === 'check_out' && pendingIn){
+            let span = new Date(a.created_at) - pendingIn;
+            if(span > MAX_SHIFT_MS) span = MAX_SHIFT_MS;
+            if(span > 0) totalMs += span;
+            pendingIn = null;
+          }
+        }
+        if(pendingIn){
+          const cap = end < new Date() ? end : new Date();
+          let span = cap - pendingIn;
+          if(span > MAX_SHIFT_MS) span = MAX_SHIFT_MS;
+          if(span > 0) totalMs += span;
+        }
+        hoursByUser[uid] = totalMs / 3600000;
+      }
+    }
+  }
+
+  // Onboarding stage label per agent
+  function _stageLabel(p){
+    const progs = p.programs || [];
+    if(progs.includes('retail')){
+      const s = p.candidate_stage || 'invited';
+      if(s === 'coded') return { label: '✅ Coded', color: '#00FF88' };
+      if(s === 'bg_failed' || s === 'dt_failed') return { label: '❌ ' + s.replace(/_/g,' ').toUpperCase(), color: '#F87171' };
+      return { label: s.replace(/_/g,' ').toUpperCase(), color: '#FFC800' };
+    }
+    if(progs.includes('b2b')){
+      const s = p.b2b_candidate_stage || 'pending_signing';
+      if(s === 'coded') return { label: '✅ Coded', color: '#00FF88' };
+      if(s === 'rejected') return { label: '❌ Rejected', color: '#F87171' };
+      return { label: s.replace(/_/g,' ').toUpperCase(), color: '#FFC800' };
+    }
+    return { label: 'IN PROGRESS', color: '#FFC800' };
+  }
+
+  el.innerHTML = `
+    <div style="margin-bottom:24px;">
+      <div style="font-size:11px;color:#FF6B00;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:6px;">Your direct reports</div>
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;line-height:1;">👥 My Team</h1>
+      <p style="font-size:14px;color:rgba(255,255,255,0.55);margin-top:8px;line-height:1.55;max-width:680px;">Read-only summary of your agents — onboarding status, this week's sales, hours worked. For full agent profiles or edits, contact your admin or owner.</p>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:18px;">
+      <div class="stat-card"><div class="stat-num" style="color:#FF6B00;">${team.length}</div><div class="stat-lbl">Total Agents</div></div>
+      <div class="stat-card"><div class="stat-num" style="color:#00FF88;">${team.filter(t => t.candidate_stage === 'coded' || t.b2b_candidate_stage === 'coded').length}</div><div class="stat-lbl">✅ Coded</div></div>
+      <div class="stat-card"><div class="stat-num" style="color:#FFC800;">${team.filter(t => t.candidate_stage !== 'coded' && t.b2b_candidate_stage !== 'coded' && t.candidate_stage !== 'bg_failed' && t.candidate_stage !== 'dt_failed' && t.b2b_candidate_stage !== 'rejected').length}</div><div class="stat-lbl">⏳ In Onboarding</div></div>
+    </div>
+
+    ${team.length === 0 ? `
+      <div class="bo-card" style="text-align:center;padding:36px;">
+        <div style="font-size:42px;margin-bottom:10px;">👥</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;margin-bottom:6px;">No direct reports yet</div>
+        <div style="color:rgba(255,255,255,0.55);font-size:13px;">When agents are assigned to report to you, they will show up here.</div>
+      </div>
+    ` : `
+      <div class="bo-card">
+        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+          <thead>
+            <tr style="border-bottom:1px solid rgba(255,255,255,0.1);">
+              <th style="text-align:left;padding:10px 12px;font-size:10.5px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;">AGENT</th>
+              <th style="text-align:left;padding:10px 12px;font-size:10.5px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;">PROGRAM</th>
+              <th style="text-align:left;padding:10px 12px;font-size:10.5px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;">STATUS</th>
+              <th style="text-align:right;padding:10px 12px;font-size:10.5px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;">SALES (WK)</th>
+              <th style="text-align:right;padding:10px 12px;font-size:10.5px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;">HOURS (WK)</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${team.map(p => {
+              const stage = _stageLabel(p);
+              const programs = (p.programs || []).map(pid => (allPrograms || []).find(x => x.id === pid)).filter(Boolean);
+              const programNames = programs.map(prog => `<span style="background:${prog.color}22;color:${prog.color};padding:2px 8px;border-radius:50px;font-size:10.5px;font-weight:700;letter-spacing:0.5px;margin-right:4px;">${prog.icon} ${escapeHtml(prog.name)}</span>`).join('');
+              const salesTotal = Object.values(salesByUser[p.id] || {}).reduce((s,n) => s + n, 0);
+              const hours = hoursByUser[p.id];
+              const isRetail = (p.programs || []).includes('retail');
+              return `
+                <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+                  <td style="padding:10px 12px;color:#fff;font-weight:600;">${escapeHtml(p.full_name || p.email)}</td>
+                  <td style="padding:10px 12px;">${programNames || '<span style="color:rgba(255,255,255,0.4);font-size:11px;">none</span>'}</td>
+                  <td style="padding:10px 12px;"><span style="color:${stage.color};font-size:11px;font-weight:700;letter-spacing:1px;">${stage.label}</span></td>
+                  <td style="padding:10px 12px;text-align:right;font-family:'Bebas Neue',sans-serif;font-size:18px;color:${salesTotal > 0 ? '#FF6B00' : 'rgba(255,255,255,0.35)'};line-height:1;">${salesTotal}</td>
+                  <td style="padding:10px 12px;text-align:right;font-family:'Bebas Neue',sans-serif;font-size:18px;color:${isRetail && hours ? (hours >= 30 ? '#00FF88' : hours >= 10 ? '#FFC800' : '#FF6B00') : 'rgba(255,255,255,0.35)'};line-height:1;">${isRetail ? (hours ? hours.toFixed(1) : '0.0') : '—'}</td>
+                </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+        <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:10px;font-style:italic;">Hours apply only to Reliant retail agents (the only program paid hourly). Sales = total enrollments this week across all programs.</div>
+      </div>
+    `}`;
+}
+
+window.renderMyTeamReadOnly = renderMyTeamReadOnly;
+
+// ═══════════════════════════════════════════════════════════════════════
+// TOOL BOX (Phase 3.20)
+// ═══════════════════════════════════════════════════════════════════════
+// Owner/Admin manage resources via 🧰 Tool Box Admin.
+// Agents/Managers see resources targeted to them via their program's
+// Tool Box (one menu item per program they're in, accessed via the program
+// section of the sidebar). RLS enforces visibility.
+// ═══════════════════════════════════════════════════════════════════════
+async function renderToolBoxAdmin(el){
+  const role = currentProfile?.role;
+  if(!['owner','admin'].includes(role)){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied. Owner / Admin only.</div>';
+    return;
+  }
+
+  el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading tool box…</div>';
+
+  const { data: resources, error } = await sb.from('tool_box_resources')
+    .select('*').order('display_order').order('created_at', { ascending: false });
+  if(error){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Error: ' + escapeHtml(error.message) + '</div>';
+    return;
+  }
+
+  // Group by program
+  const grouped = {};
+  (resources || []).forEach(r => {
+    const key = r.program_id || '__all__';
+    if(!grouped[key]) grouped[key] = [];
+    grouped[key].push(r);
+  });
+
+  el.innerHTML = `
+    <div style="margin-bottom:24px;display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;">
+      <div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;line-height:1;">🧰 Tool Box Admin</h1>
+        <p style="font-size:14px;color:rgba(255,255,255,0.55);margin-top:8px;line-height:1.55;max-width:680px;">Curate links, documents, flyers, and notes that are private to specific audiences (program × role × market). Targeted contractors see them in their program's Tool Box. Owner/Admin only.</p>
+      </div>
+      <button class="bo-btn bo-btn-primary" onclick="openToolBoxResourceModal()">+ New Resource</button>
+    </div>
+
+    ${(resources || []).length === 0 ? `
+      <div class="bo-card" style="text-align:center;padding:36px;">
+        <div style="font-size:42px;margin-bottom:10px;">🧰</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;margin-bottom:6px;">No resources yet</div>
+        <div style="color:rgba(255,255,255,0.55);font-size:13px;max-width:420px;margin:8px auto 16px;line-height:1.5;">Add a partner portal link, training PDF, sales flyer, or any resource your agents need. Target who sees it by program + role + market.</div>
+        <button class="bo-btn bo-btn-primary" onclick="openToolBoxResourceModal()">+ New Resource</button>
+      </div>
+    ` : (allPrograms || []).map(prog => {
+      const list = grouped[prog.id] || [];
+      if(list.length === 0) return '';
+      return `
+        <div class="bo-card" style="margin-bottom:14px;border-left:3px solid ${prog.color};">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:${prog.color};letter-spacing:1.5px;margin-bottom:12px;">${prog.icon} ${escapeHtml(prog.name)} — ${list.length} resource${list.length === 1 ? '' : 's'}</div>
+          ${list.map(r => _renderToolBoxAdminRow(r)).join('')}
+        </div>`;
+    }).join('') + (grouped['__all__'] ? `
+      <div class="bo-card" style="margin-bottom:14px;border-left:3px solid #A855F7;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#A855F7;letter-spacing:1.5px;margin-bottom:12px;">🌐 ALL PROGRAMS — ${grouped['__all__'].length} resource${grouped['__all__'].length === 1 ? '' : 's'}</div>
+        ${grouped['__all__'].map(r => _renderToolBoxAdminRow(r)).join('')}
+      </div>
+    ` : '')}`;
+}
+
+function _renderToolBoxAdminRow(r){
+  const program = (allPrograms || []).find(p => p.id === r.program_id);
+  const market = (allMarkets || []).find(m => m.id === r.market_id);
+  const kindIcon = { link:'🔗', document:'📄', flyer:'🖼', note:'📝' }[r.kind] || '📌';
+  const roleColor = r.role_bucket === 'manager' ? '#00C6FF' : r.role_bucket === 'agent' ? '#00FF88' : '#A855F7';
+  const roleLabel = r.role_bucket || 'all';
+  return `
+    <div style="background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.06);border-radius:8px;padding:11px 14px;margin-bottom:6px;">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;">
+        <div style="flex:1;min-width:200px;">
+          <div style="font-size:14px;color:#fff;font-weight:600;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <span style="font-size:18px;">${kindIcon}</span>
+            <span>${escapeHtml(r.title)}</span>
+            ${!r.active ? '<span style="background:rgba(248,113,113,0.15);color:#F87171;padding:1px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">INACTIVE</span>' : ''}
+          </div>
+          ${r.description ? `<div style="font-size:11.5px;color:rgba(255,255,255,0.6);margin-top:3px;">${escapeHtml(r.description)}</div>` : ''}
+          <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;">
+            <span style="background:${roleColor}22;color:${roleColor};padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">${roleLabel.toUpperCase()}</span>
+            ${market ? `<span style="background:rgba(255,200,0,0.15);color:#FFC800;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">${escapeHtml(market.name)}</span>` : '<span style="background:rgba(255,255,255,0.05);color:rgba(255,255,255,0.45);padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">ALL MARKETS</span>'}
+          </div>
+        </div>
+        <div style="display:flex;gap:6px;flex-shrink:0;">
+          <button class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:11px;" onclick="openToolBoxResourceModal('${r.id}')">✎ Edit</button>
+          <button class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:11px;color:#F87171;border-color:rgba(248,113,113,0.3);" onclick="deleteToolBoxResource('${r.id}','${escapeHtml(r.title).replace(/'/g,"\\\\'")}')">🗑</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+async function openToolBoxResourceModal(resourceId){
+  if(!['owner','admin'].includes(currentProfile?.role)){ alert('Access denied'); return; }
+
+  let existing = null;
+  if(resourceId){
+    const { data } = await sb.from('tool_box_resources').select('*').eq('id', resourceId).maybeSingle();
+    existing = data;
+  }
+  const e = existing || {};
+
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#fff;margin-bottom:6px;letter-spacing:1px;">🧰 ${e.id ? 'Edit' : 'New'} Tool Box Resource</h2>
+    <div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-bottom:14px;">Targeted contractors will see this in their program's Tool Box.</div>
+
+    <div class="form-group">
+      <label class="form-label">KIND *</label>
+      <select id="tbr-kind" class="form-input" onchange="_tbrToggleKindFields()">
+        <option value="link" ${e.kind === 'link' ? 'selected' : ''}>🔗 Link (external URL)</option>
+        <option value="document" ${e.kind === 'document' ? 'selected' : ''}>📄 Document (PDF, Word, etc.)</option>
+        <option value="flyer" ${e.kind === 'flyer' ? 'selected' : ''}>🖼 Flyer (image)</option>
+        <option value="note" ${e.kind === 'note' ? 'selected' : ''}>📝 Note (text-only)</option>
+      </select>
+    </div>
+
+    <div class="form-group"><label class="form-label">TITLE *</label><input id="tbr-title" class="form-input" placeholder="e.g. UES Partner Portal" value="${escapeHtml(e.title || '')}"/></div>
+    <div class="form-group"><label class="form-label">DESCRIPTION</label><textarea id="tbr-desc" class="form-input" rows="2" placeholder="Optional context — what is this for?">${escapeHtml(e.description || '')}</textarea></div>
+
+    <div id="tbr-link-fields" class="form-group" style="display:none;">
+      <label class="form-label">URL *</label>
+      <input id="tbr-url" class="form-input" placeholder="https://…" value="${escapeHtml(e.payload_url || '')}"/>
+    </div>
+
+    <div id="tbr-file-fields" class="form-group" style="display:none;">
+      <label class="form-label">FILE</label>
+      ${e.payload_path ? `<div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-bottom:6px;">Current: <strong>${escapeHtml(e.payload_path.split('/').pop())}</strong> ${e.payload_size_bytes ? '(' + Math.round(e.payload_size_bytes / 1024) + ' KB)' : ''}</div>` : ''}
+      <input id="tbr-file" type="file" class="form-input"/>
+      <div style="font-size:11px;color:rgba(255,255,255,0.45);margin-top:4px;">${e.payload_path ? 'Leave empty to keep current file.' : 'Upload a file. Max ~50MB.'}</div>
+    </div>
+
+    <hr style="border:0;border-top:1px solid rgba(255,255,255,0.08);margin:18px 0;"/>
+    <div style="font-size:11px;color:#FF6B00;font-weight:700;letter-spacing:2px;margin-bottom:10px;">WHO SEES THIS</div>
+
+    <div class="form-group">
+      <label class="form-label">PROGRAM</label>
+      <select id="tbr-program" class="form-input">
+        <option value="">— All programs —</option>
+        ${(allPrograms || []).map(p => `<option value="${p.id}" ${e.program_id === p.id ? 'selected' : ''}>${p.icon} ${escapeHtml(p.name)}</option>`).join('')}
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">ROLE BUCKET</label>
+      <select id="tbr-role" class="form-input">
+        <option value="" ${!e.role_bucket || e.role_bucket === 'all' ? 'selected' : ''}>👥 Both Agents & Managers</option>
+        <option value="agent" ${e.role_bucket === 'agent' ? 'selected' : ''}>👤 Agents only</option>
+        <option value="manager" ${e.role_bucket === 'manager' ? 'selected' : ''}>👔 Managers only</option>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">MARKET</label>
+      <select id="tbr-market" class="form-input">
+        <option value="">— All markets —</option>
+        ${(allMarkets || []).map(m => `<option value="${m.id}" ${e.market_id === m.id ? 'selected' : ''}>${escapeHtml(m.name)}</option>`).join('')}
+      </select>
+    </div>
+
+    <div class="form-group" style="display:flex;align-items:center;gap:8px;">
+      <input id="tbr-active" type="checkbox" ${(e.active === undefined || e.active) ? 'checked' : ''}/>
+      <label for="tbr-active" style="font-size:12.5px;color:rgba(255,255,255,0.7);">Active (visible to targeted users)</label>
+    </div>
+
+    <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap;">
+      <button class="bo-btn bo-btn-primary" onclick="saveToolBoxResource('${e.id || ''}')">${e.id ? 'Save Changes' : 'Create Resource'}</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="tbr-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-box').style.maxWidth = '560px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+  _tbrToggleKindFields();
+}
+
+function _tbrToggleKindFields(){
+  const kind = document.getElementById('tbr-kind').value;
+  const linkFields = document.getElementById('tbr-link-fields');
+  const fileFields = document.getElementById('tbr-file-fields');
+  linkFields.style.display = kind === 'link' ? '' : 'none';
+  fileFields.style.display = (kind === 'document' || kind === 'flyer') ? '' : 'none';
+}
+window._tbrToggleKindFields = _tbrToggleKindFields;
+
+async function saveToolBoxResource(existingId){
+  const msg = document.getElementById('tbr-msg');
+  const kind = document.getElementById('tbr-kind').value;
+  const title = document.getElementById('tbr-title').value.trim();
+  const description = document.getElementById('tbr-desc').value.trim() || null;
+  const program_id = document.getElementById('tbr-program').value || null;
+  const role_bucket = document.getElementById('tbr-role').value || null;
+  const market_id = document.getElementById('tbr-market').value || null;
+  const active = document.getElementById('tbr-active').checked;
+
+  if(!title){ msg.innerHTML = '<span style="color:#F87171;">Title is required.</span>'; return; }
+
+  const payload = {
+    kind, title, description,
+    program_id, role_bucket, market_id, active,
+    updated_by: currentProfile.id
+  };
+
+  // Kind-specific fields
+  if(kind === 'link'){
+    const url = document.getElementById('tbr-url').value.trim();
+    if(!url){ msg.innerHTML = '<span style="color:#F87171;">URL is required for link kind.</span>'; return; }
+    if(!url.startsWith('http')){ msg.innerHTML = '<span style="color:#F87171;">URL must start with http:// or https://</span>'; return; }
+    payload.payload_url = url;
+    payload.payload_path = null;
+  } else if(kind === 'document' || kind === 'flyer'){
+    const fileInput = document.getElementById('tbr-file');
+    const file = fileInput.files[0];
+    if(file){
+      // Upload file to tool-box bucket
+      msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Uploading file…</span>';
+      const ext = file.name.split('.').pop();
+      const path = (kind + 's') + '/' + Date.now() + '-' + file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const { error: uploadErr } = await sb.storage.from('tool-box').upload(path, file);
+      if(uploadErr){ msg.innerHTML = '<span style="color:#F87171;">Upload failed: ' + escapeHtml(uploadErr.message) + '</span>'; return; }
+      payload.payload_path = path;
+      payload.payload_mime = file.type;
+      payload.payload_size_bytes = file.size;
+      payload.payload_url = null;
+    } else if(!existingId){
+      msg.innerHTML = '<span style="color:#F87171;">File is required.</span>'; return;
+    }
+  } else if(kind === 'note'){
+    payload.payload_url = null;
+    payload.payload_path = null;
+  }
+
+  let res;
+  if(existingId){
+    res = await sb.from('tool_box_resources').update(payload).eq('id', existingId);
+  } else {
+    payload.created_by = currentProfile.id;
+    res = await sb.from('tool_box_resources').insert(payload);
+  }
+  if(res.error){ msg.innerHTML = '<span style="color:#F87171;">' + escapeHtml(res.error.message) + '</span>'; return; }
+
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Saved.</span>';
+  setTimeout(() => { closeAllModals(); renderMainContent(); }, 700);
+}
+
+async function deleteToolBoxResource(resourceId, title){
+  if(!['owner','admin'].includes(currentProfile?.role)){ alert('Access denied'); return; }
+  if(!confirm('Delete the resource "' + title + '"?\n\nIf it has an attached file, the file is also removed. This cannot be undone.\n\nNote: deleting only removes THIS resource. No agent profiles, contracts, or other data are touched.')) return;
+
+  // Best effort: delete the file too
+  const { data: res } = await sb.from('tool_box_resources').select('payload_path').eq('id', resourceId).maybeSingle();
+  if(res?.payload_path){
+    try { await sb.storage.from('tool-box').remove([res.payload_path]); } catch(_){}
+  }
+
+  const { error } = await sb.from('tool_box_resources').delete().eq('id', resourceId);
+  if(error){ alert('Delete failed: ' + error.message); return; }
+  renderMainContent();
+}
+
+window.renderToolBoxAdmin = renderToolBoxAdmin;
+window.openToolBoxResourceModal = openToolBoxResourceModal;
+window.saveToolBoxResource = saveToolBoxResource;
+window.deleteToolBoxResource = deleteToolBoxResource;
+
+// ─── Agent-side Tool Box (per program) ───────────────────────────────
+async function renderToolBoxAgent(el){
+  const programId = window._toolBoxProgramId;  // set by program-section nav click
+  const program = (allPrograms || []).find(p => p.id === programId);
+
+  el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading tool box…</div>';
+
+  // Pull resources matching this program (RLS already enforces audience match)
+  let q = sb.from('tool_box_resources').select('*').eq('active', true).order('display_order').order('created_at', { ascending: false });
+  if(programId) q = q.or(`program_id.eq.${programId},program_id.is.null`);
+  const { data: resources, error } = await q;
+  if(error){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Error: ' + escapeHtml(error.message) + '</div>';
+    return;
+  }
+
+  el.innerHTML = `
+    <div style="margin-bottom:24px;">
+      <div style="font-size:11px;color:${program?.color || '#FF6B00'};font-weight:700;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:6px;">${program ? escapeHtml(program.name) : 'All programs'}</div>
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;line-height:1;">🧰 Tool Box</h1>
+      <p style="font-size:14px;color:rgba(255,255,255,0.55);margin-top:8px;line-height:1.55;max-width:680px;">Resources, links, paperwork, and flyers for this program.</p>
+    </div>
+    ${(resources || []).length === 0 ? `
+      <div class="bo-card" style="text-align:center;padding:36px;">
+        <div style="font-size:42px;margin-bottom:10px;">🧰</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;margin-bottom:6px;">Nothing here yet</div>
+        <div style="color:rgba(255,255,255,0.55);font-size:13px;">Your office hasn't added any tools to this program yet. Check back soon.</div>
+      </div>
+    ` : `
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;">
+        ${(resources || []).map(r => _renderToolBoxAgentCard(r)).join('')}
+      </div>
+    `}`;
+}
+
+function _renderToolBoxAgentCard(r){
+  const kindIcon = { link:'🔗', document:'📄', flyer:'🖼', note:'📝' }[r.kind] || '📌';
+  let action = '';
+  if(r.kind === 'link' && r.payload_url){
+    action = `<a href="${escapeHtml(r.payload_url)}" target="_blank" class="bo-btn bo-btn-primary" style="padding:8px 16px;font-size:12px;text-decoration:none;display:inline-block;">Open Link ↗</a>`;
+  } else if((r.kind === 'document' || r.kind === 'flyer') && r.payload_path){
+    action = `<button class="bo-btn bo-btn-primary" style="padding:8px 16px;font-size:12px;" onclick="openToolBoxFile('${r.payload_path}','${escapeHtml(r.title).replace(/'/g,"\\\\'")}')">📥 Open File</button>`;
+  }
+  return `
+    <div class="bo-card" style="height:100%;display:flex;flex-direction:column;">
+      <div style="font-size:32px;margin-bottom:8px;">${kindIcon}</div>
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#fff;letter-spacing:0.5px;line-height:1.1;margin-bottom:6px;">${escapeHtml(r.title)}</div>
+      ${r.description ? `<div style="font-size:12.5px;color:rgba(255,255,255,0.65);line-height:1.5;margin-bottom:12px;flex:1;">${escapeHtml(r.description)}</div>` : '<div style="flex:1;"></div>'}
+      ${action}
+    </div>`;
+}
+
+async function openToolBoxFile(path, title){
+  try {
+    const { data, error } = await sb.storage.from('tool-box').createSignedUrl(path, 3600);
+    if(error){ alert('Could not load: ' + error.message); return; }
+    window.open(data.signedUrl, '_blank');
+  } catch(e){
+    alert('Failed: ' + e.message);
+  }
+}
+window.renderToolBoxAgent = renderToolBoxAgent;
+window.openToolBoxFile = openToolBoxFile;
+
+// ═══════════════════════════════════════════════════════════════════════
+// VIEW AS — full impersonation with audit log (Phase 3.20)
+// ═══════════════════════════════════════════════════════════════════════
+// Owner / Admin can click "View As" on any contractor. We swap currentProfile
+// to that user, log a session_start row, and re-render. A red banner at the
+// top reminds the impersonator. "Exit Impersonation" restores the original
+// session and logs session_end.
+// ═══════════════════════════════════════════════════════════════════════
+async function startImpersonation(targetUserId){
+  if(!['owner','admin'].includes(currentProfile?.role)){
+    alert('Only owner/admin can impersonate.');
+    return;
+  }
+  if(currentProfile.id === targetUserId){
+    alert('You are already logged in as yourself.');
+    return;
+  }
+
+  // Pull target profile
+  const { data: target, error } = await sb.from('profiles').select('*').eq('id', targetUserId).maybeSingle();
+  if(error || !target){ alert('Could not load target user: ' + (error?.message || 'not found')); return; }
+
+  if(!confirm('View as ' + (target.full_name || target.email) + '?\n\n' +
+              'You will see exactly what they see — same dashboard, same sidebar, same data scope.\n\n' +
+              'Every action you take while impersonating is logged with a paper trail.\n\n' +
+              'Click EXIT IMPERSONATION at the top of the page when done to return to your own account.')){
+    return;
+  }
+
+  // Save the original profile so we can restore later
+  window._impOriginal = currentProfile;
+  window._impTarget = target;
+
+  // Log session_start
+  try {
+    await sb.from('impersonation_log').insert({
+      impersonator_id: currentProfile.id,
+      target_user_id: target.id,
+      event_type: 'session_start',
+      action_description: 'Started View-As session for ' + (target.full_name || target.email),
+      user_agent: navigator.userAgent
+    });
+  } catch(e){ console.warn('Imp log start failed:', e); }
+
+  // Swap currentProfile and re-render
+  currentProfile = target;
+  // Clear any cached state that's user-specific
+  if(window._sbClockInterval){ clearInterval(window._sbClockInterval); window._sbClockInterval = null; }
+  window._myDirectReportIds = null;
+  if(typeof _refreshOnboardingForms === 'function') _refreshOnboardingForms();
+  if(typeof _prewarmDirectReports === 'function') await _prewarmDirectReports();
+
+  // Force back to dashboard view
+  activeAdminView = null;
+  // If the target has programs, default to first
+  if((target.programs || []).length > 0){
+    activeProgramId = target.programs[0];
+  }
+
+  // Re-render the whole shell
+  if(typeof renderShell === 'function'){
+    renderShell();
+  } else {
+    location.hash = '#dashboard';
+    renderMainContent();
+  }
+  _showImpersonationBanner();
+}
+window.startImpersonation = startImpersonation;
+
+async function endImpersonation(){
+  if(!window._impOriginal){
+    alert('Not currently impersonating.');
+    return;
+  }
+  // Log session_end
+  try {
+    await sb.from('impersonation_log').insert({
+      impersonator_id: window._impOriginal.id,
+      target_user_id: window._impTarget?.id || currentProfile?.id,
+      event_type: 'session_end',
+      action_description: 'Ended View-As session',
+      user_agent: navigator.userAgent
+    });
+  } catch(_){}
+
+  currentProfile = window._impOriginal;
+  window._impOriginal = null;
+  window._impTarget = null;
+
+  // Clear cached state
+  window._myDirectReportIds = null;
+  if(window._sbClockInterval){ clearInterval(window._sbClockInterval); window._sbClockInterval = null; }
+  if(typeof _refreshOnboardingForms === 'function') _refreshOnboardingForms();
+  if(typeof _prewarmDirectReports === 'function') await _prewarmDirectReports();
+
+  activeAdminView = null;
+  if(typeof renderShell === 'function'){
+    renderShell();
+  } else {
+    renderMainContent();
+  }
+  // Hide banner
+  const banner = document.getElementById('imp-banner');
+  if(banner) banner.remove();
+}
+window.endImpersonation = endImpersonation;
+
+function _showImpersonationBanner(){
+  // Remove existing banner if any
+  const existing = document.getElementById('imp-banner');
+  if(existing) existing.remove();
+
+  const target = window._impTarget;
+  const orig = window._impOriginal;
+  if(!target || !orig) return;
+
+  const banner = document.createElement('div');
+  banner.id = 'imp-banner';
+  banner.style.cssText = 'position:fixed;top:0;left:0;right:0;background:linear-gradient(135deg,#dc2626,#991b1b);color:#fff;padding:8px 16px;z-index:10000;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;font-size:13px;box-shadow:0 2px 12px rgba(0,0,0,0.5);';
+  banner.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;flex:1;min-width:200px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:13px;letter-spacing:2px;font-weight:700;">VIEWING AS:</div>
+      <div style="font-weight:700;">${escapeHtml(target.full_name || target.email)}</div>
+      <div style="font-size:11px;opacity:0.85;">· ${escapeHtml((target.role || 'agent').toUpperCase())}</div>
+      <div style="font-size:11px;opacity:0.7;">(originally ${escapeHtml(orig.full_name || orig.email)})</div>
+    </div>
+    <button onclick="endImpersonation()" style="background:rgba(0,0,0,0.35);color:#fff;border:1px solid rgba(255,255,255,0.4);padding:6px 14px;border-radius:6px;font-size:12px;font-weight:700;letter-spacing:1px;cursor:pointer;">EXIT IMPERSONATION</button>
+  `;
+  document.body.prepend(banner);
+  // Push body content down so banner doesn't cover it
+  document.body.style.paddingTop = banner.offsetHeight + 'px';
+}
+window._showImpersonationBanner = _showImpersonationBanner;
+
+// Helper to log actions performed while impersonating. Call from any
+// significant write action (e.g. inside saveAgent, sendContract, etc).
+async function _logImpersonationAction(description, payload){
+  if(!window._impOriginal || !window._impTarget) return;  // not impersonating
+  try {
+    await sb.from('impersonation_log').insert({
+      impersonator_id: window._impOriginal.id,
+      target_user_id: window._impTarget.id,
+      event_type: 'action',
+      action_description: description || 'unspecified action',
+      action_payload: payload || null,
+      user_agent: navigator.userAgent
+    });
+  } catch(_){}
+}
+window._logImpersonationAction = _logImpersonationAction;
 
 function renderAuditRow(a){
   const passed = a.geofence_passed;
