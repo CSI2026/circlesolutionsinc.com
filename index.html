@@ -4166,6 +4166,42 @@ async function deleteAnn(id){
 // ADMIN VIEWS
 // ═══════════════════════════════════════════════════════════════
 
+// Helper: renders an agent's Program chip(s) followed by the Campaign chip
+// (if the agent is tagged to one). Used everywhere we show an agent's program.
+// Falls back gracefully if allCampaigns isn't loaded yet (returns programs only).
+function renderAgentProgramChips(agent, opts){
+  opts = opts || {};
+  const short = opts.short !== false; // default: use short program name
+  const sizeStyle = opts.size === 'lg'
+    ? 'padding:4px 12px;font-size:12px;'
+    : 'padding:2px 8px;font-size:11px;';
+  const progPids = agent?.programs || [];
+  const progChips = progPids.map(pid => {
+    const p = (allPrograms || []).find(x => x.id === pid);
+    if(!p) return '';
+    const label = short ? (p.name.split(' ')[0]) : p.name;
+    return `<span style="background:${p.color}22;color:${p.color};${sizeStyle}border-radius:50px;margin-right:4px;font-weight:600;display:inline-block;">${p.icon} ${escapeHtml(label)}</span>`;
+  }).join('');
+
+  // Campaign chip — show the agent's campaign_id if present.
+  // The campaign's program_id is implicit (every campaign belongs to a program),
+  // so we just show the campaign name with its color.
+  let campChip = '';
+  const campId = agent?.campaign_id;
+  if(campId && Array.isArray(allCampaigns)){
+    const c = allCampaigns.find(x => x.id === campId);
+    if(c){
+      const color = c.color || '#888';
+      const icon = c.icon || '📋';
+      campChip = `<span title="Campaign: ${escapeHtml(c.name)}" style="background:${color}26;color:${color};${sizeStyle}border-radius:50px;margin-right:4px;font-weight:700;display:inline-block;border:1px solid ${color}55;">${icon} ${escapeHtml(c.name)}</span>`;
+    }
+  }
+
+  if(!progChips && !campChip) return '<span style="color:rgba(255,255,255,0.3);">None</span>';
+  return progChips + campChip;
+}
+
+
 // ─── Agents / Team management ───
 async function renderAgents(el){
   const role = currentProfile.role;
@@ -4254,7 +4290,7 @@ async function renderAgents(el){
                 </div>
               </td>
               <td><span class="role-badge" style="padding:3px 10px;border-radius:50px;font-size:10.5px;font-weight:700;letter-spacing:1.5px;background:${roleBadgeBg(a.role)};color:${roleBadgeColor(a.role)};">${roleLabel(a.role)}</span></td>
-              <td style="font-size:11.5px;">${(a.programs || []).map(pid => { const p = allPrograms.find(x=>x.id===pid); return p ? `<span style="background:${p.color}22;color:${p.color};padding:2px 8px;border-radius:50px;margin-right:4px;font-weight:600;">${p.icon} ${p.name.split(' ')[0]}</span>` : ''; }).join('') || '<span style="color:rgba(255,255,255,0.3);">None</span>'}</td>
+              <td style="font-size:11.5px;">${renderAgentProgramChips(a)}</td>
               <td style="font-size:12px;color:rgba(255,255,255,0.7);">${market ? market.name : '<span style="color:rgba(255,255,255,0.3);">—</span>'}</td>
               <td style="font-size:12px;color:rgba(255,255,255,0.7);">${reportsTo ? (reportsTo.full_name || reportsTo.email) : '<span style="color:rgba(255,255,255,0.3);">—</span>'}</td>
               <td>${onboardingBadge}</td>
@@ -4439,7 +4475,7 @@ async function openAgentProfile(userId){
           <div style="font-size:13.5px;color:rgba(255,255,255,0.6);margin-bottom:2px;">📧 ${escapeHtml(agent.email)}</div>
           ${agent.phone ? `<div style="font-size:13.5px;color:rgba(255,255,255,0.6);margin-bottom:2px;">📱 ${escapeHtml(agent.phone)}${agent.phone_carrier ? ' <span style="color:rgba(255,255,255,0.35);">('+escapeHtml(agent.phone_carrier)+')</span>' : ''}</div>` : ''}
           <div style="margin-top:12px;display:flex;gap:14px;flex-wrap:wrap;font-size:12.5px;color:rgba(255,255,255,0.55);">
-            <div><strong style="color:rgba(255,255,255,0.75);">Programs:</strong> ${(agent.programs || []).map(pid => { const p = allPrograms.find(x=>x.id===pid); return p ? `<span style="background:${p.color}22;color:${p.color};padding:2px 8px;border-radius:50px;margin-left:4px;font-weight:600;">${p.icon} ${p.name.split(' ')[0]}</span>` : ''; }).join('') || '<span style="color:rgba(255,255,255,0.3);">None</span>'}</div>
+            <div><strong style="color:rgba(255,255,255,0.75);">Programs:</strong> ${renderAgentProgramChips(agent, { size: 'lg', short: false })}</div>
             <div><strong style="color:rgba(255,255,255,0.75);">Market:</strong> ${market ? escapeHtml(market.name) : '<span style="color:rgba(255,255,255,0.3);">—</span>'}</div>
             <div><strong style="color:rgba(255,255,255,0.75);">Reports to:</strong> ${reportsTo ? escapeHtml(reportsTo.full_name || reportsTo.email) : '<span style="color:rgba(255,255,255,0.3);">—</span>'}</div>
           </div>
@@ -14654,15 +14690,14 @@ async function renderMyTeamReadOnly(el){
           <tbody>
             ${team.map(p => {
               const stage = _stageLabel(p);
-              const programs = (p.programs || []).map(pid => (allPrograms || []).find(x => x.id === pid)).filter(Boolean);
-              const programNames = programs.map(prog => `<span style="background:${prog.color}22;color:${prog.color};padding:2px 8px;border-radius:50px;font-size:10.5px;font-weight:700;letter-spacing:0.5px;margin-right:4px;">${prog.icon} ${escapeHtml(prog.name)}</span>`).join('');
+              const programNames = renderAgentProgramChips(p);
               const salesTotal = Object.values(salesByUser[p.id] || {}).reduce((s,n) => s + n, 0);
               const hours = hoursByUser[p.id];
               const isRetail = (p.programs || []).includes('retail');
               return `
                 <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
                   <td style="padding:10px 12px;color:#fff;font-weight:600;">${escapeHtml(p.full_name || p.email)}</td>
-                  <td style="padding:10px 12px;">${programNames || '<span style="color:rgba(255,255,255,0.4);font-size:11px;">none</span>'}</td>
+                  <td style="padding:10px 12px;">${programNames}</td>
                   <td style="padding:10px 12px;"><span style="color:${stage.color};font-size:11px;font-weight:700;letter-spacing:1px;">${stage.label}</span></td>
                   <td style="padding:10px 12px;text-align:right;font-family:'Bebas Neue',sans-serif;font-size:18px;color:${salesTotal > 0 ? '#FF6B00' : 'rgba(255,255,255,0.35)'};line-height:1;">${salesTotal}</td>
                   <td style="padding:10px 12px;text-align:right;font-family:'Bebas Neue',sans-serif;font-size:18px;color:${isRetail && hours ? (hours >= 30 ? '#00FF88' : hours >= 10 ? '#FFC800' : '#FF6B00') : 'rgba(255,255,255,0.35)'};line-height:1;">${isRetail ? (hours ? hours.toFixed(1) : '0.0') : '—'}</td>
@@ -16238,7 +16273,7 @@ async function renderMyProfile(el){
     el.innerHTML = '<div class="bo-card" style="color:#F87171;">Not signed in.</div>';
     return;
   }
-  const progs = (p.programs || []).map(pid => { const x = allPrograms.find(y=>y.id===pid); return x ? `<span style="background:${x.color}22;color:${x.color};padding:4px 12px;border-radius:50px;margin-right:6px;font-weight:600;font-size:12px;">${x.icon} ${x.name}</span>` : ''; }).join('');
+  const progs = renderAgentProgramChips(p, { size: 'lg', short: false });
   const market = allMarkets.find(m => m.id === p.market_id);
   // Find who I report to. Use maybeSingle to avoid throws on missing rows.
   let reportsTo = null;
@@ -19413,6 +19448,15 @@ function onbAgentRow(a, isAdmin){
     const p = allPrograms.find(x => x.id === pid);
     return p ? `<span style="background:${p.color}22;color:${p.color};padding:1px 6px;border-radius:50px;font-size:10px;font-weight:600;">${p.icon}</span>` : '';
   }).join(' ');
+  // Compact campaign chip (icon + short name) — visible right next to programs
+  let campPill = '';
+  if(a.campaign_id && Array.isArray(allCampaigns)){
+    const c = allCampaigns.find(x => x.id === a.campaign_id);
+    if(c){
+      const cc = c.color || '#888';
+      campPill = `<span title="Campaign: ${escapeHtml(c.name)}" style="background:${cc}26;color:${cc};padding:1px 7px;border-radius:50px;font-size:10px;font-weight:700;border:1px solid ${cc}55;">${c.icon || '📋'} ${escapeHtml(c.id.toUpperCase())}</span>`;
+    }
+  }
 
   return `
     <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:12px;margin-bottom:8px;">
@@ -19424,6 +19468,7 @@ function onbAgentRow(a, isAdmin){
               <div style="font-size:13.5px;font-weight:600;color:#fff;text-decoration:underline;text-decoration-color:rgba(255,255,255,0.15);text-underline-offset:3px;">${escapeHtml(a.full_name || a.email)}</div>
               ${statusBadge}
               ${progPills}
+              ${campPill}
             </div>
             <div style="font-size:11px;color:rgba(255,255,255,0.45);margin-top:2px;">${a.email}</div>
             ${a.totalSteps > 0 ? `<div style="background:rgba(255,255,255,0.06);border-radius:50px;height:5px;overflow:hidden;margin-top:6px;max-width:300px;"><div style="background:linear-gradient(90deg,#FF6B00,#FF0080);height:100%;width:${pct}%;"></div></div>` : ''}
