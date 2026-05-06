@@ -1759,6 +1759,13 @@ footer{
       <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:16px;padding:28px;position:relative;"><div style="font-family:'Bebas Neue',sans-serif;font-size:54px;color:rgba(0,128,255,0.4);line-height:1;position:absolute;top:16px;right:20px;">03</div><div style="font-size:28px;margin-bottom:12px;">💡</div><div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#0080FF;margin-bottom:7px;">PROPOSE</div><p style="font-size:12.5px;color:rgba(255,255,255,0.5);line-height:1.65;">Present tailored savings with clear rate comparison and contract terms.</p></div>
       <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:16px;padding:28px;position:relative;"><div style="font-family:'Bebas Neue',sans-serif;font-size:54px;color:rgba(0,128,255,0.4);line-height:1;position:absolute;top:16px;right:20px;">04</div><div style="font-size:28px;margin-bottom:12px;">✅</div><div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#0080FF;margin-bottom:7px;">CLOSE</div><p style="font-size:12.5px;color:rgba(255,255,255,0.5);line-height:1.65;">Sign agreements with decision-makers. Handle switch logistics end-to-end.</p></div>
     </div>
+
+    <!-- Partners (dynamic — pulled from campaigns table by program=b2b) -->
+    <div id="b2b-partners-section" style="margin-top:64px;display:none;">
+      <h3 style="font-family:'Bebas Neue',sans-serif;font-size:36px;color:#fff;margin-bottom:8px;text-align:center;">OUR <span style="color:#0080FF;">PARTNERS</span></h3>
+      <p style="font-size:13.5px;color:rgba(255,255,255,0.5);text-align:center;margin-bottom:28px;max-width:680px;margin-left:auto;margin-right:auto;line-height:1.7;">The B2B energy partners we represent in the field. Each partnership opens new opportunities for our team and the businesses we serve.</p>
+      <div id="b2b-partners-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px;"></div>
+    </div>
   </div>
 </div>
 <div style="padding:80px 40px;background:#0A0A0A;">
@@ -2117,6 +2124,7 @@ const sb = window.supabase.createClient(
 let currentUser = null;         // auth user
 let currentProfile = null;      // profiles row (role, programs, name)
 let allPrograms = [];           // all programs from DB
+let allCampaigns = [];          // all campaigns from DB (loaded with programs)
 let allMarkets = [];            // all markets from DB
 let activeProgramId = null;     // which program the user is currently viewing
 let activeSubView = 'dashboard';// which sub-section within a program
@@ -2143,6 +2151,51 @@ function showPage(id){
   if(id === 'apply-page'){
     loadPublicManagerList();
   }
+
+  // When the B2B page is shown, load active campaigns under the b2b program
+  // so the "Our Partners" section reflects the current set of business partners.
+  if(id === 'b2b-page'){
+    loadPublicB2BPartners();
+  }
+}
+
+// Load active campaigns under the b2b program for the public Partners section.
+// Idempotent — guards against double loads. Hides section if no partners.
+async function loadPublicB2BPartners(){
+  const section = document.getElementById('b2b-partners-section');
+  const grid = document.getElementById('b2b-partners-grid');
+  if(!section || !grid) return;
+  if(section.dataset.loaded === 'true') return;
+  section.dataset.loaded = 'true';
+  try {
+    const { data: camps, error } = await sb.from('campaigns')
+      .select('id,name,description,icon,color,is_active,program_id,display_order')
+      .eq('program_id', 'b2b')
+      .eq('is_active', true)
+      .order('display_order', { ascending: true })
+      .order('name');
+    if(error || !camps || camps.length === 0) return;
+    grid.innerHTML = camps.map(c => {
+      const color = c.color || '#0080FF';
+      const icon = c.icon || '🏢';
+      const desc = c.description || '';
+      return `
+        <div style="background:linear-gradient(135deg,${color}18,${color}06);border:1px solid ${color}40;border-radius:18px;padding:28px;transition:transform 0.2s,box-shadow 0.2s;" onmouseover="this.style.transform='translateY(-3px)';this.style.boxShadow='0 12px 28px ${color}25';" onmouseout="this.style.transform='';this.style.boxShadow='';">
+          <div style="font-size:42px;margin-bottom:12px;line-height:1;">${icon}</div>
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:${color};letter-spacing:1px;margin-bottom:8px;">${escapePublic(c.name)}</div>
+          ${desc ? `<p style="font-size:13px;color:rgba(255,255,255,0.55);line-height:1.65;">${escapePublic(desc)}</p>` : ''}
+        </div>`;
+    }).join('');
+    section.style.display = '';
+  } catch(e){ /* table may not exist yet — silent fail keeps the public page working */ }
+}
+
+// Public-page-safe HTML escape (escapeHtml in back office is loaded later)
+function escapePublic(s){
+  if(s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 // Load the list of active managers into the public Preferred Manager dropdown.
@@ -2259,6 +2312,15 @@ async function loadCurrentProfile(){
   if(allPrograms.length === 0){
     const { data: progs } = await sb.from('programs').select('*').order('name');
     allPrograms = progs || [];
+  }
+
+  // Load campaigns (always refresh — they change as new businesses are added)
+  try {
+    const { data: camps } = await sb.from('campaigns').select('*').order('display_order', { ascending: true }).order('name');
+    allCampaigns = camps || [];
+  } catch(e){
+    // Campaigns table may not exist yet (pre-Phase 3.23) — degrade gracefully
+    allCampaigns = [];
   }
 
   // Load markets (fresh each login — can change often)
@@ -2447,7 +2509,7 @@ function renderSidebar(){
     adminNavItems.push({ id:'contract-hub', label:'📄 Contract Hub' });
     adminNavItems.push({ id:'forms-admin', label:'📋 All Forms' });
     adminNavItems.push({ id:'applications', label:'📝 Applications' });
-    adminNavItems.push({ id:'programs-admin', label:'🎯 Programs' });
+    adminNavItems.push({ id:'programs-admin', label:'🎯 Programs & Campaigns' });
     adminNavItems.push({ id:'sales-goals', label:'🎯 Sales Goals' });
     adminNavItems.push({ id:'tool-box-admin', label:'🧰 Tool Box Admin' });
     if((currentProfile.programs || []).includes('retail')){
@@ -2457,7 +2519,7 @@ function renderSidebar(){
     adminNavItems.push({ id:'stores', label:'🏪 Stores' });
     adminNavItems.push({ id:'forms-admin', label:'📋 All Forms' });
     adminNavItems.push({ id:'applications', label:'📝 Applications' });
-    adminNavItems.push({ id:'programs-admin', label:'🎯 Programs' });
+    adminNavItems.push({ id:'programs-admin', label:'🎯 Programs & Campaigns' });
     adminNavItems.push({ id:'tool-box-admin', label:'🧰 Tool Box Admin' });
   } else if(currentProfile.has_master_center_access){
     // Onboarding department (non-owner, non-admin)
@@ -7085,8 +7147,8 @@ async function renderOwnerPanel(el){
       </div>
       <div class="bo-card" style="cursor:pointer;" onclick="boShowAdmin('programs-admin')">
         <div style="font-size:32px;margin-bottom:10px;">🎯</div>
-        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;margin-bottom:6px;">Programs</div>
-        <div style="font-size:13px;color:rgba(255,255,255,0.55);line-height:1.55;">View the 3 program back offices: Retail Energy, B2B Commercial, Fiber Internet.</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:1px;margin-bottom:6px;">Programs &amp; Campaigns</div>
+        <div style="font-size:13px;color:rgba(255,255,255,0.55);line-height:1.55;">Manage industries (programs) and the businesses (campaigns) running under each. Add a new campaign whenever a contract signs.</div>
       </div>
       <div class="bo-card" style="cursor:pointer;border-left:3px solid #C62828;" onclick="openUrgentMessageModal()">
         <div style="font-size:32px;margin-bottom:10px;">🚨</div>
@@ -15457,7 +15519,9 @@ async function viewAuditPhoto(auditId, photoPath){
 
 async function renderProgramsAdmin(el){
   const isOwner = currentProfile.role === 'owner';
-  if(!isOwner){
+  const isAdmin = currentProfile.role === 'admin';
+  const canEdit = isOwner || isAdmin;
+  if(!canEdit){
     // Non-owner: keep the old read-only summary card view
     el.innerHTML = `
       <div style="margin-bottom:24px;">
@@ -15495,8 +15559,8 @@ async function renderProgramsAdmin(el){
   el.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px;flex-wrap:wrap;gap:12px;">
       <div>
-        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">🎯 Programs Manager</h1>
-        <p style="font-size:14px;color:rgba(255,255,255,0.5);">Add, edit, pause, or archive programs. Each one's pay-period rules also drive its leaderboard.</p>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">🎯 Programs &amp; Campaigns</h1>
+        <p style="font-size:14px;color:rgba(255,255,255,0.5);">Programs are industries (B2B Energy, Retail, Fiber). Campaigns are specific businesses or contracts within an industry. Add a campaign under any program as new clients sign on.</p>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
         ${archivedCount > 0 ? `<button class="bo-btn bo-btn-ghost" onclick="toggleShowArchived()">${showArchived ? 'Hide' : 'Show'} archived (${archivedCount})</button>` : ''}
@@ -15549,16 +15613,260 @@ async function renderProgramsAdmin(el){
                   `}
                 </div>
               </div>
+              ${_renderCampaignsSection(p)}
             </div>`;
         }).join('')}
       </div>
     `}`;
 }
 
+// ─── Campaigns under each program ─────────────────────────────────────
+// Owner+Admin see the campaign list with edit/retire + "+ Add Campaign".
+// Agents/MMs never reach this view (it's gated by activeAdminView).
+function _renderCampaignsSection(program){
+  const programArchived = program.status === 'archived';
+  const showInactive = !!(window._showInactiveCampaigns_byProg && window._showInactiveCampaigns_byProg[program.id]);
+  const programCampaigns = (allCampaigns || []).filter(c => c.program_id === program.id);
+  const visibleCamps = programCampaigns.filter(c => showInactive ? true : c.is_active !== false);
+  const inactiveCount = programCampaigns.filter(c => c.is_active === false).length;
+
+  // Permission gating — Owner + Admin only see action buttons
+  const role = (currentProfile?.role || '').toLowerCase();
+  const canEdit = ['owner','admin'].includes(role);
+
+  const headerRight = (programArchived || !canEdit) ? '' : `
+    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+      ${inactiveCount > 0 ? `<button class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:10.5px;" onclick="toggleShowInactiveCampaigns('${program.id}')">${showInactive ? 'Hide' : 'Show'} retired (${inactiveCount})</button>` : ''}
+      <button class="bo-btn bo-btn-primary" style="padding:6px 14px;font-size:12px;" onclick="openCampaignEditor(null,'${program.id}')">+ Add Campaign</button>
+    </div>`;
+
+  let body;
+  if(visibleCamps.length === 0){
+    body = `<div style="padding:14px 16px;background:rgba(0,0,0,0.18);border-radius:10px;font-size:12.5px;color:rgba(255,255,255,0.45);text-align:center;">No active campaigns under this program yet.${programArchived || !canEdit ? '' : ' Click <strong>+ Add Campaign</strong> to add one.'}</div>`;
+  } else {
+    body = `<div style="display:flex;flex-direction:column;gap:8px;">
+      ${visibleCamps.map(c => {
+        const inactive = c.is_active === false;
+        const cIcon = c.icon || '🎯';
+        const cColor = c.color || program.color || '#FF6B00';
+        return `
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;background:rgba(0,0,0,0.22);border:1px solid ${cColor}33;border-radius:10px;padding:10px 14px;${inactive ? 'opacity:0.55;' : ''}">
+            <div style="display:flex;gap:10px;align-items:center;flex:1;min-width:0;">
+              <div style="font-size:20px;flex-shrink:0;">${escapeHtml(cIcon)}</div>
+              <div style="flex:1;min-width:0;">
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                  <span style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:${cColor};letter-spacing:0.7px;">${escapeHtml(c.name)}</span>
+                  <span style="font-family:monospace;font-size:10.5px;color:rgba(255,255,255,0.4);">${escapeHtml(c.id)}</span>
+                  ${inactive ? '<span style="background:rgba(248,113,113,0.15);color:#F87171;padding:1px 8px;border-radius:50px;font-size:9.5px;font-weight:700;letter-spacing:1px;">RETIRED</span>' : ''}
+                </div>
+                ${c.description ? `<div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-top:2px;">${escapeHtml(c.description)}</div>` : ''}
+              </div>
+            </div>
+            ${(programArchived || !canEdit) ? '' : `
+              <div style="display:flex;gap:5px;flex-shrink:0;">
+                <button class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:11px;" onclick="openCampaignEditor('${c.id}','${program.id}')">✏️ Edit</button>
+                ${inactive
+                  ? `<button class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:11px;" onclick="setCampaignActive('${c.id}',true)">↶ Restore</button>`
+                  : `<button class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:11px;color:#F87171;border-color:rgba(248,113,113,0.3);" onclick="setCampaignActive('${c.id}',false)">🗃️ Retire</button>`}
+              </div>`}
+          </div>`;
+      }).join('')}
+    </div>`;
+  }
+
+  return `
+    <div style="margin-top:14px;padding-top:14px;border-top:1px dashed rgba(255,255,255,0.08);">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
+        <div style="display:flex;align-items:baseline;gap:8px;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:14px;color:rgba(255,255,255,0.7);letter-spacing:1.5px;">CAMPAIGNS</div>
+          <div style="font-size:11px;color:rgba(255,255,255,0.4);">${visibleCamps.length} active${inactiveCount > 0 && showInactive ? ' · ' + inactiveCount + ' retired' : ''}</div>
+        </div>
+        ${headerRight}
+      </div>
+      ${body}
+    </div>`;
+}
+
+function toggleShowInactiveCampaigns(programId){
+  window._showInactiveCampaigns_byProg = window._showInactiveCampaigns_byProg || {};
+  window._showInactiveCampaigns_byProg[programId] = !window._showInactiveCampaigns_byProg[programId];
+  renderMainContent();
+}
+window.toggleShowInactiveCampaigns = toggleShowInactiveCampaigns;
+
+// ─── Campaign editor (Owner+Admin only) ───────────────────────────────
+async function openCampaignEditor(campaignId, programId){
+  const role = (currentProfile?.role || '').toLowerCase();
+  if(!['owner','admin'].includes(role)){
+    alert('Only Owner and Admin can create or edit campaigns.');
+    return;
+  }
+  if(!programId){ alert('Program required.'); return; }
+  const program = allPrograms.find(p => p.id === programId);
+  if(!program){ alert('Program not found.'); return; }
+
+  const isEdit = !!campaignId;
+  let c = {
+    id: '',
+    program_id: programId,
+    name: '',
+    description: '',
+    icon: '🎯',
+    color: program.color || '#FF6B00',
+    is_active: true,
+    display_order: 100
+  };
+  if(isEdit){
+    const existing = (allCampaigns || []).find(x => x.id === campaignId);
+    if(existing) c = { ...c, ...existing };
+  }
+
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:#fff;margin-bottom:6px;letter-spacing:1px;">${isEdit ? 'Edit' : 'New'} Campaign</h2>
+    <div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-bottom:18px;">
+      ${isEdit ? 'Editing ' + escapeHtml(c.name) + ' under ' : 'Add a new campaign under '}<strong style="color:${program.color};">${program.icon} ${escapeHtml(program.name)}</strong>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Campaign ID${isEdit ? '' : ' <span style="color:#F87171;">*</span>'}</label>
+      <input id="ce-id" class="form-input" value="${escapeHtml(c.id)}" ${isEdit ? 'readonly style="opacity:0.5;cursor:not-allowed;"' : 'placeholder="e.g. ues, genie, constellation"'} />
+      <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">${isEdit ? 'ID cannot be changed once set — it links to all existing data.' : 'Unique short code, lowercase letters/numbers/underscore only. Used internally — not shown to users.'}</div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Name <span style="color:#F87171;">*</span></label>
+      <input id="ce-name" class="form-input" value="${escapeHtml(c.name)}" placeholder="e.g. United Energy Services"/>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Description</label>
+      <textarea id="ce-desc" class="form-input" rows="2" placeholder="Brief description of the campaign / business / contract.">${escapeHtml(c.description || '')}</textarea>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+      <div class="form-group">
+        <label class="form-label">Icon (emoji)</label>
+        <input id="ce-icon" class="form-input" value="${escapeHtml(c.icon || '🎯')}" maxlength="4"/>
+        <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">Pick any emoji — 🎯 ⚡ 🏢 🌐 ☀️ 📡 📱 💡 🔌 🚪 🛒 📞</div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Brand Color</label>
+        <input id="ce-color" class="form-input" type="color" value="${c.color || program.color || '#FF6B00'}" style="height:42px;cursor:pointer;"/>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Display Order</label>
+      <input id="ce-order" class="form-input" type="number" value="${c.display_order || 100}" placeholder="100"/>
+      <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">Lower numbers show first within the program.</div>
+    </div>
+
+    <div style="display:flex;gap:10px;margin-top:18px;">
+      <button class="bo-btn bo-btn-primary" onclick="saveCampaign(${isEdit ? `'${c.id}'` : 'null'},'${programId}')">${isEdit ? 'Save Changes' : 'Create Campaign'}</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>`;
+  document.getElementById('modal-overlay').style.display = 'flex';
+}
+window.openCampaignEditor = openCampaignEditor;
+
+async function saveCampaign(existingId, programId){
+  const role = (currentProfile?.role || '').toLowerCase();
+  if(!['owner','admin'].includes(role)){
+    alert('Only Owner and Admin can create or edit campaigns.');
+    return;
+  }
+
+  const isEdit = !!existingId;
+  const idVal = (document.getElementById('ce-id').value || '').trim().toLowerCase();
+  const name = (document.getElementById('ce-name').value || '').trim();
+  const desc = (document.getElementById('ce-desc').value || '').trim();
+  const icon = (document.getElementById('ce-icon').value || '🎯').trim();
+  const color = document.getElementById('ce-color').value || '#FF6B00';
+  const order = parseInt(document.getElementById('ce-order').value, 10) || 100;
+
+  if(!idVal){ alert('Campaign ID is required.'); return; }
+  if(!/^[a-z0-9_]+$/.test(idVal)){ alert('Campaign ID must be lowercase letters, numbers, or underscores only (no spaces, hyphens, or special chars).'); return; }
+  if(!name){ alert('Campaign Name is required.'); return; }
+  if(!programId){ alert('Program is required.'); return; }
+
+  if(isEdit){
+    const payload = {
+      name,
+      description: desc || null,
+      icon,
+      color,
+      display_order: order,
+      updated_at: new Date().toISOString()
+    };
+    const { error } = await sb.from('campaigns').update(payload).eq('id', existingId);
+    if(error){ alert('Error saving campaign: ' + (error.message || 'unknown')); return; }
+  } else {
+    const payload = {
+      id: idVal,
+      program_id: programId,
+      name,
+      description: desc || null,
+      icon,
+      color,
+      display_order: order,
+      is_active: true,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
+    if(currentUser?.id) payload.created_by = currentUser.id;
+    const { error } = await sb.from('campaigns').insert(payload);
+    if(error){
+      if(error.code === '23505' || (error.message || '').toLowerCase().includes('duplicate')){
+        alert('A campaign with this ID already exists. Pick a different ID.');
+      } else {
+        alert('Error creating campaign: ' + (error.message || 'unknown'));
+      }
+      return;
+    }
+  }
+
+  await reloadCampaignsCache();
+  closeAllModals();
+  renderMainContent();
+}
+window.saveCampaign = saveCampaign;
+
+async function setCampaignActive(campaignId, makeActive){
+  const role = (currentProfile?.role || '').toLowerCase();
+  if(!['owner','admin'].includes(role)){
+    alert('Only Owner and Admin can retire or restore campaigns.');
+    return;
+  }
+  const c = (allCampaigns || []).find(x => x.id === campaignId);
+  if(!c){ alert('Campaign not found.'); return; }
+
+  if(!makeActive){
+    if(!confirm(`Retire "${c.name}"?\n\nNothing will be deleted — agents, sales, teams, and Tool Box items already tagged to this campaign stay tagged and visible. The campaign just won't appear in pickers for new records.\n\nYou can restore it any time.`)) return;
+  }
+
+  const { error } = await sb.from('campaigns')
+    .update({ is_active: !!makeActive, updated_at: new Date().toISOString() })
+    .eq('id', campaignId);
+  if(error){ alert('Error: ' + (error.message || 'unknown')); return; }
+
+  await reloadCampaignsCache();
+  renderMainContent();
+}
+window.setCampaignActive = setCampaignActive;
+
+async function reloadCampaignsCache(){
+  try {
+    const { data: camps } = await sb.from('campaigns').select('*').order('display_order', { ascending: true }).order('name');
+    allCampaigns = camps || [];
+  } catch(e){ /* table may not exist pre-3.23 */ }
+}
+window.reloadCampaignsCache = reloadCampaignsCache;
+
 function toggleShowArchived(){
   window._showArchivedPrograms = !window._showArchivedPrograms;
   renderMainContent();
 }
+
 
 async function setProgramStatus(programId, newStatus){
   const verbMap = { active: 'restore', paused: 'pause', archived: 'archive' };
