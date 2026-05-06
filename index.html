@@ -2280,6 +2280,38 @@ async function loadCurrentProfile(){
       }
     }
   }
+  // Hash-based routing for welcome email links + bookmarks (Phase 3.21):
+  //   #login   → show the login page (used in welcome emails)
+  //   #portal  → alias for #login
+  //   #apply   → public application form
+  // This also fixes the click-out logout problem: if the user clicks a link
+  // somewhere that lands them at /#login (or similar) we show the login
+  // page instead of the marketing landing — much less confusing than
+  // "where did my back office go?"
+  const hash = (window.location.hash || '').toLowerCase();
+  if(hash === '#login' || hash === '#portal'){
+    if(session && currentProfile){
+      // Already signed in — go to back office, don't make them log in again
+      enterBackOffice();
+    } else {
+      showPage('login');
+    }
+  } else if(hash === '#apply'){
+    showPage('apply-page');
+  }
+  // Listen for hash changes too so navigation back/forward works
+  window.addEventListener('hashchange', () => {
+    const h = (window.location.hash || '').toLowerCase();
+    if(h === '#login' || h === '#portal'){
+      if(currentProfile){ enterBackOffice(); } else { showPage('login'); }
+    } else if(h === '#apply'){
+      showPage('apply-page');
+    } else if(h === '' || h === '#'){
+      // Back to home — but only if we're currently on a non-home page AND
+      // the user isn't signed in (otherwise stay in back office).
+      if(!currentProfile){ showPage('home'); }
+    }
+  });
 })();
 
 
@@ -2288,6 +2320,14 @@ async function loadCurrentProfile(){
 // ═══════════════════════════════════════════════════════════════
 function enterBackOffice(){
   if(!currentProfile){ showPage('login'); return; }
+
+  // Phase 3.21: stamp the hash so browser back/forward navigates within the
+  // back office instead of dropping the user back to the marketing landing
+  // page (which made it look like they got logged out). Replace state so
+  // we don't add an extra history entry.
+  if(window.location.hash !== '#backoffice'){
+    history.replaceState({ inBackOffice: true }, '', '#backoffice');
+  }
 
   // If an admin set a temp password, force the user to change it before anything else
   if(currentProfile.must_change_password){
@@ -2444,7 +2484,9 @@ function renderSidebar(){
   if(isOwner || isAdmin || isManager){
     adminNavItems.push({ id:'weekly-schedule', label:'📅 Weekly Schedule' });
   }
-  const canInventory = isOwner || isAdmin || isManager || currentProfile.is_inventory_manager;
+  // Phase 3.21: inventory access locked to Owner + Admin only.
+  // The is_inventory_manager carve-out has been removed.
+  const canInventory = isOwner || isAdmin;
   if(canInventory){ adminNavItems.push({ id:'inventory', label:'📦 Inventory' }); }
   if(isOwner || isAdmin || isManager || isTeamLead || currentProfile.has_master_center_access){
     adminNavItems.push({ id:'photo-audits-review', label:'📸 Photo Audits & Time' });
@@ -12753,16 +12795,35 @@ async function saveStoreAssignments(storeId){
 // ═══════════════════════════════════════════════════════════════════════
 // INVENTORY DEPARTMENT
 // ═══════════════════════════════════════════════════════════════════════
+// Phase 3.21: locked down. ONLY Owner + Admin can create/edit/delete inventory.
+// MMs and agents have READ-only access to "My Inventory" (items assigned to them).
+// The previous is_inventory_manager carve-out has been removed.
 function canManageInventory(){
   const r = currentProfile?.role;
-  return r === 'owner' || r === 'admin' || r === 'manager' || currentProfile?.is_inventory_manager;
+  return r === 'owner' || r === 'admin';
+}
+
+// Hard-delete is owner-only (per business rules — only Owner can permanently
+// remove items from the database). Admins can soft-delete (mark inactive).
+function canHardDeleteInventory(){
+  return currentProfile?.role === 'owner';
+}
+function canSoftDeleteInventory(){
+  const r = currentProfile?.role;
+  return r === 'owner' || r === 'admin';
 }
 
 async function renderInventory(el){
   if(!canManageInventory()){ el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied.</div>'; return; }
 
   // Pull only TOP-LEVEL items (parent_id IS NULL); variants are nested under their parents
-  const { data: allItems } = await sb.from('inventory_items').select('*, inventory_categories(name,icon)').order('updated_at', { ascending: false });
+  // Phase 3.21: filter out soft-deleted items (is_active = false). Items
+  // with NULL is_active (legacy rows from before the migration) are treated
+  // as active. Hard-deleted items are gone from the DB entirely.
+  const { data: allItems } = await sb.from('inventory_items')
+    .select('*, inventory_categories(name,icon)')
+    .or('is_active.eq.true,is_active.is.null')
+    .order('updated_at', { ascending: false });
   const items = (allItems || []).filter(i => !i.parent_id);
   const variantsByParent = {};
   (allItems || []).filter(i => i.parent_id).forEach(v => {
@@ -12905,6 +12966,7 @@ function renderInventoryRow(i, variants){
           ${!hasVariants ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="openVariantsEditor('${i.id}')" title="Add size/variant breakdown">📐</button>` : ''}
           <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="openInventoryItemEditor('${i.id}')">✏️</button>
           <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="viewInventoryHistory('${i.id}')">📜</button>
+          ${canSoftDeleteInventory() ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;color:#F87171;border-color:rgba(248,113,113,0.3);" onclick="deleteInventoryItem('${i.id}','${escapeHtml(i.name).replace(/'/g,"\\\\'")}')" title="${canHardDeleteInventory() ? 'Delete (Owner: hard delete; Admin: retire)' : 'Retire item (mark inactive)'}">🗑</button>` : ''}
         </div>
       </div>
     </div>`;
@@ -12954,9 +13016,10 @@ async function openInventoryItemEditor(itemId){
       </div>
     </div>
     <div class="form-group">
-      <label class="form-label">Photo (optional)</label>
-      <input id="ie-photo" type="file" class="form-input" accept="image/*"/>
-      ${i.photo_url ? `<div style="margin-top:8px;"><img src="${escapeHtml(i.photo_url)}" style="max-width:160px;border-radius:6px;"/></div>` : ''}
+      <label class="form-label">Photos (up to 4)</label>
+      <div id="ie-photos-existing" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px;"></div>
+      <input id="ie-photos-new" type="file" class="form-input" accept="image/*" multiple/>
+      <div style="font-size:11px;color:rgba(255,255,255,0.45);margin-top:4px;">Pick up to 4 photos. Existing photos shown above — click ✕ to remove. Total combined limit: 4 photos.</div>
     </div>
     <div class="form-group"><label class="form-label">Notes</label><textarea id="ie-notes" class="form-input" rows="2">${escapeHtml(i.notes || '')}</textarea></div>
     <div style="display:flex;gap:10px;margin-top:14px;">
@@ -12966,7 +13029,140 @@ async function openInventoryItemEditor(itemId){
     <div id="ie-msg" style="margin-top:12px;font-size:13px;"></div>`;
   document.getElementById('modal-box').style.maxWidth = '560px';
   document.getElementById('modal-backdrop').style.display = 'flex';
+
+  // Phase 3.21: load existing photos for this item (multi-photo support).
+  // Includes the legacy photo_url if present (treated as photo #0).
+  await _ieLoadExistingPhotos(i);
 }
+
+// Renders the existing photos thumbnails inside the modal. Photos can come
+// from two sources for backward compat:
+//   • Legacy: inventory_items.photo_url (single column from before Phase 3.21)
+//   • New:    inventory_item_photos table (one row per photo)
+// We render both as thumbnails with an ✕ button to mark for removal on save.
+async function _ieLoadExistingPhotos(item){
+  const container = document.getElementById('ie-photos-existing');
+  if(!container) return;
+  // Stash existing photos on the modal element so saveInventoryItem can read them
+  window._iePhotoState = { legacyUrl: item.photo_url || null, newPhotos: [], removedLegacy: false, removedNewIds: new Set() };
+
+  if(item.id){
+    try {
+      const { data } = await sb.from('inventory_item_photos')
+        .select('id, photo_url, storage_path, display_order')
+        .eq('item_id', item.id)
+        .order('display_order');
+      window._iePhotoState.newPhotos = data || [];
+    } catch(_){}
+  }
+  _ieRenderPhotoThumbs();
+}
+
+function _ieRenderPhotoThumbs(){
+  const container = document.getElementById('ie-photos-existing');
+  if(!container) return;
+  const st = window._iePhotoState || {};
+  let html = '';
+  if(st.legacyUrl && !st.removedLegacy){
+    html += `<div style="position:relative;width:80px;height:80px;border-radius:8px;overflow:hidden;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);">
+      <img src="${escapeHtml(st.legacyUrl)}" style="width:100%;height:100%;object-fit:cover;"/>
+      <button onclick="_ieRemoveLegacyPhoto()" style="position:absolute;top:2px;right:2px;background:rgba(220,38,38,0.9);color:#fff;border:none;border-radius:50%;width:20px;height:20px;font-size:11px;cursor:pointer;line-height:1;padding:0;">✕</button>
+    </div>`;
+  }
+  (st.newPhotos || []).forEach(p => {
+    if(st.removedNewIds.has(p.id)) return;
+    html += `<div style="position:relative;width:80px;height:80px;border-radius:8px;overflow:hidden;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);">
+      <img src="${escapeHtml(p.photo_url)}" style="width:100%;height:100%;object-fit:cover;"/>
+      <button onclick="_ieRemoveNewPhoto('${p.id}')" style="position:absolute;top:2px;right:2px;background:rgba(220,38,38,0.9);color:#fff;border:none;border-radius:50%;width:20px;height:20px;font-size:11px;cursor:pointer;line-height:1;padding:0;">✕</button>
+    </div>`;
+  });
+  if(!html) html = '<div style="font-size:11.5px;color:rgba(255,255,255,0.4);font-style:italic;">No photos yet. Pick files below.</div>';
+  container.innerHTML = html;
+}
+
+function _ieRemoveLegacyPhoto(){
+  if(!window._iePhotoState) return;
+  window._iePhotoState.removedLegacy = true;
+  _ieRenderPhotoThumbs();
+}
+function _ieRemoveNewPhoto(photoId){
+  if(!window._iePhotoState) return;
+  window._iePhotoState.removedNewIds.add(photoId);
+  _ieRenderPhotoThumbs();
+}
+window._ieRemoveLegacyPhoto = _ieRemoveLegacyPhoto;
+window._ieRemoveNewPhoto = _ieRemoveNewPhoto;
+
+// ─── Phase 3.21 — delete an inventory item ───────────────────────────
+// Owner: hard delete (truly removes the row + its photos + variants).
+// Admin: soft delete only (sets is_active=false; hides from UI but
+// preserves history of any past assignments/transfers).
+// MMs/Agents: cannot reach this — UI button is hidden by canSoftDeleteInventory()
+async function deleteInventoryItem(itemId, itemName){
+  if(!canSoftDeleteInventory()){ alert('Access denied.'); return; }
+
+  // Look up assignment history — if the item was ever transferred, hard
+  // delete is dangerous (breaks audit trail). Use this to gate the button.
+  const { count: assignCount } = await sb.from('inventory_assignments')
+    .select('id', { count:'exact', head:true })
+    .eq('item_id', itemId);
+  const hasHistory = (assignCount || 0) > 0;
+
+  if(canHardDeleteInventory()){
+    // Owner sees a 2-step modal: soft retire OR hard delete.
+    const msg = hasHistory
+      ? 'This item has ' + assignCount + ' historical transfer record' + (assignCount === 1 ? '' : 's') + '.\n\n' +
+        'Choose:\n\n' +
+        '  • OK = HARD DELETE the item permanently. Historical transfer records will reference a deleted item. Cannot be undone.\n\n' +
+        '  • Cancel = Keep the audit trail safe by retiring the item instead (hidden from active inventory but data preserved).\n\n' +
+        'Item: "' + itemName + '"\n\nProceed with hard delete?'
+      : 'No historical transfers found — safe to hard delete.\n\n' +
+        'Click OK to PERMANENTLY DELETE "' + itemName + '" (cannot be undone).\n' +
+        'Click Cancel to retire the item instead (kept in DB but hidden).';
+
+    const wantsHard = confirm(msg);
+    if(wantsHard){
+      // Final confirmation
+      const final = prompt('Type DELETE in all caps to confirm permanent deletion of "' + itemName + '":');
+      if(final !== 'DELETE'){ alert('Deletion cancelled.'); return; }
+
+      // Hard delete: photos + variants + assignments cascade via FK rules.
+      // Photos in storage need explicit cleanup since they're not cascaded.
+      try {
+        const { data: photos } = await sb.from('inventory_item_photos').select('storage_path').eq('item_id', itemId);
+        const paths = (photos || []).map(p => p.storage_path).filter(Boolean);
+        if(paths.length > 0){
+          await sb.storage.from('inventory-photos').remove(paths);
+        }
+      } catch(_){}
+
+      const { error } = await sb.from('inventory_items').delete().eq('id', itemId);
+      if(error){ alert('Hard delete failed: ' + error.message); return; }
+      alert('✓ "' + itemName + '" permanently deleted.');
+      renderMainContent();
+      return;
+    }
+    // User cancelled hard delete — fall through to soft delete option
+    if(!confirm('Retire "' + itemName + '" instead? It will be hidden from active inventory but kept in the database. You can un-retire it later if needed.')) return;
+  } else {
+    // Admin — soft delete only
+    if(!confirm('Retire "' + itemName + '"?\n\nThis hides it from active inventory but keeps the row + history intact. (Only the Owner can permanently delete items.)')) return;
+  }
+
+  // Soft delete: flip is_active=false, stamp who/when. The row stays.
+  const { error } = await sb.from('inventory_items').update({
+    is_active: false,
+    deleted_at: new Date().toISOString(),
+    deleted_by: currentProfile.id,
+    status: 'retired'
+  }).eq('id', itemId);
+  if(error){ alert('Retire failed: ' + error.message); return; }
+  alert('✓ "' + itemName + '" retired (hidden from active inventory).');
+  renderMainContent();
+}
+window.deleteInventoryItem = deleteInventoryItem;
+window.canSoftDeleteInventory = canSoftDeleteInventory;
+window.canHardDeleteInventory = canHardDeleteInventory;
 
 async function saveInventoryItem(existingId){
   const msg = document.getElementById('ie-msg');
@@ -12985,27 +13181,87 @@ async function saveInventoryItem(existingId){
     notes: document.getElementById('ie-notes').value.trim() || null,
     updated_at: new Date().toISOString()
   };
-  const fileInput = document.getElementById('ie-photo');
-  const file = fileInput?.files?.[0];
-  if(file){
-    msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Uploading photo…</span>';
-    const path = 'inventory/' + Date.now() + '-' + file.name.replace(/[^a-zA-Z0-9.]/g,'_');
-    const { error: uploadErr } = await sb.storage.from('avatars').upload(path, file);
-    if(!uploadErr){
-      const { data } = sb.storage.from('avatars').getPublicUrl(path);
-      payload.photo_url = data?.publicUrl || null;
+
+  // Multi-photo handling (Phase 3.21)
+  const st = window._iePhotoState || { legacyUrl: null, newPhotos: [], removedLegacy: false, removedNewIds: new Set() };
+  const fileInput = document.getElementById('ie-photos-new');
+  const newFiles = Array.from(fileInput?.files || []);
+
+  // Compute how many existing photos remain (legacy + uploaded rows that
+  // weren't removed) and enforce the 4-photo total cap.
+  const remainingLegacy = (st.legacyUrl && !st.removedLegacy) ? 1 : 0;
+  const remainingNew = (st.newPhotos || []).filter(p => !st.removedNewIds.has(p.id)).length;
+  const totalAfter = remainingLegacy + remainingNew + newFiles.length;
+  if(totalAfter > 4){
+    msg.innerHTML = '<span style="color:#F87171;">Maximum 4 photos per item. You have ' + (remainingLegacy + remainingNew) + ' kept + ' + newFiles.length + ' new = ' + totalAfter + '. Remove some or upload fewer.</span>';
+    return;
+  }
+
+  // If user removed the legacy photo, clear photo_url on the item row
+  if(st.removedLegacy){ payload.photo_url = null; }
+
+  // Upload any newly picked files to inventory-photos bucket and collect URLs
+  const newPhotoRows = [];
+  if(newFiles.length > 0){
+    msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Uploading ' + newFiles.length + ' photo' + (newFiles.length === 1 ? '' : 's') + '…</span>';
+    for(const file of newFiles){
+      const path = 'items/' + Date.now() + '-' + Math.random().toString(36).slice(2,8) + '-' + file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const { error: upErr } = await sb.storage.from('inventory-photos').upload(path, file);
+      if(upErr){
+        msg.innerHTML = '<span style="color:#F87171;">Upload failed: ' + escapeHtml(upErr.message) + '</span>';
+        return;
+      }
+      const { data: urlData } = sb.storage.from('inventory-photos').getPublicUrl(path);
+      newPhotoRows.push({ photo_url: urlData?.publicUrl || null, storage_path: path });
     }
   }
+
   msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Saving…</span>';
+
+  // Save the item
+  let itemId = existingId;
   if(existingId){
     const { error } = await sb.from('inventory_items').update(payload).eq('id', existingId);
-    if(error){ msg.innerHTML = '<span style="color:#F87171;">' + error.message + '</span>'; return; }
+    if(error){ msg.innerHTML = '<span style="color:#F87171;">' + escapeHtml(error.message) + '</span>'; return; }
   } else {
     payload.created_by = currentProfile.id;
     payload.status = 'in_stock';
-    const { error } = await sb.from('inventory_items').insert(payload);
-    if(error){ msg.innerHTML = '<span style="color:#F87171;">' + error.message + '</span>'; return; }
+    const { data: inserted, error } = await sb.from('inventory_items').insert(payload).select('id').single();
+    if(error){ msg.innerHTML = '<span style="color:#F87171;">' + escapeHtml(error.message) + '</span>'; return; }
+    itemId = inserted.id;
   }
+
+  // Remove photos the user clicked ✕ on
+  if(st.removedNewIds && st.removedNewIds.size > 0){
+    const idsToDelete = Array.from(st.removedNewIds);
+    // Look up storage paths so we can clean up files too
+    const toDelete = (st.newPhotos || []).filter(p => st.removedNewIds.has(p.id));
+    const paths = toDelete.map(p => p.storage_path).filter(Boolean);
+    if(paths.length > 0){
+      try { await sb.storage.from('inventory-photos').remove(paths); } catch(_){}
+    }
+    await sb.from('inventory_item_photos').delete().in('id', idsToDelete);
+  }
+
+  // Insert new photo rows
+  if(newPhotoRows.length > 0 && itemId){
+    const rows = newPhotoRows.map((r, i) => ({
+      item_id: itemId,
+      photo_url: r.photo_url,
+      storage_path: r.storage_path,
+      display_order: (remainingLegacy + remainingNew) + i,
+      uploaded_by: currentProfile.id
+    }));
+    const { error: pErr } = await sb.from('inventory_item_photos').insert(rows);
+    if(pErr){
+      console.warn('Photo metadata insert failed:', pErr);
+      // Photos uploaded but metadata didn't save — surface but don't block
+      msg.innerHTML = '<span style="color:#FFC800;">Saved item, but some photo metadata failed: ' + escapeHtml(pErr.message) + '</span>';
+      setTimeout(() => { closeAllModals(); renderMainContent(); }, 1500);
+      return;
+    }
+  }
+
   msg.innerHTML = '<span style="color:#00FF88;">✓ Saved.</span>';
   setTimeout(() => { closeAllModals(); renderMainContent(); }, 700);
 }
@@ -13018,7 +13274,7 @@ async function openAssignInventoryModal(itemId){
   const { data: allUsers } = await sb.from('profiles').select('id,full_name,email,role,reports_to').eq('active', true).order('full_name');
   const { data: allMkts } = await sb.from('markets').select('id,name').order('name');
 
-  if(myRole === 'owner' || currentProfile.is_inventory_manager){
+  if(myRole === 'owner'){
     assignableUsers = (allUsers || []).filter(u => u.role !== 'owner');
     assignableMarkets = allMkts || [];
   } else if(myRole === 'admin'){
@@ -16148,15 +16404,17 @@ async function emailLoginToAgent(userId){
   if(!ok) return;
 
   try {
+    const portalUrl = await _getPortalLoginUrl();
     await sb.auth.resetPasswordForEmail(profile.email, {
-      redirectTo: window.location.origin
+      redirectTo: portalUrl
     });
     await sendEmailViaFunction('welcome', profile.email, {
       full_name: profile.full_name,
       email: profile.email,
       password: 'Click the password-setup link we just sent in a separate email to choose your own password.',
       role_label: roleLabel(profile.role),
-      programs: (profile.programs || []).map(pid => (allPrograms.find(p=>p.id===pid)||{}).name).filter(Boolean)
+      programs: (profile.programs || []).map(pid => (allPrograms.find(p=>p.id===pid)||{}).name).filter(Boolean),
+      portal_url: portalUrl
     });
     alert('✓ Sent. ' + profile.email + ' will receive a password-setup link + welcome email.');
   } catch(e){
@@ -16171,11 +16429,12 @@ function generateTempPassword(){
   return p;
 }
 
-// Copy a ready-to-send login link for the agent (puts site URL + their email in clipboard)
+// Copy a ready-to-send login link for the agent (puts portal URL + their email in clipboard)
 async function copyLoginLink(userId){
   const { data: profile } = await sb.from('profiles').select('full_name,email').eq('id', userId).single();
   if(!profile){ alert('User not found'); return; }
-  const msg = `Hi ${profile.full_name || 'there'},\n\nYour Circle Solutions back office is ready.\n\nSign in at: ${window.location.origin}\nEmail: ${profile.email}\n\nIf you don't have your password yet, ask an admin to reset it for you or use the "Forgot Password" link on the login page.\n\nHeads up: first-time emails may land in spam — check your junk folder and mark as "Not Spam" so future emails from us reach your inbox.`;
+  const portalUrl = await _getPortalLoginUrl();
+  const msg = `Hi ${profile.full_name || 'there'},\n\nYour Circle Solutions back office is ready.\n\nSign in at: ${portalUrl}\nEmail: ${profile.email}\n\nIf you don't have your password yet, ask an admin to reset it for you or use the "Forgot Password" link on the login page.\n\nHeads up: first-time emails may land in spam — check your junk folder and mark as "Not Spam" so future emails from us reach your inbox.`;
   try {
     await navigator.clipboard.writeText(msg);
     alert('✓ Login instructions copied to clipboard.\n\nYou can now paste this into a text message, iMessage, WhatsApp, Slack — anywhere you want.');
@@ -16189,6 +16448,33 @@ async function copyLoginLink(userId){
     ta.remove();
   }
 }
+
+// Read portal login URL from app_settings. Falls back to current origin + #login
+// if the setting hasn't been configured yet. Cached for 60s to avoid re-querying.
+// Tolerates `value` being TEXT or JSONB (depending on which migration created it).
+let _portalUrlCache = null;
+let _portalUrlCachedAt = 0;
+async function _getPortalLoginUrl(){
+  const now = Date.now();
+  if(_portalUrlCache && (now - _portalUrlCachedAt) < 60000) return _portalUrlCache;
+  try {
+    const { data } = await sb.from('app_settings').select('value').eq('key', 'portal_login_url').maybeSingle();
+    let v = data?.value;
+    // If JSONB stored a string, supabase-js returns it as a JS string already.
+    // If it stored a JSON object {url: "..."} or {"value": "..."}, dig in.
+    if(v && typeof v === 'object'){
+      v = v.url || v.value || null;
+    }
+    if(v && typeof v === 'string' && v.trim()){
+      _portalUrlCache = v.trim();
+      _portalUrlCachedAt = now;
+      return _portalUrlCache;
+    }
+  } catch(_){}
+  // Fallback — same origin + #login hash so the SPA shows the login screen
+  return window.location.origin + '/#login';
+}
+window._getPortalLoginUrl = _getPortalLoginUrl;
 
 
 // ═══════════════════════════════════════════════════════════════
