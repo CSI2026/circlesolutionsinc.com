@@ -14682,7 +14682,7 @@ async function renderToolBoxAdmin(el){
 function _renderToolBoxAdminRow(r){
   const program = (allPrograms || []).find(p => p.id === r.program_id);
   const market = (allMarkets || []).find(m => m.id === r.market_id);
-  const kindIcon = { link:'🔗', document:'📄', flyer:'🖼', note:'📝' }[r.kind] || '📌';
+  const kindIcon = { link:'🔗', document:'📄', flyer:'🖼', note:'📝', html:'📘', docx:'📕', pdf:'📗' }[r.kind] || '📌';
   const roleColor = r.role_bucket === 'manager' ? '#00C6FF' : r.role_bucket === 'agent' ? '#00FF88' : '#A855F7';
   const roleLabel = r.role_bucket || 'all';
   return `
@@ -14725,8 +14725,11 @@ async function openToolBoxResourceModal(resourceId){
     <div class="form-group">
       <label class="form-label">KIND *</label>
       <select id="tbr-kind" class="form-input" onchange="_tbrToggleKindFields()">
-        <option value="link" ${e.kind === 'link' ? 'selected' : ''}>🔗 Link (external URL)</option>
-        <option value="document" ${e.kind === 'document' ? 'selected' : ''}>📄 Document (PDF, Word, etc.)</option>
+        <option value="link" ${e.kind === 'link' ? 'selected' : ''}>🔗 Link (external URL — opens in new tab)</option>
+        <option value="html" ${e.kind === 'html' ? 'selected' : ''}>📘 HTML page (renders inline, in back office)</option>
+        <option value="docx" ${e.kind === 'docx' ? 'selected' : ''}>📕 Word document (renders inline)</option>
+        <option value="pdf" ${e.kind === 'pdf' ? 'selected' : ''}>📗 PDF (renders inline)</option>
+        <option value="document" ${e.kind === 'document' ? 'selected' : ''}>📄 Document (other file types)</option>
         <option value="flyer" ${e.kind === 'flyer' ? 'selected' : ''}>🖼 Flyer (image)</option>
         <option value="note" ${e.kind === 'note' ? 'selected' : ''}>📝 Note (text-only)</option>
       </select>
@@ -14738,6 +14741,19 @@ async function openToolBoxResourceModal(resourceId){
     <div id="tbr-link-fields" class="form-group" style="display:none;">
       <label class="form-label">URL *</label>
       <input id="tbr-url" class="form-input" placeholder="https://…" value="${escapeHtml(e.payload_url || '')}"/>
+    </div>
+
+    <div id="tbr-html-fields" class="form-group" style="display:none;">
+      <label class="form-label">HTML CONTENT *</label>
+      <textarea id="tbr-html" class="form-input" rows="6" placeholder="Paste full HTML (with &lt;style&gt; tags is fine — it renders in a sandboxed iframe so it won't break the back office)" style="font-family:monospace;font-size:11px;">${escapeHtml(e.payload_html || '')}</textarea>
+      <div style="font-size:11px;color:rgba(255,255,255,0.45);margin-top:4px;">Paste a complete HTML page. It renders inline in a sandboxed iframe inside the back office — no popups, no new tabs.</div>
+    </div>
+
+    <div id="tbr-docx-fields" class="form-group" style="display:none;">
+      <label class="form-label">WORD DOCUMENT</label>
+      ${e.payload_b64 ? `<div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-bottom:6px;">Current: <strong>document attached</strong> ${e.payload_size_bytes ? '(' + Math.round(e.payload_size_bytes / 1024) + ' KB)' : ''}</div>` : ''}
+      <input id="tbr-docx" type="file" accept=".docx,.doc" class="form-input"/>
+      <div style="font-size:11px;color:rgba(255,255,255,0.45);margin-top:4px;">${e.payload_b64 ? 'Leave empty to keep current document.' : 'Upload a .docx file. Renders inline using mammoth.js.'}</div>
     </div>
 
     <div id="tbr-file-fields" class="form-group" style="display:none;">
@@ -14793,9 +14809,13 @@ async function openToolBoxResourceModal(resourceId){
 function _tbrToggleKindFields(){
   const kind = document.getElementById('tbr-kind').value;
   const linkFields = document.getElementById('tbr-link-fields');
+  const htmlFields = document.getElementById('tbr-html-fields');
+  const docxFields = document.getElementById('tbr-docx-fields');
   const fileFields = document.getElementById('tbr-file-fields');
-  linkFields.style.display = kind === 'link' ? '' : 'none';
-  fileFields.style.display = (kind === 'document' || kind === 'flyer') ? '' : 'none';
+  if(linkFields) linkFields.style.display = kind === 'link' ? '' : 'none';
+  if(htmlFields) htmlFields.style.display = kind === 'html' ? '' : 'none';
+  if(docxFields) docxFields.style.display = kind === 'docx' ? '' : 'none';
+  if(fileFields) fileFields.style.display = (kind === 'document' || kind === 'flyer' || kind === 'pdf') ? '' : 'none';
 }
 window._tbrToggleKindFields = _tbrToggleKindFields;
 
@@ -14824,7 +14844,39 @@ async function saveToolBoxResource(existingId){
     if(!url.startsWith('http')){ msg.innerHTML = '<span style="color:#F87171;">URL must start with http:// or https://</span>'; return; }
     payload.payload_url = url;
     payload.payload_path = null;
-  } else if(kind === 'document' || kind === 'flyer'){
+  } else if(kind === 'html'){
+    const html = document.getElementById('tbr-html').value;
+    if(!html.trim()){ msg.innerHTML = '<span style="color:#F87171;">HTML content is required.</span>'; return; }
+    payload.payload_html = html;
+    payload.payload_url = null;
+    payload.payload_path = null;
+    payload.payload_b64 = null;
+  } else if(kind === 'docx'){
+    const fileInput = document.getElementById('tbr-docx');
+    const file = fileInput?.files?.[0];
+    if(file){
+      msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Reading document…</span>';
+      try {
+        const buf = await file.arrayBuffer();
+        // Convert to base64 in chunks to avoid call-stack issues on big files
+        const bytes = new Uint8Array(buf);
+        let binary = '';
+        const chunk = 0x8000;
+        for(let i = 0; i < bytes.length; i += chunk){
+          binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+        }
+        payload.payload_b64 = btoa(binary);
+        payload.payload_size_bytes = file.size;
+        payload.payload_mime = file.type || 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+        payload.payload_url = null;
+        payload.payload_path = null;
+      } catch(e){
+        msg.innerHTML = '<span style="color:#F87171;">Failed to read file: ' + escapeHtml(e.message) + '</span>'; return;
+      }
+    } else if(!existingId){
+      msg.innerHTML = '<span style="color:#F87171;">File is required.</span>'; return;
+    }
+  } else if(kind === 'pdf' || kind === 'document' || kind === 'flyer'){
     const fileInput = document.getElementById('tbr-file');
     const file = fileInput.files[0];
     if(file){
@@ -14915,12 +14967,18 @@ async function renderToolBoxAgent(el){
 }
 
 function _renderToolBoxAgentCard(r){
-  const kindIcon = { link:'🔗', document:'📄', flyer:'🖼', note:'📝' }[r.kind] || '📌';
+  const kindIcon = { link:'🔗', document:'📄', flyer:'🖼', note:'📝', html:'📘', docx:'📕', pdf:'📗' }[r.kind] || '📌';
   let action = '';
+  // Phase 3.22: only EXTERNAL link kind opens in a new tab. Everything else
+  // renders INSIDE the back office via openToolBoxResource(id).
   if(r.kind === 'link' && r.payload_url){
-    action = `<a href="${escapeHtml(r.payload_url)}" target="_blank" class="bo-btn bo-btn-primary" style="padding:8px 16px;font-size:12px;text-decoration:none;display:inline-block;">Open Link ↗</a>`;
-  } else if((r.kind === 'document' || r.kind === 'flyer') && r.payload_path){
-    action = `<button class="bo-btn bo-btn-primary" style="padding:8px 16px;font-size:12px;" onclick="openToolBoxFile('${r.payload_path}','${escapeHtml(r.title).replace(/'/g,"\\\\'")}')">📥 Open File</button>`;
+    action = `<a href="${escapeHtml(r.payload_url)}" target="_blank" rel="noopener" class="bo-btn bo-btn-primary" style="padding:8px 16px;font-size:12px;text-decoration:none;display:inline-block;">Open Link ↗</a>`;
+  } else if(r.kind === 'note') {
+    // Notes have no file/link — they're text-only. Show "Read" which opens
+    // a modal with the description (or any future note body) inside.
+    action = `<button class="bo-btn bo-btn-primary" style="padding:8px 16px;font-size:12px;" onclick="openToolBoxResource('${r.id}')">📖 Read</button>`;
+  } else if(r.kind === 'html' || r.kind === 'docx' || r.kind === 'pdf' || r.kind === 'document' || r.kind === 'flyer') {
+    action = `<button class="bo-btn bo-btn-primary" style="padding:8px 16px;font-size:12px;" onclick="openToolBoxResource('${r.id}')">📖 Open</button>`;
   }
   return `
     <div class="bo-card" style="height:100%;display:flex;flex-direction:column;">
@@ -14931,16 +14989,216 @@ function _renderToolBoxAgentCard(r){
     </div>`;
 }
 
-async function openToolBoxFile(path, title){
+// Phase 3.22 — In-back-office Tool Box resource viewer.
+// Replaces the old openToolBoxFile() which opened a popup/new tab.
+// Renders the resource INSIDE a full-screen modal so the user never leaves
+// the back office. Only 'link' kind opens externally — everything else is
+// rendered inline:
+//   • html       → sandboxed iframe with srcdoc
+//   • pdf        → iframe pointed at signed URL
+//   • document   → tries inline (PDF iframe / image) then falls back to download link
+//   • docx       → mammoth.js converts to HTML in-browser, then renders
+//   • flyer      → <img>
+//   • note       → description text
+async function openToolBoxResource(resourceId){
+  const { data: r, error } = await sb.from('tool_box_resources').select('*').eq('id', resourceId).maybeSingle();
+  if(error || !r){ alert('Could not load resource: ' + (error?.message || 'not found')); return; }
+
+  const backdrop = document.getElementById('modal-backdrop');
+  const box = document.getElementById('modal-box');
+  if(!backdrop || !box){ alert('Viewer unavailable.'); return; }
+
+  // Take over the modal at near-fullscreen so the embedded content has room
+  box.style.maxWidth = '95vw';
+  box.style.width = '95vw';
+  box.style.maxHeight = '92vh';
+  box.style.height = '92vh';
+  box.style.display = 'flex';
+  box.style.flexDirection = 'column';
+  box.style.padding = '0';
+  box.style.overflow = 'hidden';
+
+  const headerH = `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.3);flex-shrink:0;">
+      <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#fff;letter-spacing:0.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(r.title)}</div>
+      </div>
+      <div style="display:flex;gap:8px;flex-shrink:0;">
+        <button class="bo-btn bo-btn-ghost" style="padding:6px 14px;font-size:11.5px;" onclick="closeAllModals(); _resetModalSize();">✕ Close</button>
+      </div>
+    </div>`;
+
+  // Body container — we'll inject the right viewer based on kind
+  const bodyId = 'tbv-body';
+  box.innerHTML = headerH + `<div id="${bodyId}" style="flex:1;overflow:auto;background:#1a1a1a;position:relative;"></div>`;
+  backdrop.style.display = 'flex';
+
+  const body = document.getElementById(bodyId);
+  body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:rgba(255,255,255,0.5);font-size:13px;">Loading…</div>';
+
   try {
-    const { data, error } = await sb.storage.from('tool-box').createSignedUrl(path, 3600);
-    if(error){ alert('Could not load: ' + error.message); return; }
-    window.open(data.signedUrl, '_blank');
+    if(r.kind === 'html' && r.payload_html){
+      // Sandboxed iframe — its CSS won't leak into the back office, and
+      // its scripts can't touch the parent (allow-scripts only).
+      const iframe = document.createElement('iframe');
+      iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin');
+      iframe.style.cssText = 'width:100%;height:100%;border:0;background:#fff;';
+      iframe.srcdoc = r.payload_html;
+      body.innerHTML = '';
+      body.appendChild(iframe);
+      return;
+    }
+
+    if(r.kind === 'docx' && r.payload_b64){
+      // Lazy-load mammoth.js for Word→HTML conversion in the browser.
+      body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:rgba(255,255,255,0.5);font-size:13px;">Converting Word document…</div>';
+      try { await _ensureMammoth(); } catch(e){
+        body.innerHTML = '<div style="padding:24px;color:#F87171;font-size:13px;">Could not load document viewer (' + escapeHtml(e.message || 'unknown error') + ').</div>';
+        return;
+      }
+      // Decode base64 → ArrayBuffer
+      const binary = atob(r.payload_b64);
+      const bytes = new Uint8Array(binary.length);
+      for(let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const result = await window.mammoth.convertToHtml({ arrayBuffer: bytes.buffer });
+      const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+        body{font-family:Georgia,serif;line-height:1.6;color:#222;background:#fff;padding:48px 56px;max-width:920px;margin:0 auto;}
+        h1,h2,h3{color:#0B1E3F;margin-top:1.4em;}
+        table{border-collapse:collapse;margin:1em 0;}
+        td,th{border:1px solid #ccc;padding:6px 10px;}
+        img{max-width:100%;height:auto;}
+        a{color:#0B5FFF;}
+        p{margin:0.6em 0;}
+      </style></head><body>${result.value}</body></html>`;
+      const iframe = document.createElement('iframe');
+      iframe.setAttribute('sandbox', 'allow-same-origin');
+      iframe.style.cssText = 'width:100%;height:100%;border:0;background:#fff;';
+      iframe.srcdoc = html;
+      body.innerHTML = '';
+      body.appendChild(iframe);
+      return;
+    }
+
+    if((r.kind === 'pdf' || r.kind === 'document') && r.payload_path){
+      // Sign URL and embed in iframe. Most browsers render PDFs inline.
+      const { data: signed, error: sErr } = await sb.storage.from('tool-box').createSignedUrl(r.payload_path, 3600);
+      if(sErr){ body.innerHTML = '<div style="padding:24px;color:#F87171;">' + escapeHtml(sErr.message) + '</div>'; return; }
+      const url = signed.signedUrl;
+      const lower = (r.payload_path || '').toLowerCase();
+      if(lower.endsWith('.pdf')){
+        body.innerHTML = `<iframe src="${escapeHtml(url)}" style="width:100%;height:100%;border:0;background:#fff;"></iframe>`;
+      } else if(lower.match(/\.(png|jpe?g|gif|webp|svg)$/)){
+        body.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;min-height:100%;padding:20px;"><img src="${escapeHtml(url)}" style="max-width:100%;max-height:100%;object-fit:contain;"/></div>`;
+      } else if(lower.endsWith('.docx') || lower.endsWith('.doc')){
+        // Stored docx in storage (legacy). Fetch + convert via mammoth.
+        try { await _ensureMammoth(); } catch(_){
+          body.innerHTML = '<div style="padding:24px;color:#F87171;font-size:13px;">Could not load document viewer.</div>';
+          return;
+        }
+        const resp = await fetch(url);
+        const buf = await resp.arrayBuffer();
+        const result = await window.mammoth.convertToHtml({ arrayBuffer: buf });
+        const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+          body{font-family:Georgia,serif;line-height:1.6;color:#222;background:#fff;padding:48px 56px;max-width:920px;margin:0 auto;}
+          h1,h2,h3{color:#0B1E3F;}
+          table{border-collapse:collapse;margin:1em 0;}
+          td,th{border:1px solid #ccc;padding:6px 10px;}
+          img{max-width:100%;height:auto;}
+          a{color:#0B5FFF;}
+        </style></head><body>${result.value}</body></html>`;
+        const iframe = document.createElement('iframe');
+        iframe.setAttribute('sandbox', 'allow-same-origin');
+        iframe.style.cssText = 'width:100%;height:100%;border:0;background:#fff;';
+        iframe.srcdoc = html;
+        body.innerHTML = '';
+        body.appendChild(iframe);
+      } else {
+        // Unknown type — show download fallback
+        body.innerHTML = `<div style="padding:32px;color:rgba(255,255,255,0.85);">
+          <p style="margin-bottom:14px;">This file type can't be previewed inline.</p>
+          <a href="${escapeHtml(url)}" download class="bo-btn bo-btn-primary" style="text-decoration:none;display:inline-block;">⬇ Download</a>
+        </div>`;
+      }
+      return;
+    }
+
+    if(r.kind === 'flyer' && r.payload_path){
+      const { data: signed } = await sb.storage.from('tool-box').createSignedUrl(r.payload_path, 3600);
+      body.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;min-height:100%;padding:20px;"><img src="${escapeHtml(signed?.signedUrl || '')}" style="max-width:100%;max-height:100%;object-fit:contain;"/></div>`;
+      return;
+    }
+
+    if(r.kind === 'note'){
+      body.innerHTML = `<div style="padding:32px 48px;color:rgba(255,255,255,0.9);font-size:14.5px;line-height:1.7;max-width:780px;margin:0 auto;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:28px;color:#fff;margin-bottom:14px;letter-spacing:1px;">${escapeHtml(r.title)}</div>
+        <div style="white-space:pre-wrap;">${escapeHtml(r.description || '(no content)')}</div>
+      </div>`;
+      return;
+    }
+
+    // Fallback
+    body.innerHTML = '<div style="padding:24px;color:rgba(255,255,255,0.55);">Nothing to display for this resource.</div>';
   } catch(e){
-    alert('Failed: ' + e.message);
+    body.innerHTML = '<div style="padding:24px;color:#F87171;">Failed to load: ' + escapeHtml(e.message || String(e)) + '</div>';
   }
 }
+
+// Reset modal-box back to default size when closing the viewer
+function _resetModalSize(){
+  const box = document.getElementById('modal-box');
+  if(!box) return;
+  box.style.maxWidth = '';
+  box.style.width = '';
+  box.style.maxHeight = '';
+  box.style.height = '';
+  box.style.display = '';
+  box.style.flexDirection = '';
+  box.style.padding = '';
+  box.style.overflow = '';
+}
+window._resetModalSize = _resetModalSize;
+
+// Lazy-load mammoth.js (Word document → HTML converter) on first use.
+let _mammothLoadPromise = null;
+function _ensureMammoth(){
+  if(window.mammoth) return Promise.resolve();
+  if(_mammothLoadPromise) return _mammothLoadPromise;
+  _mammothLoadPromise = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js';
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('Failed to load mammoth.js (network blocked?)'));
+    document.head.appendChild(s);
+  });
+  return _mammothLoadPromise;
+}
+
+// Backwards compat: if anything still calls openToolBoxFile, route through new viewer
+async function openToolBoxFile(path, title){
+  // Find the resource by path so we can route through the new modal viewer
+  const { data } = await sb.from('tool_box_resources').select('id').eq('payload_path', path).limit(1).maybeSingle();
+  if(data?.id){ return openToolBoxResource(data.id); }
+  // Fallback: best-effort signed URL in iframe modal
+  try {
+    const { data: signed, error } = await sb.storage.from('tool-box').createSignedUrl(path, 3600);
+    if(error){ alert('Could not load: ' + error.message); return; }
+    const box = document.getElementById('modal-box');
+    if(box){
+      box.style.maxWidth = '95vw'; box.style.width = '95vw';
+      box.style.maxHeight = '92vh'; box.style.height = '92vh';
+      box.style.padding = '0'; box.style.display = 'flex'; box.style.flexDirection = 'column';
+      box.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid rgba(255,255,255,0.1);">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#fff;">${escapeHtml(title || 'Document')}</div>
+          <button class="bo-btn bo-btn-ghost" style="padding:6px 14px;font-size:11.5px;" onclick="closeAllModals(); _resetModalSize();">✕ Close</button>
+        </div>
+        <iframe src="${escapeHtml(signed.signedUrl)}" style="flex:1;width:100%;border:0;background:#fff;"></iframe>`;
+      document.getElementById('modal-backdrop').style.display = 'flex';
+    }
+  } catch(e){ alert('Failed: ' + e.message); }
+}
 window.renderToolBoxAgent = renderToolBoxAgent;
+window.openToolBoxResource = openToolBoxResource;
 window.openToolBoxFile = openToolBoxFile;
 
 // ═══════════════════════════════════════════════════════════════════════
