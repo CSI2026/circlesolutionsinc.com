@@ -14716,11 +14716,12 @@ async function startImpersonation(targetUserId){
     return;
   }
 
-  // Save the original profile so we can restore later
+  // Save the original profile + user so we can restore later
   window._impOriginal = currentProfile;
+  window._impOriginalUser = currentUser;
   window._impTarget = target;
 
-  // Log session_start
+  // Log session_start (logged BEFORE we swap so impersonator_id is correct)
   try {
     await sb.from('impersonation_log').insert({
       impersonator_id: currentProfile.id,
@@ -14731,8 +14732,13 @@ async function startImpersonation(targetUserId){
     });
   } catch(e){ console.warn('Imp log start failed:', e); }
 
-  // Swap currentProfile and re-render
+  // Swap BOTH currentProfile AND currentUser. Many UI surfaces query by
+  // `currentUser.id` (the auth user id) for self-data — without swapping
+  // currentUser, the impersonated dashboard would still pull the
+  // impersonator's own enrollments / sales / contracts, which leaks data
+  // and breaks the realism of View-As.
   currentProfile = target;
+  currentUser = { id: target.id, email: target.email };
   // Clear any cached state that's user-specific
   if(window._sbClockInterval){ clearInterval(window._sbClockInterval); window._sbClockInterval = null; }
   window._myDirectReportIds = null;
@@ -14741,18 +14747,20 @@ async function startImpersonation(targetUserId){
 
   // Force back to dashboard view
   activeAdminView = null;
-  // If the target has programs, default to first
+  activeProgramId = null;
+  // If the target has programs, default to first one. If they have NONE
+  // (e.g. an admin without program access) leave activeProgramId null so
+  // the dashboard shows the empty-state.
   if((target.programs || []).length > 0){
     activeProgramId = target.programs[0];
   }
 
-  // Re-render the whole shell
-  if(typeof renderShell === 'function'){
-    renderShell();
-  } else {
-    location.hash = '#dashboard';
-    renderMainContent();
-  }
+  // CRITICAL: re-render BOTH the sidebar (to pick up the new role's nav
+  // items) AND the main content. Without sidebar refresh, the impersonator
+  // continues to see Owner Panel items because the sidebar HTML was
+  // generated when currentProfile was still the owner.
+  renderSidebar();
+  renderMainContent();
   _showImpersonationBanner();
 }
 window.startImpersonation = startImpersonation;
@@ -14774,7 +14782,9 @@ async function endImpersonation(){
   } catch(_){}
 
   currentProfile = window._impOriginal;
+  if(window._impOriginalUser) currentUser = window._impOriginalUser;
   window._impOriginal = null;
+  window._impOriginalUser = null;
   window._impTarget = null;
 
   // Clear cached state
@@ -14784,14 +14794,15 @@ async function endImpersonation(){
   if(typeof _prewarmDirectReports === 'function') await _prewarmDirectReports();
 
   activeAdminView = null;
-  if(typeof renderShell === 'function'){
-    renderShell();
-  } else {
-    renderMainContent();
-  }
+  activeProgramId = null;
+  // Re-render both sidebar + content (same fix as startImpersonation)
+  renderSidebar();
+  renderMainContent();
   // Hide banner
   const banner = document.getElementById('imp-banner');
   if(banner) banner.remove();
+  // Restore body padding
+  document.body.style.paddingTop = '';
 }
 window.endImpersonation = endImpersonation;
 
