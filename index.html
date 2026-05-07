@@ -15272,8 +15272,10 @@ function _renderToolBoxAgentCard(r){
   let action = '';
   // Phase 3.22: only EXTERNAL link kind opens in a new tab. Everything else
   // renders INSIDE the back office via openToolBoxResource(id).
+  // Phase 3.24: link resources now render inline in the back office (with
+  // a fallback to a new tab if the destination refuses iframe embedding).
   if(r.kind === 'link' && r.payload_url){
-    action = `<a href="${escapeHtml(r.payload_url)}" target="_blank" rel="noopener" class="bo-btn bo-btn-primary" style="padding:8px 16px;font-size:12px;text-decoration:none;display:inline-block;">Open Link ↗</a>`;
+    action = `<button class="bo-btn bo-btn-primary" style="padding:8px 16px;font-size:12px;" onclick="openToolBoxResource('${r.id}')">🔗 Open</button>`;
   } else if(r.kind === 'note') {
     // Notes have no file/link — they're text-only. Show "Read" which opens
     // a modal with the description (or any future note body) inside.
@@ -15338,6 +15340,56 @@ async function openToolBoxResource(resourceId){
   body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:rgba(255,255,255,0.5);font-size:13px;">Loading…</div>';
 
   try {
+    if(r.kind === 'link' && r.payload_url){
+      // Embed the link inside the back office in an iframe. Some sites (Reliant
+      // / NRG portals etc.) set X-Frame-Options: DENY and won't load in an
+      // iframe — for those we show a fallback "Open in new tab" button after
+      // a short timeout.
+      const url = r.payload_url;
+      body.innerHTML = `
+        <div style="display:flex;flex-direction:column;height:100%;">
+          <div id="tbv-link-bar" style="padding:8px 14px;border-bottom:1px solid rgba(255,255,255,0.08);background:rgba(0,0,0,0.4);display:flex;align-items:center;gap:10px;font-size:11.5px;color:rgba(255,255,255,0.6);flex-shrink:0;">
+            <span style="opacity:0.6;">🔗</span>
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;font-family:monospace;">${escapeHtml(url)}</span>
+            <a href="${escapeHtml(url)}" target="_blank" rel="noopener" style="color:#FFD700;text-decoration:none;font-size:11px;font-weight:700;letter-spacing:1px;white-space:nowrap;">OPEN IN NEW TAB ↗</a>
+          </div>
+          <div id="tbv-link-fallback" style="display:none;padding:32px;color:rgba(255,255,255,0.85);text-align:center;flex:1;">
+            <div style="font-size:42px;margin-bottom:14px;">🔗</div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#fff;margin-bottom:8px;">${escapeHtml(r.title)}</div>
+            <p style="font-size:13.5px;color:rgba(255,255,255,0.55);margin-bottom:20px;max-width:440px;margin-left:auto;margin-right:auto;line-height:1.6;">This site doesn't allow embedding inside the back office. Click below to open it in a new tab.</p>
+            <a href="${escapeHtml(url)}" target="_blank" rel="noopener" class="bo-btn bo-btn-primary" style="text-decoration:none;display:inline-block;padding:12px 24px;font-size:13px;">Open ${escapeHtml(r.title)} ↗</a>
+          </div>
+          <iframe id="tbv-link-frame" src="${escapeHtml(url)}" style="flex:1;width:100%;border:0;background:#fff;" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"></iframe>
+        </div>`;
+      // Detect X-Frame-Options blocks: if the iframe never fires onload within
+      // 6s, assume embedding was refused and show the fallback.
+      const frame = document.getElementById('tbv-link-frame');
+      const fallback = document.getElementById('tbv-link-fallback');
+      let loaded = false;
+      if(frame){
+        frame.addEventListener('load', () => { loaded = true; });
+        setTimeout(() => {
+          if(!loaded && frame && fallback){
+            try {
+              // If we can't read the contentDocument, embed almost certainly failed
+              const doc = frame.contentDocument;
+              if(!doc || doc.readyState === 'loading'){
+                frame.style.display = 'none';
+                fallback.style.display = 'block';
+              }
+            } catch(_){
+              // Cross-origin throw — but if loaded fired, embed worked. If not, fail open.
+              if(!loaded){
+                frame.style.display = 'none';
+                fallback.style.display = 'block';
+              }
+            }
+          }
+        }, 6000);
+      }
+      return;
+    }
+
     if(r.kind === 'html' && r.payload_html){
       // Sandboxed iframe — its CSS won't leak into the back office, and
       // its scripts can't touch the parent (allow-scripts only).
@@ -16004,7 +16056,8 @@ async function openCampaignEditor(campaignId, programId){
       <button class="bo-btn bo-btn-primary" onclick="saveCampaign(${isEdit ? `'${c.id}'` : 'null'},'${programId}')">${isEdit ? 'Save Changes' : 'Create Campaign'}</button>
       <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
     </div>`;
-  document.getElementById('modal-overlay').style.display = 'flex';
+  document.getElementById('modal-box').style.maxWidth = '560px';
+  document.getElementById('modal-backdrop').style.display = 'flex';
 }
 window.openCampaignEditor = openCampaignEditor;
 
@@ -16024,7 +16077,7 @@ async function saveCampaign(existingId, programId){
   const order = parseInt(document.getElementById('ce-order').value, 10) || 100;
 
   if(!idVal){ alert('Campaign ID is required.'); return; }
-  if(!/^[a-z0-9_]+$/.test(idVal)){ alert('Campaign ID must be lowercase letters, numbers, or underscores only (no spaces, hyphens, or special chars).'); return; }
+  if(!/^[a-z0-9_-]+$/.test(idVal)){ alert('Campaign ID must be lowercase letters, numbers, hyphens, or underscores only (no spaces or special chars).'); return; }
   if(!name){ alert('Campaign Name is required.'); return; }
   if(!programId){ alert('Program is required.'); return; }
 
