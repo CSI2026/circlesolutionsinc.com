@@ -2166,6 +2166,19 @@ function _restoreNavState(){
 // PAGE ROUTING
 // ═══════════════════════════════════════════════════════════════
 function showPage(id){
+  // Phase 3.27 — guard against stray "home" navigations stranding a
+  // signed-in user on the marketing landing. Cedric (Android) was hitting
+  // this after the camera confirm: the camera modal removal caused a stray
+  // tap on the back-office topbar's logo (which has onclick="showPage('home')"),
+  // dumping him on the public site. If we're already in the back office and
+  // a signed-in user tries to go to 'home', bounce them right back in.
+  if(id === 'home' && currentProfile){
+    const inBackOffice = document.getElementById('backoffice')?.classList.contains('active');
+    if(inBackOffice){
+      // Already in back office; ignore the spurious nav.
+      return;
+    }
+  }
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   const el = document.getElementById(id);
   if(el) el.classList.add('active');
@@ -2367,7 +2380,16 @@ async function loadCurrentProfile(){
 (async function initAuth(){
   const { data: { session } } = await sb.auth.getSession();
   if(session){
-    const ok = await loadCurrentProfile();
+    // Phase 3.26: retry profile load once if it fails. On iOS Safari, when
+    // the page is restored after the camera evicted the JS context, the
+    // first profile fetch can race with Supabase's auth-refresh and return
+    // null. Without this retry, the user gets dumped at the marketing
+    // landing and assumes they were logged out.
+    let ok = await loadCurrentProfile();
+    if(!ok){
+      await new Promise(r => setTimeout(r, 600));
+      ok = await loadCurrentProfile();
+    }
     if(ok){
       // If they were on a portal page refresh, bring them back; otherwise stay on whatever page
       if(window.location.hash === '#backoffice' || document.getElementById('backoffice')?.classList.contains('active')){
@@ -2402,9 +2424,15 @@ async function loadCurrentProfile(){
     } else if(h === '#apply'){
       showPage('apply-page');
     } else if(h === '' || h === '#'){
-      // Back to home — but only if we're currently on a non-home page AND
-      // the user isn't signed in (otherwise stay in back office).
-      if(!currentProfile){ showPage('home'); }
+      // Phase 3.27 — empty hash means either Android back-button stripped it
+      // or some stray nav cleared it. Signed-in users always bounce back to
+      // the back office (preserving their last view via _restoreNavState).
+      // Anonymous users see the home page.
+      if(currentProfile){
+        enterBackOffice();
+      } else {
+        showPage('home');
+      }
     }
   });
 
@@ -14057,10 +14085,9 @@ async function renderPhotoAuditCheckin(el){
       <div id="pa-selfie-block" class="form-group" style="display:${suggested === 'check_in' ? 'block' : 'none'};">
         <label class="form-label" style="display:flex;align-items:center;gap:8px;">
           <span>🤳 Your Selfie *</span>
-          <span style="font-size:10.5px;color:rgba(255,255,255,0.4);font-weight:400;letter-spacing:0;">— show your badge, head to waist visible</span>
+          <span style="font-size:10.5px;color:rgba(255,255,255,0.4);font-weight:400;letter-spacing:0;">— show your badge, head to waist visible · LIVE CAMERA ONLY</span>
         </label>
-        <input id="pa-selfie" type="file" accept="image/*" capture="user" onchange="paOnSelfieSelected(this)" style="display:none;"/>
-        <button type="button" class="bo-btn bo-btn-primary" style="width:100%;padding:14px;font-size:14px;background:linear-gradient(135deg,#FF6B00,#FF0080);" onclick="document.getElementById('pa-selfie').click()">📸 Take Photo</button>
+        <button type="button" class="bo-btn bo-btn-primary" style="width:100%;padding:14px;font-size:14px;background:linear-gradient(135deg,#FF6B00,#FF0080);" onclick="paLaunchCamera('selfie')">📸 Open Camera</button>
         <div id="pa-selfie-preview" style="margin-top:8px;"></div>
       </div>
 
@@ -14068,10 +14095,9 @@ async function renderPhotoAuditCheckin(el){
       <div class="form-group">
         <label class="form-label" style="display:flex;align-items:center;gap:8px;">
           <span>🖥️ Kiosk Display *</span>
-          <span style="font-size:10.5px;color:rgba(255,255,255,0.4);font-weight:400;letter-spacing:0;">— photo of your station / kiosk</span>
+          <span style="font-size:10.5px;color:rgba(255,255,255,0.4);font-weight:400;letter-spacing:0;">— photo of your station / kiosk · LIVE CAMERA ONLY</span>
         </label>
-        <input id="pa-photo" type="file" accept="image/*" capture="environment" onchange="paOnPhotoSelected(this)" style="display:none;"/>
-        <button type="button" class="bo-btn bo-btn-primary" style="width:100%;padding:14px;font-size:14px;background:linear-gradient(135deg,#FF6B00,#FF0080);" onclick="document.getElementById('pa-photo').click()">📸 Take Photo</button>
+        <button type="button" class="bo-btn bo-btn-primary" style="width:100%;padding:14px;font-size:14px;background:linear-gradient(135deg,#FF6B00,#FF0080);" onclick="paLaunchCamera('kiosk')">📸 Open Camera</button>
         <div id="pa-photo-preview" style="margin-top:8px;"></div>
       </div>
 
@@ -14082,42 +14108,271 @@ async function renderPhotoAuditCheckin(el){
     </div>`;
 }
 
-function paOnPhotoSelected(input){
-  const file = input.files?.[0];
-  const preview = document.getElementById('pa-photo-preview');
-  if(!file){ preview.innerHTML = ''; _paPhotoBlob = null; return; }
-  // Phase 3.25: iOS Safari sometimes reports `lastModified` as the EXIF
-  // capture time (not the moment the file was returned to the input). A
-  // 2-minute window was too tight and rejected genuine fresh photos —
-  // especially when the agent spent a moment composing the shot. We use
-  // 10 minutes here; the geofence GPS check still keeps the audit honest.
-  const ageSeconds = (Date.now() - file.lastModified) / 1000;
-  if(ageSeconds > 600){
-    preview.innerHTML = '<div style="color:#F87171;font-size:12.5px;padding:8px;background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.3);border-radius:6px;">⛔ This photo is more than 10 minutes old. Please re-take it live from the camera.</div>';
-    input.value = '';
-    _paPhotoBlob = null;
-    return;
-  }
-  _paPhotoBlob = file;
-  const url = URL.createObjectURL(file);
-  preview.innerHTML = `<img src="${url}" style="max-width:200px;border-radius:8px;border:2px solid #00FF88;"/><div style="font-size:11px;color:#00FF88;margin-top:4px;">✓ Kiosk photo captured</div>`;
+// ═══════════════════════════════════════════════════════════════
+// LIVE CAMERA CAPTURE (Phase 3.26)
+// ═══════════════════════════════════════════════════════════════
+// Replaces the previous <input type="file" capture> approach which on
+// most platforms let the user pick from the photo gallery instead of
+// actually taking a live photo. This function uses getUserMedia to
+// open a live video stream inside a full-screen modal, draws a snapshot
+// to a canvas on capture, and writes the resulting blob to the audit
+// state. There is no path to upload a saved photo — the gallery option
+// no longer exists. Works on every modern browser (Chrome, Safari 11+,
+// Firefox, Edge, mobile Safari, Chrome Android, etc.).
+let _paCameraStream = null;
+let _paCameraTarget = null;       // 'kiosk' or 'selfie' — set while modal open
+let _paSnappedBlob  = null;       // pending capture awaiting confirm
+
+// Phase 3.26: ensure the camera is always released and nav state is always
+// persisted when the page is unloaded — even if iOS Safari force-evicts it.
+// pagehide fires reliably on iOS where beforeunload does not, so we use both.
+function _paLifecycleCleanup(){
+  try {
+    if(_paCameraStream){
+      _paCameraStream.getTracks().forEach(t => { try { t.stop(); } catch(_){} });
+      _paCameraStream = null;
+    }
+  } catch(_){}
+  try { _persistNavState(); } catch(_){}
+}
+if(!window._paLifecycleHooked){
+  window.addEventListener('pagehide', _paLifecycleCleanup);
+  window.addEventListener('beforeunload', _paLifecycleCleanup);
+  window._paLifecycleHooked = true;
 }
 
-function paOnSelfieSelected(input){
-  const file = input.files?.[0];
-  const preview = document.getElementById('pa-selfie-preview');
-  if(!file){ preview.innerHTML = ''; _paSelfieBlob = null; return; }
-  const ageSeconds = (Date.now() - file.lastModified) / 1000;
-  if(ageSeconds > 600){
-    preview.innerHTML = '<div style="color:#F87171;font-size:12.5px;padding:8px;background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.3);border-radius:6px;">⛔ This selfie is more than 10 minutes old. Please re-take it live from the camera.</div>';
-    input.value = '';
-    _paSelfieBlob = null;
+function paStopCameraStream(){
+  try {
+    if(_paCameraStream){
+      _paCameraStream.getTracks().forEach(t => { try { t.stop(); } catch(_){} });
+      _paCameraStream = null;
+    }
+  } catch(_){}
+}
+
+function paCloseCamera(event){
+  if(event){
+    try { event.preventDefault(); } catch(_){}
+    try { event.stopPropagation(); } catch(_){}
+  }
+  paStopCameraStream();
+  _paCameraTarget = null;
+  _paSnappedBlob = null;
+  // Defer modal removal so the tap event fully resolves first — prevents
+  // tap-through to elements underneath (back-office topbar logo, etc.)
+  setTimeout(() => {
+    const modal = document.getElementById('pa-cam-modal');
+    if(modal) modal.remove();
+  }, 50);
+}
+
+async function paLaunchCamera(target){
+  // target = 'kiosk' (back camera) or 'selfie' (front camera)
+  _paCameraTarget = target;
+  const facingMode = target === 'selfie' ? 'user' : 'environment';
+  const label      = target === 'selfie' ? 'Selfie' : 'Kiosk Photo';
+
+  paStopCameraStream();  // tear down any prior stream
+
+  // Build the camera modal
+  const modal = document.createElement('div');
+  modal.id = 'pa-cam-modal';
+  modal.style.cssText = 'position:fixed;inset:0;background:#000;z-index:100000;display:flex;flex-direction:column;';
+  modal.innerHTML = `
+    <div style="padding:14px 18px;background:rgba(0,0,0,0.85);border-bottom:1px solid rgba(255,255,255,0.08);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-shrink:0;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#fff;letter-spacing:1.5px;">📸 ${label} — LIVE</div>
+      <button type="button" onclick="paCloseCamera(event)" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.2);color:#fff;padding:6px 14px;border-radius:50px;cursor:pointer;font-size:12px;font-weight:600;">✕ Cancel</button>
+    </div>
+    <div id="pa-cam-stage" style="flex:1;display:flex;align-items:center;justify-content:center;background:#000;position:relative;overflow:hidden;">
+      <video id="pa-cam-video" autoplay playsinline muted style="max-width:100%;max-height:100%;display:block;"></video>
+      <canvas id="pa-cam-canvas" style="display:none;max-width:100%;max-height:100%;"></canvas>
+      <div id="pa-cam-status" style="position:absolute;top:14px;left:14px;right:14px;color:#fff;background:rgba(0,0,0,0.7);padding:10px 14px;border-radius:8px;font-size:13px;text-align:center;display:block;">Starting camera…</div>
+    </div>
+    <div id="pa-cam-controls" style="padding:14px 18px;background:rgba(0,0,0,0.85);border-top:1px solid rgba(255,255,255,0.08);display:flex;gap:10px;align-items:center;justify-content:center;flex-shrink:0;">
+      <button id="pa-cam-shoot" type="button" onclick="paSnapPhoto(event)" disabled style="background:linear-gradient(135deg,#FF6B00,#FF0080);border:none;color:#fff;padding:14px 32px;border-radius:50px;cursor:pointer;font-size:14px;font-weight:700;letter-spacing:1px;opacity:0.5;">📸 CAPTURE</button>
+    </div>`;
+  document.body.appendChild(modal);
+
+  const statusEl = document.getElementById('pa-cam-status');
+  const shootBtn = document.getElementById('pa-cam-shoot');
+  const video    = document.getElementById('pa-cam-video');
+
+  // Guardrails
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    statusEl.innerHTML = '⛔ Your browser doesn\'t support live camera. Please update to the latest version of Chrome, Safari, Firefox, or Edge.';
     return;
   }
-  _paSelfieBlob = file;
-  const url = URL.createObjectURL(file);
-  preview.innerHTML = `<img src="${url}" style="max-width:200px;border-radius:8px;border:2px solid #00FF88;"/><div style="font-size:11px;color:#00FF88;margin-top:4px;">✓ Selfie captured</div>`;
+  const isSecure = window.isSecureContext || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+  if(!isSecure){
+    statusEl.innerHTML = '⛔ Live camera requires HTTPS. Contact your admin if this site is on http://.';
+    return;
+  }
+
+  try {
+    let stream;
+    try {
+      // First try the requested facing mode at a modest resolution.
+      // Phase 3.26: dropped from 1280x720 to 960x720 to ease memory
+      // pressure on older iPhones — iOS Safari was unloading the page
+      // after the camera grabbed enough RAM for a full HD buffer +
+      // canvas + JPEG blob simultaneously.
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: facingMode }, width: { ideal: 960 }, height: { ideal: 720 } },
+        audio: false
+      });
+    } catch(_){
+      // Fallback: any available camera (desktops with one webcam, etc.)
+      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    }
+    _paCameraStream = stream;
+    video.srcObject = stream;
+    // Wait until the video has real dimensions before enabling capture
+    await new Promise(resolve => {
+      if(video.readyState >= 2) return resolve();
+      video.addEventListener('loadedmetadata', resolve, { once: true });
+    });
+    statusEl.style.display = 'none';
+    shootBtn.disabled = false;
+    shootBtn.style.opacity = '1';
+  } catch(e){
+    let msg = '⛔ Could not start camera.';
+    if(e && e.name === 'NotAllowedError'){
+      msg = '⛔ Camera permission was denied. Please allow camera access in your browser settings and try again.';
+    } else if(e && e.name === 'NotFoundError'){
+      msg = '⛔ No camera was found on this device.';
+    } else if(e && e.name === 'NotReadableError'){
+      msg = '⛔ The camera is being used by another app. Close other camera apps and try again.';
+    } else if(e && e.message){
+      msg += ' ' + e.message;
+    }
+    statusEl.innerHTML = msg;
+  }
 }
+
+// Snap a frame from the live stream into the canvas. Show a preview-confirm
+// UI so the agent can re-take if it's blurry, then commit on "Use Photo".
+function paSnapPhoto(event){
+  if(event){
+    try { event.preventDefault(); } catch(_){}
+    try { event.stopPropagation(); } catch(_){}
+  }
+  const video = document.getElementById('pa-cam-video');
+  const canvas = document.getElementById('pa-cam-canvas');
+  const controls = document.getElementById('pa-cam-controls');
+  if(!video || !canvas || !controls) return;
+
+  const w = video.videoWidth || 1280;
+  const h = video.videoHeight || 720;
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(video, 0, 0, w, h);
+
+  // Convert to JPEG blob. Quality 0.75 cuts the file from ~1MB to ~250KB
+  // on a 960x720 capture — meaningfully less memory + faster upload on
+  // mobile, with no visible quality loss for kiosk/selfie audits.
+  canvas.toBlob((blob) => {
+    if(!blob){ alert('Capture failed. Please try again.'); return; }
+    _paSnappedBlob = blob;
+    // Swap video for canvas preview
+    video.style.display = 'none';
+    canvas.style.display = 'block';
+    // Swap controls to confirm/retake
+    controls.innerHTML = `
+      <button type="button" onclick="paRetakePhoto(event)" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.25);color:#fff;padding:14px 28px;border-radius:50px;cursor:pointer;font-size:13px;font-weight:600;">↺ Retake</button>
+      <button type="button" onclick="paConfirmSnap(event)" style="background:linear-gradient(135deg,#00FF88,#00C6FF);border:none;color:#000;padding:14px 32px;border-radius:50px;cursor:pointer;font-size:14px;font-weight:700;letter-spacing:1px;">✓ USE PHOTO</button>`;
+  }, 'image/jpeg', 0.75);
+}
+
+function paRetakePhoto(event){
+  if(event){
+    try { event.preventDefault(); } catch(_){}
+    try { event.stopPropagation(); } catch(_){}
+  }
+  const video = document.getElementById('pa-cam-video');
+  const canvas = document.getElementById('pa-cam-canvas');
+  const controls = document.getElementById('pa-cam-controls');
+  if(!video || !canvas || !controls) return;
+  _paSnappedBlob = null;
+  canvas.style.display = 'none';
+  video.style.display = 'block';
+  controls.innerHTML = `
+    <button id="pa-cam-shoot" type="button" onclick="paSnapPhoto(event)" style="background:linear-gradient(135deg,#FF6B00,#FF0080);border:none;color:#fff;padding:14px 32px;border-radius:50px;cursor:pointer;font-size:14px;font-weight:700;letter-spacing:1px;">📸 CAPTURE</button>`;
+}
+
+// Commit the captured blob to the audit state and close the camera modal.
+function paConfirmSnap(event){
+  // Phase 3.27 — prevent the tap on "USE PHOTO" from bubbling to elements
+  // that appear underneath after the modal is removed. On Android Chrome /
+  // Edge, fast taps will hit the layer below if the modal disappears mid-
+  // event — which on the photo audit screen meant landing on the back-
+  // office topbar's logo (onclick="showPage('home')") and getting dumped
+  // on the marketing landing.
+  if(event){
+    try { event.preventDefault(); } catch(_){}
+    try { event.stopPropagation(); } catch(_){}
+  }
+
+  if(!_paSnappedBlob){ alert('No photo captured yet.'); return; }
+
+  // Phase 3.26: stop the camera stream IMMEDIATELY before doing anything
+  // else. iOS Safari was holding the video buffer + canvas + blob all in
+  // memory at once on confirm, which on older iPhones tripped a memory
+  // reclaim and tore the page down. Releasing the camera first frees the
+  // video buffer before we allocate the File + object URL.
+  paStopCameraStream();
+
+  // Snapshot the target NOW because paCloseCamera() will null it.
+  const target = _paCameraTarget;
+  const snappedBlob = _paSnappedBlob;
+
+  // Wrap as a File so downstream code (which assumed File previously) keeps
+  // working. lastModified = now so any future age checks pass automatically.
+  const filename = (target === 'selfie' ? 'selfie' : 'kiosk') + '-' + Date.now() + '.jpg';
+  const file = new File([snappedBlob], filename, { type: 'image/jpeg', lastModified: Date.now() });
+
+  // Render the preview FIRST so the user immediately sees the captured photo
+  // in the form. We defer modal removal to setTimeout so the tap event
+  // finishes resolving before the modal vanishes — this is what stops the
+  // tap from "falling through" to elements below on Android.
+  if(target === 'selfie'){
+    _paSelfieBlob = file;
+    const preview = document.getElementById('pa-selfie-preview');
+    if(preview){
+      const url = URL.createObjectURL(file);
+      preview.innerHTML = `<img src="${url}" style="max-width:200px;border-radius:8px;border:2px solid #00FF88;"/><div style="font-size:11px;color:#00FF88;margin-top:4px;">✓ Live selfie captured</div>`;
+    }
+  } else {
+    _paPhotoBlob = file;
+    const preview = document.getElementById('pa-photo-preview');
+    if(preview){
+      const url = URL.createObjectURL(file);
+      preview.innerHTML = `<img src="${url}" style="max-width:200px;border-radius:8px;border:2px solid #00FF88;"/><div style="font-size:11px;color:#00FF88;margin-top:4px;">✓ Live kiosk photo captured</div>`;
+    }
+  }
+
+  // Snapshot state so the queued cleanup can run safely
+  _paCameraTarget = null;
+  _paSnappedBlob = null;
+
+  // Defer modal removal until the click event fully resolves. This prevents
+  // tap-through on Android where the click would otherwise hit the back-
+  // office topbar (which has onclick="showPage('home')") and dump the user
+  // on the marketing landing.
+  setTimeout(() => {
+    const modal = document.getElementById('pa-cam-modal');
+    if(modal) modal.remove();
+  }, 50);
+
+  // Persist nav state now in case the page unloads before next nav.
+  try { _persistNavState(); } catch(_){}
+}
+
+window.paLaunchCamera  = paLaunchCamera;
+window.paCloseCamera   = paCloseCamera;
+window.paSnapPhoto     = paSnapPhoto;
+window.paRetakePhoto   = paRetakePhoto;
+window.paConfirmSnap   = paConfirmSnap;
 
 // Show/hide the selfie block based on check-in vs check-out radio.
 function paOnTypeChange(){
@@ -14130,8 +14385,6 @@ function paOnTypeChange(){
   // accidentally upload a stale one on check-out.
   if(auditType !== 'check_in'){
     _paSelfieBlob = null;
-    const inp = document.getElementById('pa-selfie');
-    if(inp) inp.value = '';
     const preview = document.getElementById('pa-selfie-preview');
     if(preview) preview.innerHTML = '';
   }
@@ -14237,10 +14490,19 @@ async function submitPhotoAudit(){
   }).select().single();
   if(insertErr){ msg.innerHTML = '<span style="color:#F87171;">' + insertErr.message + '</span>'; return; }
 
-  await notifyAuditSubmitted(audit, passed, storeOpt.text);
-  if(offHoursCheck){
-    try { await notifyOffHoursCheckin(audit, storeOpt.text, offHoursMinutes, auditType); } catch(_){}
-  }
+  // Phase 3.26: Render success FIRST, then fire notifications in the
+  // background. Previously we awaited up to 20+ network calls (one per
+  // recipient × email+notify) before showing the success screen — on a
+  // flaky mobile connection that stretched past Supabase's auth refresh
+  // window and could bounce the agent to the login screen. Notifications
+  // are best-effort; the audit row landing in the DB is what matters
+  // for payroll.
+  (async () => {
+    try { await notifyAuditSubmitted(audit, passed, storeOpt.text); } catch(_){}
+    if(offHoursCheck){
+      try { await notifyOffHoursCheckin(audit, storeOpt.text, offHoursMinutes, auditType); } catch(_){}
+    }
+  })();
 
   if(passed){
     let extras = '';
@@ -14262,7 +14524,7 @@ async function submitPhotoAudit(){
     }
     msg.innerHTML = '<span style="color:#00FF88;font-size:14px;">✓ ' + (auditType === 'check_in' ? 'Checked in' : 'Checked out') + ' successfully.</span>' + extras + `
       <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;justify-content:center;">
-        <button class="bo-btn bo-btn-primary" onclick="renderMainContent()" style="padding:10px 20px;font-size:13px;">📸 Submit Another</button>
+        <button class="bo-btn bo-btn-primary" onclick="boShowAdmin('photo-audit-checkin')" style="padding:10px 20px;font-size:13px;">📸 Submit Another</button>
         <button class="bo-btn bo-btn-ghost" onclick="checkinGoHome()" style="padding:10px 20px;font-size:13px;">✓ Done</button>
       </div>`;
   } else {
@@ -14288,33 +14550,56 @@ window.checkinGoHome = checkinGoHome;
 
 async function notifyAuditSubmitted(audit, passed, storeName){
   const { data: agent } = await sb.from('profiles').select('full_name,email,reports_to').eq('id', currentProfile.id).single();
+
+  // Build recipient list:
+  //   • Agent's direct manager (reports_to)
+  //   • ALL active owners
+  //   • EVERY market manager (MM) assigned to the audit's store
+  //     (Phase 3.26 — Calvin: "also notify the market mgr of that store")
+  // Deduped via Set so an MM who also happens to be the agent's reports_to
+  // only gets one notification.
   const recipientIds = new Set();
   if(agent?.reports_to) recipientIds.add(agent.reports_to);
   const { data: owners } = await sb.from('profiles').select('id').eq('role', 'owner').eq('active', true);
   (owners || []).forEach(o => recipientIds.add(o.id));
 
+  // Store's market manager(s) — pull from store_managers join
+  if(audit.store_id){
+    try {
+      const { data: smRows } = await sb.from('store_managers').select('user_id').eq('store_id', audit.store_id);
+      (smRows || []).forEach(sm => { if(sm.user_id) recipientIds.add(sm.user_id); });
+    } catch(_){}
+  }
+
+  // Drop the agent themselves from the recipient list if they happen to be
+  // an owner or MM of their own store — they don't need to notify themselves.
+  if(currentProfile?.id) recipientIds.delete(currentProfile.id);
+
   const agentName = agent?.full_name || agent?.email || 'agent';
   const distance = Math.round(audit.distance_from_store_meters);
   const action = audit.audit_type === 'check_in' ? 'checked IN' : 'checked OUT';
+  const timeStr = new Date().toLocaleTimeString();
 
   if(passed){
-    if(agent?.reports_to){
+    // ─── Successful audit: notify manager + every owner + store's MM(s) ──
+    for(const rid of recipientIds){
       try {
-        const { data: mgr } = await sb.from('profiles').select('id,email,full_name').eq('id', agent.reports_to).single();
-        if(mgr){
-          await notifyUser(mgr.id, {
+        const { data: r } = await sb.from('profiles').select('id,email,full_name').eq('id', rid).single();
+        if(!r) continue;
+        try {
+          await notifyUser(r.id, {
             type: 'generic',
             title: '✓ ' + agentName + ' ' + action,
-            body: storeName + ' · ' + distance + 'm from store · ' + new Date().toLocaleTimeString()
+            body: storeName + ' · ' + distance + 'm from store · ' + timeStr
           });
-          try {
-            await sendEmailViaFunction('announcement', mgr.email, {
-              title: '✓ ' + agentName + ' ' + action,
-              body: storeName + '\nDistance from store: ' + distance + 'm\nTime: ' + new Date().toLocaleString(),
-              posted_by: 'Circle Solutions Audit System'
-            });
-          } catch(_){}
-        }
+        } catch(_){}
+        try {
+          await sendEmailViaFunction('announcement', r.email, {
+            title: '✓ ' + agentName + ' ' + action,
+            body: storeName + '\nDistance from store: ' + distance + 'm\nTime: ' + new Date().toLocaleString(),
+            posted_by: 'Circle Solutions Audit System'
+          });
+        } catch(_){}
       } catch(_){}
     }
   } else {
@@ -21779,8 +22064,6 @@ window.addCategory = addCategory;
 window.deleteCategory = deleteCategory;
 window.renderMyInventory = renderMyInventory;
 window.renderPhotoAuditCheckin = renderPhotoAuditCheckin;
-window.paOnPhotoSelected = paOnPhotoSelected;
-window.paOnSelfieSelected = paOnSelfieSelected;
 window.paOnTypeChange = paOnTypeChange;
 window.submitPhotoAudit = submitPhotoAudit;
 window.renderPhotoAuditsReview = renderPhotoAuditsReview;
