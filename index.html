@@ -2131,6 +2131,36 @@ let activeCampaignId = null;    // which campaign within the active program (nul
 let activeSubView = 'dashboard';// which sub-section within a program
 let activeAdminView = null;     // which admin view is active (agents, applications, etc.)
 
+// Phase 3.25: persist nav state across page reloads.
+// Mobile Safari frequently discards the JS context when the camera or photo
+// picker is open. When the user returns to the page Safari either restores it
+// from BFCache (best case) or hard-reloads it. To avoid making the agent feel
+// like they got logged out — and especially to keep them on the Daily
+// Check-In screen so they can finish their audit — we mirror the nav state
+// into sessionStorage every time it changes and rehydrate on startup.
+function _persistNavState(){
+  try {
+    sessionStorage.setItem('csi_nav', JSON.stringify({
+      activeAdminView, activeProgramId, activeCampaignId, activeSubView
+    }));
+  } catch(_){}
+}
+function _restoreNavState(){
+  try {
+    const raw = sessionStorage.getItem('csi_nav');
+    if(!raw) return false;
+    const s = JSON.parse(raw);
+    if(s && typeof s === 'object'){
+      if(typeof s.activeAdminView !== 'undefined') activeAdminView  = s.activeAdminView;
+      if(typeof s.activeProgramId !== 'undefined') activeProgramId  = s.activeProgramId;
+      if(typeof s.activeCampaignId !== 'undefined') activeCampaignId = s.activeCampaignId;
+      if(typeof s.activeSubView !== 'undefined')   activeSubView    = s.activeSubView;
+      return true;
+    }
+  } catch(_){}
+  return false;
+}
+
 
 // ═══════════════════════════════════════════════════════════════
 // PAGE ROUTING
@@ -2280,6 +2310,7 @@ async function doLogout(){
   activeCampaignId = null;
   activeSubView = 'dashboard';
   activeAdminView = null;
+  try { sessionStorage.removeItem('csi_nav'); } catch(_){}
   document.getElementById('login-email').value = '';
   document.getElementById('login-password').value = '';
   showPage('home');
@@ -2376,6 +2407,25 @@ async function loadCurrentProfile(){
       if(!currentProfile){ showPage('home'); }
     }
   });
+
+  // Phase 3.25 — BFCache / camera-return recovery.
+  // When iOS Safari restores the page from BFCache (e.g. after the user
+  // returns from the native camera/photo picker), JS execution resumes
+  // with state intact. We just need to make sure we're showing the back
+  // office, not the marketing landing. If the page was hard-reloaded
+  // instead, initAuth above will fire normally and pick up where the
+  // user left off via _restoreNavState().
+  window.addEventListener('pageshow', (ev) => {
+    if(ev.persisted && currentProfile){
+      // State is intact — make sure the back office is showing and
+      // re-render the current view so it picks up any DOM differences.
+      if(window.location.hash !== '#backoffice'){
+        history.replaceState({ inBackOffice: true }, '', '#backoffice');
+      }
+      showPage('backoffice');
+      try { renderMainContent(); } catch(_){}
+    }
+  });
 })();
 
 
@@ -2443,10 +2493,35 @@ function enterBackOffice(){
   // Init in-app notifications
   try { loadNotifications(); subscribeToNotifications(); } catch(_){}
 
-  // Auto-select: owner lands on owner panel; others on first program
+  // Auto-select: owner lands on owner panel; others on first program.
+  // Phase 3.25 — restore previous nav state if present in sessionStorage.
+  // This is critical on mobile: when the camera app is opened from a file
+  // input, iOS Safari often unloads the page, and on return the user would
+  // otherwise land back on their default dashboard instead of the screen
+  // they were filling out (looking like they got logged out).
   const userPrograms = (p.role === 'owner' || p.role === 'admin')
     ? allPrograms.map(x => x.id)
     : (p.programs || []);
+
+  const restored = _restoreNavState();
+  if(restored && (activeAdminView || activeProgramId)){
+    // We have a valid prior screen — render it. Validate the program/campaign
+    // is still accessible (in case the user lost access while away).
+    if(activeProgramId && !userPrograms.includes(activeProgramId) && p.role !== 'owner' && p.role !== 'admin'){
+      activeProgramId = null;
+      activeCampaignId = null;
+    }
+    if(activeProgramId && activeCampaignId){
+      const accessible = getAccessibleCampaignsForProgram(activeProgramId);
+      const isAdminRole = p.role === 'owner' || p.role === 'admin';
+      if(!isAdminRole && !accessible.find(c => c.id === activeCampaignId)){
+        activeCampaignId = null;
+      }
+    }
+    renderMainContent();
+    showPage('backoffice');
+    return;
+  }
 
   if(p.role === 'owner'){
     activeAdminView = 'owner-panel';
@@ -2768,6 +2843,7 @@ function boSelectProgram(programId){
 
   renderSidebar();
   renderMainContent();
+  _persistNavState();
   closeBoSidebar();
   scrollMainToTop();
 }
@@ -2777,6 +2853,7 @@ function boSelectCampaign(campaignId){
   activeSubView = 'dashboard';
   renderSidebar();
   renderMainContent();
+  _persistNavState();
   closeBoSidebar();
   scrollMainToTop();
 }
@@ -2787,6 +2864,7 @@ function boBackToCampaignChooser(){
   activeSubView = 'dashboard';
   renderSidebar();
   renderMainContent();
+  _persistNavState();
   scrollMainToTop();
 }
 
@@ -2800,6 +2878,7 @@ function boShowAdmin(view){
   // Reset recruiting sub-view when navigating into the recruiting nav so it
   // always opens to the hub (not whatever sub-view it was in last time).
   if(view === 'recruiting') window._recruitingView = 'hub';
+  _persistNavState();
   renderSidebar();
   renderMainContent();
   closeBoSidebar();
@@ -2839,6 +2918,7 @@ function boShowView(view){
     window._lbOffset = 0;
     renderMainContent();
   }
+  _persistNavState();
   closeBoSidebar();
   scrollMainToTop();
 }
@@ -14006,9 +14086,14 @@ function paOnPhotoSelected(input){
   const file = input.files?.[0];
   const preview = document.getElementById('pa-photo-preview');
   if(!file){ preview.innerHTML = ''; _paPhotoBlob = null; return; }
+  // Phase 3.25: iOS Safari sometimes reports `lastModified` as the EXIF
+  // capture time (not the moment the file was returned to the input). A
+  // 2-minute window was too tight and rejected genuine fresh photos —
+  // especially when the agent spent a moment composing the shot. We use
+  // 10 minutes here; the geofence GPS check still keeps the audit honest.
   const ageSeconds = (Date.now() - file.lastModified) / 1000;
-  if(ageSeconds > 120){
-    preview.innerHTML = '<div style="color:#F87171;font-size:12.5px;padding:8px;background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.3);border-radius:6px;">⛔ This photo was taken more than 2 minutes ago. Live camera capture only — please use the camera now.</div>';
+  if(ageSeconds > 600){
+    preview.innerHTML = '<div style="color:#F87171;font-size:12.5px;padding:8px;background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.3);border-radius:6px;">⛔ This photo is more than 10 minutes old. Please re-take it live from the camera.</div>';
     input.value = '';
     _paPhotoBlob = null;
     return;
@@ -14023,8 +14108,8 @@ function paOnSelfieSelected(input){
   const preview = document.getElementById('pa-selfie-preview');
   if(!file){ preview.innerHTML = ''; _paSelfieBlob = null; return; }
   const ageSeconds = (Date.now() - file.lastModified) / 1000;
-  if(ageSeconds > 120){
-    preview.innerHTML = '<div style="color:#F87171;font-size:12.5px;padding:8px;background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.3);border-radius:6px;">⛔ This selfie was taken more than 2 minutes ago. Live camera capture only — please use the camera now.</div>';
+  if(ageSeconds > 600){
+    preview.innerHTML = '<div style="color:#F87171;font-size:12.5px;padding:8px;background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.3);border-radius:6px;">⛔ This selfie is more than 10 minutes old. Please re-take it live from the camera.</div>';
     input.value = '';
     _paSelfieBlob = null;
     return;
