@@ -2577,6 +2577,10 @@ function enterBackOffice(){
   }
 
   showPage('backoffice');
+
+  // Phase 3.28: Show the huge flyer banner for unacknowledged alerts +
+  // fresh audit activity. Owner / admin / payroll managers only.
+  try { renderUrgentFlyer(); } catch(e){ console.warn('Flyer render failed:', e); }
 }
 
 function renderSidebar(){
@@ -2666,6 +2670,9 @@ function renderSidebar(){
   }
   if(isOwner || isAdmin || currentProfile.is_payroll_manager){
     adminNavItems.push({ id:'payroll', label:'💵 Payroll' });
+    // Phase 3.28: weekly hours totals + auto-lock alerts
+    adminNavItems.push({ id:'payroll-hours', label:'⏱️ Payroll Hours' });
+    adminNavItems.push({ id:'lock-alerts', label:'🚨 Lock Alerts' });
   }
   if(isOwner || currentProfile.has_master_center_access){
     adminNavItems.push({ id:'onboarding-master', label:'🎯 Onboarding Center' });
@@ -3039,6 +3046,8 @@ function renderMainContent(){
   if(activeAdminView === 'inventory'){ renderInventory(el); return; }
   if(activeAdminView === 'photo-audits-review'){ renderPhotoAuditsReview(el); return; }
   if(activeAdminView === 'payroll'){ renderPayroll(el); return; }
+  if(activeAdminView === 'lock-alerts'){ renderLockAlertsPanel(el); return; }
+  if(activeAdminView === 'payroll-hours'){ renderPayrollHours(el); return; }
   if(activeAdminView === 'photo-audit-checkin'){ renderPhotoAuditCheckin(el); return; }
   if(activeAdminView === 'my-inventory'){ renderMyInventory(el); return; }
   if(activeAdminView === 'agent-profile'){
@@ -14502,6 +14511,18 @@ async function submitPhotoAudit(){
     if(offHoursCheck){
       try { await notifyOffHoursCheckin(audit, storeOpt.text, offHoursMinutes, auditType); } catch(_){}
     }
+    // Phase 3.28: Check for the 2-consecutive-days-with-zero-sales trigger
+    // on EVERY check-in (firing on check-out wouldn't make sense — sales
+    // happen during the shift, so we evaluate as the shift starts).
+    if(auditType === 'check_in'){
+      try {
+        const { data: alertId, error: lockErr } = await sb.rpc('lock_agent_for_no_sales', { p_agent_id: currentProfile.id });
+        if(!lockErr && alertId){
+          // The agent has just been locked out. Alert owner + payroll urgently.
+          try { await notifyNoSalesLock(currentProfile.id, alertId); } catch(_){}
+        }
+      } catch(_){}
+    }
   })();
 
   if(passed){
@@ -14548,20 +14569,434 @@ function checkinGoHome(){
 }
 window.checkinGoHome = checkinGoHome;
 
+// ═══════════════════════════════════════════════════════════════
+// PHASE 3.28 — URGENT FLYER BANNER
+// ═══════════════════════════════════════════════════════════════
+// Renders a large attention-grabbing banner at the top of the back office
+// for owner / admin / payroll-manager users when there are:
+//   (a) unacknowledged agent_lock_alerts rows, OR
+//   (b) photo audits submitted in the last 24h that haven't been seen
+// Both signals are payroll-critical and must not get lost in the bell.
+async function renderUrgentFlyer(){
+  if(!currentProfile) return;
+  const role = currentProfile.role;
+  const isOwner = role === 'owner';
+  const isAdmin = role === 'admin' || isOwner;
+  const isPayroll = !!currentProfile.is_payroll_manager;
+  if(!isAdmin && !isPayroll) return;
+
+  // Find a stable container at the top of the main content area
+  let host = document.getElementById('bo-flyer-host');
+  if(!host){
+    const main = document.querySelector('#backoffice .bo-main') ||
+                 document.querySelector('#backoffice main') ||
+                 document.getElementById('bo-content') ||
+                 document.querySelector('#backoffice');
+    if(!main) return;
+    host = document.createElement('div');
+    host.id = 'bo-flyer-host';
+    host.style.cssText = 'position:sticky;top:0;z-index:5000;';
+    main.insertBefore(host, main.firstChild);
+  }
+  host.innerHTML = '';
+
+  // Pull data
+  const since24h = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+  const [locksR, auditsR] = await Promise.all([
+    sb.from('agent_lock_alerts')
+      .select('id, agent_id, trigger_type, trigger_detail, created_at')
+      .is('acknowledged_at', null)
+      .order('created_at', { ascending: false })
+      .limit(20),
+    sb.from('photo_audits')
+      .select('id, user_id, audit_type, store_id, created_at, geofence_passed')
+      .gte('created_at', since24h)
+      .order('created_at', { ascending: false })
+      .limit(40)
+  ]);
+  const lockAlerts = locksR.data || [];
+  const recentAudits = auditsR.data || [];
+  if(lockAlerts.length === 0 && recentAudits.length === 0) return;
+
+  // Resolve agent + store names for display
+  const agentIds = new Set();
+  lockAlerts.forEach(a => agentIds.add(a.agent_id));
+  recentAudits.forEach(a => agentIds.add(a.user_id));
+  const storeIds = new Set();
+  recentAudits.forEach(a => { if(a.store_id) storeIds.add(a.store_id); });
+  const [agentsR, storesR] = await Promise.all([
+    agentIds.size ? sb.from('profiles').select('id,full_name,email').in('id', Array.from(agentIds)) : Promise.resolve({ data: [] }),
+    storeIds.size ? sb.from('stores').select('id,name').in('id', Array.from(storeIds)) : Promise.resolve({ data: [] })
+  ]);
+  const agentMap = Object.fromEntries((agentsR.data || []).map(p => [p.id, p.full_name || p.email]));
+  const storeMap = Object.fromEntries((storesR.data || []).map(s => [s.id, s.name]));
+
+  // Build flyer markup
+  const lockHtml = lockAlerts.length > 0 ? `
+    <div style="background:linear-gradient(135deg,#7f1d1d,#991b1b);color:#fff;padding:24px 28px;border:3px solid #ef4444;border-radius:14px;margin:14px;box-shadow:0 8px 30px rgba(239,68,68,0.35);">
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px;flex-wrap:wrap;">
+        <div style="font-size:42px;line-height:1;">🚨</div>
+        <div style="flex:1;min-width:240px;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:32px;letter-spacing:2px;color:#fff;line-height:1;">AGENT LOCK ALERTS</div>
+          <div style="font-size:13px;color:#fecaca;margin-top:4px;">${lockAlerts.length} agent${lockAlerts.length === 1 ? '' : 's'} auto-locked for 2 consecutive workdays with zero sales</div>
+        </div>
+        <button onclick="boShowAdmin('lock-alerts')" style="background:#fff;color:#7f1d1d;border:none;padding:12px 24px;border-radius:50px;cursor:pointer;font-size:13px;font-weight:800;letter-spacing:1px;text-transform:uppercase;white-space:nowrap;">Review & Unlock →</button>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        ${lockAlerts.slice(0,5).map(a => {
+          const name = agentMap[a.agent_id] || 'Agent';
+          const td = a.trigger_detail || {};
+          return `<div style="background:rgba(0,0,0,0.25);padding:10px 14px;border-radius:8px;font-size:13.5px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+            <div><strong style="color:#fff;">${escapeHtml(name)}</strong> <span style="color:#fecaca;font-size:12px;">— locked ${new Date(a.created_at).toLocaleString()}</span></div>
+            <div style="font-size:11.5px;color:#fecaca;font-family:monospace;">${td.prior_date || ''} → ${td.today_date || ''} · 0 sales both days</div>
+          </div>`;
+        }).join('')}
+        ${lockAlerts.length > 5 ? `<div style="font-size:12px;color:#fecaca;text-align:center;padding-top:4px;">+ ${lockAlerts.length - 5} more — review panel for full list</div>` : ''}
+      </div>
+    </div>` : '';
+
+  const auditHtml = recentAudits.length > 0 ? `
+    <div style="background:linear-gradient(135deg,#064e3b,#065f46);color:#fff;padding:24px 28px;border:3px solid #10b981;border-radius:14px;margin:14px;box-shadow:0 8px 30px rgba(16,185,129,0.3);">
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px;flex-wrap:wrap;">
+        <div style="font-size:42px;line-height:1;">📸</div>
+        <div style="flex:1;min-width:240px;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:32px;letter-spacing:2px;color:#fff;line-height:1;">PHOTO AUDITS — LAST 24H</div>
+          <div style="font-size:13px;color:#a7f3d0;margin-top:4px;">${recentAudits.length} check-in/check-out${recentAudits.length === 1 ? '' : 's'} logged for payroll</div>
+        </div>
+        <button onclick="boShowAdmin('photo-audits-review')" style="background:#fff;color:#064e3b;border:none;padding:12px 24px;border-radius:50px;cursor:pointer;font-size:13px;font-weight:800;letter-spacing:1px;text-transform:uppercase;white-space:nowrap;">Open Audit Review →</button>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:8px;">
+        ${recentAudits.slice(0,8).map(a => {
+          const name = agentMap[a.user_id] || 'Agent';
+          const sname = storeMap[a.store_id] || '—';
+          const t = a.audit_type === 'check_in' ? '✓ IN' : '✓ OUT';
+          const tColor = a.audit_type === 'check_in' ? '#86efac' : '#7dd3fc';
+          const fraud = !a.geofence_passed;
+          return `<div style="background:rgba(0,0,0,0.25);padding:9px 12px;border-radius:8px;font-size:12.5px;${fraud ? 'border:1px solid #f87171;' : ''}">
+            <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline;">
+              <strong style="color:#fff;">${escapeHtml(name)}</strong>
+              <span style="color:${fraud ? '#fca5a5' : tColor};font-weight:700;font-size:11.5px;">${fraud ? '🚨 FAIL' : t}</span>
+            </div>
+            <div style="font-size:11px;color:#a7f3d0;margin-top:2px;">${escapeHtml(sname)} · ${new Date(a.created_at).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'})}</div>
+          </div>`;
+        }).join('')}
+        ${recentAudits.length > 8 ? `<div style="font-size:11.5px;color:#a7f3d0;align-self:center;text-align:center;padding:6px;">+ ${recentAudits.length - 8} more</div>` : ''}
+      </div>
+    </div>` : '';
+
+  host.innerHTML = lockHtml + auditHtml;
+}
+window.renderUrgentFlyer = renderUrgentFlyer;
+
+
+// ═══════════════════════════════════════════════════════════════
+// PHASE 3.28 — LOCK ALERTS PANEL (owner + payroll managers only)
+// ═══════════════════════════════════════════════════════════════
+async function renderLockAlertsPanel(el){
+  const role = currentProfile.role;
+  const isOwner = role === 'owner';
+  const isPayroll = !!currentProfile.is_payroll_manager;
+  const isAdmin = isOwner || role === 'admin';
+
+  if(!isAdmin && !isPayroll){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied. Only Owner, Admin, or Payroll Manager can view lock alerts.</div>';
+    return;
+  }
+
+  el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading lock alerts…</div>';
+
+  const showHistory = !!window._lockAlertsShowHistory;
+  let q = sb.from('agent_lock_alerts').select('*').order('created_at', { ascending: false });
+  if(!showHistory) q = q.is('acknowledged_at', null);
+  q = q.limit(100);
+
+  const { data: alerts, error } = await q;
+  if(error){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Failed to load alerts: ' + escapeHtml(error.message) + '</div>';
+    return;
+  }
+
+  const list = alerts || [];
+  const agentIds = Array.from(new Set(list.map(a => a.agent_id)));
+  const { data: agents } = agentIds.length
+    ? await sb.from('profiles').select('id,full_name,email,phone,role').in('id', agentIds)
+    : { data: [] };
+  const agentMap = Object.fromEntries((agents || []).map(a => [a.id, a]));
+
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px;flex-wrap:wrap;gap:12px;">
+      <div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">🚨 Lock Alerts</h1>
+        <p style="font-size:14px;color:rgba(255,255,255,0.5);max-width:680px;">Agents automatically locked because they checked in for 2 consecutive workdays with zero sales. ${isOwner || isPayroll ? 'You can unlock here.' : 'Only Owner or Payroll can unlock.'}</p>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="bo-btn bo-btn-ghost" onclick="window._lockAlertsShowHistory = ${!showHistory}; renderMainContent();">${showHistory ? 'Show open only' : 'Show full history'}</button>
+      </div>
+    </div>
+
+    ${list.length === 0 ? `
+      <div class="bo-card" style="text-align:center;padding:40px;">
+        <div style="font-size:46px;margin-bottom:10px;">✓</div>
+        <div style="color:rgba(255,255,255,0.5);font-size:14px;">${showHistory ? 'No lock alerts on record.' : 'No open lock alerts. Everyone is selling.'}</div>
+      </div>
+    ` : `
+      <div style="display:flex;flex-direction:column;gap:12px;">
+        ${list.map(a => {
+          const ag = agentMap[a.agent_id] || {};
+          const name = ag.full_name || ag.email || 'Agent';
+          const phone = ag.phone || '';
+          const open = !a.acknowledged_at;
+          const td = a.trigger_detail || {};
+          return `
+            <div style="background:${open ? 'linear-gradient(135deg, rgba(248,113,113,0.08), rgba(127,29,29,0.04))' : 'rgba(255,255,255,0.02)'};border:1px solid ${open ? 'rgba(248,113,113,0.4)' : 'rgba(255,255,255,0.08)'};border-radius:14px;padding:20px;">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap;">
+                <div style="flex:1;min-width:0;">
+                  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
+                    <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:0.5px;">${escapeHtml(name)}</div>
+                    ${open
+                      ? '<span style="background:rgba(248,113,113,0.2);color:#F87171;padding:3px 10px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1.5px;">🔒 LOCKED</span>'
+                      : '<span style="background:rgba(0,255,136,0.15);color:#00FF88;padding:3px 10px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1.5px;">✓ CLEARED</span>'}
+                  </div>
+                  <div style="font-size:12.5px;color:rgba(255,255,255,0.6);line-height:1.6;">
+                    Auto-locked on <strong>${new Date(a.created_at).toLocaleString()}</strong><br>
+                    Reason: checked in on <strong>${td.prior_date || '—'}</strong> and <strong>${td.today_date || '—'}</strong> with <strong>${td.prior_sales ?? '?'} + ${td.today_sales ?? '?'} = 0 sales</strong>.
+                    ${phone ? `<br>Phone: <a href="tel:${escapeHtml(phone)}" style="color:#00C6FF;text-decoration:none;">${escapeHtml(phone)}</a>` : ''}
+                  </div>
+                  ${a.acknowledged_at ? `
+                    <div style="margin-top:8px;font-size:11.5px;color:rgba(255,255,255,0.45);background:rgba(255,255,255,0.04);padding:8px 12px;border-radius:8px;">
+                      Cleared by ${escapeHtml((agentMap[a.unlocked_by] || {}).full_name || (agentMap[a.unlocked_by] || {}).email || 'someone')} on ${new Date(a.acknowledged_at).toLocaleString()}${a.unlock_notes ? '<br><em style="opacity:0.8;">Notes: ' + escapeHtml(a.unlock_notes) + '</em>' : ''}
+                    </div>` : ''}
+                </div>
+                ${open && (isOwner || isPayroll) ? `
+                  <button class="bo-btn bo-btn-primary" onclick="unlockNoSalesAlert('${a.id}', '${escapeHtml(name).replace(/'/g, "\\'")}')" style="padding:10px 20px;font-size:13px;white-space:nowrap;">↻ Unlock Agent</button>
+                ` : open ? `
+                  <span style="font-size:11.5px;color:rgba(255,255,255,0.4);font-style:italic;">Only owner or payroll can unlock</span>
+                ` : ''}
+              </div>
+            </div>`;
+        }).join('')}
+      </div>
+    `}`;
+}
+
+async function unlockNoSalesAlert(alertId, agentName){
+  const notes = prompt('Unlock ' + agentName + '? Optional notes (e.g. reason or follow-up plan):');
+  if(notes === null) return; // cancelled
+  const { error } = await sb.rpc('unlock_agent_from_no_sales', { p_alert_id: alertId, p_notes: notes || null });
+  if(error){
+    alert('Unlock failed: ' + error.message);
+    return;
+  }
+  renderMainContent();
+  try { renderUrgentFlyer(); } catch(_){}
+}
+window.renderLockAlertsPanel = renderLockAlertsPanel;
+window.unlockNoSalesAlert = unlockNoSalesAlert;
+
+
+// ═══════════════════════════════════════════════════════════════
+// PHASE 3.28 — PAYROLL HOURS VIEW (K-Anna + payroll managers + owner/admin)
+// ═══════════════════════════════════════════════════════════════
+async function renderPayrollHours(el){
+  const role = currentProfile.role;
+  const isPayroll = !!currentProfile.is_payroll_manager;
+  const isAdmin = role === 'owner' || role === 'admin';
+
+  if(!isAdmin && !isPayroll){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied. Only Owner, Admin, or Payroll Manager can view payroll hours.</div>';
+    return;
+  }
+
+  // Default range = prior calendar week (Mon..Sun). Calvin: "totaled at the
+  // end of the previous week for all hours worked"
+  const now = new Date();
+  const dow = now.getDay(); // 0 Sun .. 6 Sat
+  const daysSincePriorSunday = dow === 0 ? 7 : dow;
+  const priorSunday = new Date(now); priorSunday.setDate(now.getDate() - daysSincePriorSunday); priorSunday.setHours(0,0,0,0);
+  const priorMonday = new Date(priorSunday); priorMonday.setDate(priorSunday.getDate() - 6);
+  const fmt = d => d.toISOString().slice(0,10);
+
+  const start = window._payrollStart || fmt(priorMonday);
+  const end   = window._payrollEnd   || fmt(priorSunday);
+
+  el.innerHTML = `
+    <div style="margin-bottom:24px;">
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">⏱️ Payroll Hours</h1>
+      <p style="font-size:14px;color:rgba(255,255,255,0.5);">Total hours worked per agent for the selected pay period. Hours come from check-in/check-out pairs on the same calendar day.</p>
+    </div>
+
+    <div class="bo-card" style="margin-bottom:18px;display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;">
+      <div class="form-group" style="margin:0;">
+        <label class="form-label">FROM</label>
+        <input id="payroll-start" type="date" class="form-input" value="${start}"/>
+      </div>
+      <div class="form-group" style="margin:0;">
+        <label class="form-label">TO</label>
+        <input id="payroll-end" type="date" class="form-input" value="${end}"/>
+      </div>
+      <button class="bo-btn bo-btn-primary" onclick="applyPayrollRange()" style="padding:10px 18px;">Apply</button>
+      <button class="bo-btn bo-btn-ghost" onclick="setPayrollPriorWeek()" style="padding:10px 18px;">Prior week</button>
+      <button class="bo-btn bo-btn-ghost" onclick="setPayrollThisWeek()" style="padding:10px 18px;">This week</button>
+      <button class="bo-btn bo-btn-ghost" onclick="exportPayrollCSV()" style="padding:10px 18px;">⬇ Export CSV</button>
+    </div>
+
+    <div id="payroll-results" class="bo-card" style="color:rgba(255,255,255,0.5);">Loading hours…</div>`;
+
+  await loadPayrollResults(start, end);
+}
+
+async function loadPayrollResults(start, end){
+  const out = document.getElementById('payroll-results');
+  if(!out) return;
+  const { data, error } = await sb.rpc('payroll_weekly_hours', { p_start_date: start, p_end_date: end });
+  if(error){
+    out.innerHTML = '<span style="color:#F87171;">Failed to load: ' + escapeHtml(error.message) + '</span>';
+    return;
+  }
+  const rows = data || [];
+  if(rows.length === 0){
+    out.innerHTML = '<div style="text-align:center;padding:24px;color:rgba(255,255,255,0.5);">No hours recorded in this range.</div>';
+    return;
+  }
+  const totalHrs = rows.reduce((s, r) => s + Number(r.total_hours || 0), 0);
+  const totalSales = rows.reduce((s, r) => s + Number(r.total_sales || 0), 0);
+  out.innerHTML = `
+    <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px;">
+      <div style="background:rgba(0,198,255,0.08);border:1px solid rgba(0,198,255,0.25);border-radius:10px;padding:14px 20px;">
+        <div style="font-size:11px;letter-spacing:1.5px;color:#00C6FF;font-weight:700;">TOTAL HOURS</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:32px;color:#fff;margin-top:2px;">${totalHrs.toFixed(2)}</div>
+      </div>
+      <div style="background:rgba(0,255,136,0.08);border:1px solid rgba(0,255,136,0.25);border-radius:10px;padding:14px 20px;">
+        <div style="font-size:11px;letter-spacing:1.5px;color:#00FF88;font-weight:700;">TOTAL SALES</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:32px;color:#fff;margin-top:2px;">${totalSales}</div>
+      </div>
+      <div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.12);border-radius:10px;padding:14px 20px;">
+        <div style="font-size:11px;letter-spacing:1.5px;color:rgba(255,255,255,0.55);font-weight:700;">AGENTS</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:32px;color:#fff;margin-top:2px;">${rows.length}</div>
+      </div>
+    </div>
+
+    <div style="overflow-x:auto;">
+      <table style="width:100%;border-collapse:collapse;font-size:13px;">
+        <thead>
+          <tr style="border-bottom:1px solid rgba(255,255,255,0.1);">
+            <th style="text-align:left;padding:10px 12px;color:rgba(255,255,255,0.55);font-size:11px;letter-spacing:1.5px;">AGENT</th>
+            <th style="text-align:left;padding:10px 12px;color:rgba(255,255,255,0.55);font-size:11px;letter-spacing:1.5px;">EMAIL</th>
+            <th style="text-align:right;padding:10px 12px;color:rgba(255,255,255,0.55);font-size:11px;letter-spacing:1.5px;">DAYS</th>
+            <th style="text-align:right;padding:10px 12px;color:rgba(255,255,255,0.55);font-size:11px;letter-spacing:1.5px;">HOURS</th>
+            <th style="text-align:right;padding:10px 12px;color:rgba(255,255,255,0.55);font-size:11px;letter-spacing:1.5px;">SALES</th>
+            <th style="text-align:right;padding:10px 12px;color:rgba(255,255,255,0.55);font-size:11px;letter-spacing:1.5px;">SALES/HR</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(r => {
+            const hrs = Number(r.total_hours || 0);
+            const sls = Number(r.total_sales || 0);
+            const sph = hrs > 0 ? (sls / hrs).toFixed(2) : '—';
+            return `<tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+              <td style="padding:10px 12px;color:#fff;font-weight:600;">${escapeHtml(r.agent_name || '')}</td>
+              <td style="padding:10px 12px;color:rgba(255,255,255,0.55);">${escapeHtml(r.agent_email || '')}</td>
+              <td style="padding:10px 12px;text-align:right;color:rgba(255,255,255,0.75);">${r.total_days || 0}</td>
+              <td style="padding:10px 12px;text-align:right;color:#00C6FF;font-weight:700;">${hrs.toFixed(2)}</td>
+              <td style="padding:10px 12px;text-align:right;color:#00FF88;font-weight:700;">${sls}</td>
+              <td style="padding:10px 12px;text-align:right;color:rgba(255,255,255,0.6);">${sph}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function applyPayrollRange(){
+  const s = document.getElementById('payroll-start')?.value;
+  const e = document.getElementById('payroll-end')?.value;
+  if(!s || !e){ alert('Pick both From and To dates.'); return; }
+  if(s > e){ alert('From must be on or before To.'); return; }
+  window._payrollStart = s;
+  window._payrollEnd = e;
+  loadPayrollResults(s, e);
+}
+
+function setPayrollPriorWeek(){
+  const now = new Date();
+  const dow = now.getDay();
+  const daysSincePriorSunday = dow === 0 ? 7 : dow;
+  const sun = new Date(now); sun.setDate(now.getDate() - daysSincePriorSunday); sun.setHours(0,0,0,0);
+  const mon = new Date(sun); mon.setDate(sun.getDate() - 6);
+  const fmt = d => d.toISOString().slice(0,10);
+  window._payrollStart = fmt(mon); window._payrollEnd = fmt(sun);
+  renderMainContent();
+}
+
+function setPayrollThisWeek(){
+  const now = new Date();
+  const dow = now.getDay();
+  const daysSinceMonday = (dow + 6) % 7;
+  const mon = new Date(now); mon.setDate(now.getDate() - daysSinceMonday); mon.setHours(0,0,0,0);
+  const fmt = d => d.toISOString().slice(0,10);
+  window._payrollStart = fmt(mon); window._payrollEnd = fmt(now);
+  renderMainContent();
+}
+
+async function exportPayrollCSV(){
+  const s = window._payrollStart, e = window._payrollEnd;
+  if(!s || !e){ alert('Pick a range first.'); return; }
+  const { data, error } = await sb.rpc('payroll_weekly_hours', { p_start_date: s, p_end_date: e });
+  if(error){ alert('Export failed: ' + error.message); return; }
+  const rows = data || [];
+  const lines = [
+    ['Agent','Email','Days','Hours','Sales','Sales/Hr'].join(',')
+  ];
+  rows.forEach(r => {
+    const hrs = Number(r.total_hours || 0);
+    const sls = Number(r.total_sales || 0);
+    const sph = hrs > 0 ? (sls/hrs).toFixed(2) : '';
+    lines.push([
+      '"' + (r.agent_name || '').replace(/"/g,'""') + '"',
+      '"' + (r.agent_email || '').replace(/"/g,'""') + '"',
+      r.total_days || 0, hrs.toFixed(2), sls, sph
+    ].join(','));
+  });
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `payroll-hours-${s}-to-${e}.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+window.renderPayrollHours = renderPayrollHours;
+window.applyPayrollRange = applyPayrollRange;
+window.setPayrollPriorWeek = setPayrollPriorWeek;
+window.setPayrollThisWeek = setPayrollThisWeek;
+window.exportPayrollCSV = exportPayrollCSV;
+
+
 async function notifyAuditSubmitted(audit, passed, storeName){
   const { data: agent } = await sb.from('profiles').select('full_name,email,reports_to').eq('id', currentProfile.id).single();
 
-  // Build recipient list:
+  // Build recipient list (deduped via Set):
   //   • Agent's direct manager (reports_to)
   //   • ALL active owners
+  //   • ALL active admins
   //   • EVERY market manager (MM) assigned to the audit's store
-  //     (Phase 3.26 — Calvin: "also notify the market mgr of that store")
-  // Deduped via Set so an MM who also happens to be the agent's reports_to
-  // only gets one notification.
+  //   • ALL active payroll managers (is_payroll_manager = true)  — Phase 3.28
+  // Calvin's requirement: "Owner, Market Manager assigned to agent and the
+  // store in the market, and K-Anna + payroll department"
   const recipientIds = new Set();
   if(agent?.reports_to) recipientIds.add(agent.reports_to);
+
   const { data: owners } = await sb.from('profiles').select('id').eq('role', 'owner').eq('active', true);
   (owners || []).forEach(o => recipientIds.add(o.id));
+
+  const { data: admins } = await sb.from('profiles').select('id').eq('role', 'admin').eq('active', true);
+  (admins || []).forEach(a => recipientIds.add(a.id));
+
+  // Payroll managers — K-Anna + anyone else with the flag
+  try {
+    const { data: payroll } = await sb.from('profiles').select('id').eq('is_payroll_manager', true).eq('active', true);
+    (payroll || []).forEach(p => recipientIds.add(p.id));
+  } catch(_){}
 
   // Store's market manager(s) — pull from store_managers join
   if(audit.store_id){
@@ -14572,7 +15007,7 @@ async function notifyAuditSubmitted(audit, passed, storeName){
   }
 
   // Drop the agent themselves from the recipient list if they happen to be
-  // an owner or MM of their own store — they don't need to notify themselves.
+  // an owner / MM / payroll-manager of their own store.
   if(currentProfile?.id) recipientIds.delete(currentProfile.id);
 
   const agentName = agent?.full_name || agent?.email || 'agent';
@@ -14632,6 +15067,55 @@ async function notifyAuditSubmitted(audit, passed, storeName){
         }
       } catch(e){ console.warn('Audit alert failed for', rid, e); }
     }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PHASE 3.28 — NO-SALES AUTO-LOCK NOTIFICATIONS
+// ═══════════════════════════════════════════════════════════════
+// Called immediately after lock_agent_for_no_sales() fires. Sends a
+// flyer-grade urgent notification + email to owner + admins + payroll
+// managers so the lock is visible immediately.
+async function notifyNoSalesLock(agentId, alertId){
+  const { data: agent } = await sb.from('profiles').select('full_name,email').eq('id', agentId).single();
+  if(!agent) return;
+  const agentName = agent.full_name || agent.email || 'Agent';
+
+  const recipientIds = new Set();
+  const { data: owners } = await sb.from('profiles').select('id').eq('role','owner').eq('active',true);
+  (owners || []).forEach(o => recipientIds.add(o.id));
+  const { data: admins } = await sb.from('profiles').select('id').eq('role','admin').eq('active',true);
+  (admins || []).forEach(a => recipientIds.add(a.id));
+  try {
+    const { data: payroll } = await sb.from('profiles').select('id').eq('is_payroll_manager',true).eq('active',true);
+    (payroll || []).forEach(p => recipientIds.add(p.id));
+  } catch(_){}
+
+  const title = '🚨 AGENT LOCKED — NO SALES IN 2 DAYS';
+  const body  = agentName + ' has now checked in 2 consecutive workdays with zero sales. Their account has been auto-locked. Owner or payroll can clear the lock from the Lock Alerts panel.';
+
+  for(const rid of recipientIds){
+    try {
+      const { data: r } = await sb.from('profiles').select('id,email,full_name').eq('id', rid).single();
+      if(!r) continue;
+      try {
+        await notifyUser(r.id, {
+          type: 'urgent',
+          title: title,
+          body: body,
+          link_view: 'lock-alerts'
+        });
+      } catch(_){}
+      try {
+        await sendEmailViaFunction('urgent_custom', r.email, {
+          full_name: r.full_name,
+          subject_line: title,
+          message: body + '\n\nAgent: ' + agentName + '\n\nReview and unlock at: https://circlesolutionsinc.com/#backoffice',
+          action_required: 'Review the lock alert and decide whether to unlock the agent.',
+          sent_by: 'Circle Solutions Audit System'
+        });
+      } catch(_){}
+    } catch(_){}
   }
 }
 
