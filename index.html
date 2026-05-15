@@ -3353,6 +3353,16 @@ async function renderDashboard(el, prog, canManage){
 
 // ─── Enrollment Modal ───
 function openEnrollmentModal(programId){
+  // Phase 3.30 — Route retail-program enrollments through the new Reliant
+  // payroll-approval flow. The agent's leaderboard score only updates AFTER
+  // payroll approves, so we never write directly to the enrollments table
+  // for retail. Other programs (b2b, fiber) still use the legacy form.
+  if(programId === 'retail'){
+    closeAllModals();
+    boShowAdmin('reliant-sale-entry');
+    return;
+  }
+
   const prog = allPrograms.find(p => p.id === programId);
   const showCommission = prog && (prog.leaderboard_metric === 'commission_sum' || prog.leaderboard_show_dollars);
   document.getElementById('modal-box').innerHTML = `
@@ -15052,22 +15062,53 @@ async function renderReliantSaleEntry(el){
 
   el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading…</div>';
 
-  // Pull stores. Stores carry campaign_id since Phase 3.23.
-  let storesQ = sb.from('stores').select('id, name, market_id').eq('active', true);
-  // Filter to retail/reliant where the schema supports it
-  try { storesQ = storesQ.or('campaign_id.eq.reliant,campaign_id.is.null'); } catch(_){}
-  const { data: stores } = await storesQ.order('name');
-  const storeOptions = (stores || []).map(s => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
+  // Phase 3.30: Scope stores to the agent's market. Owner/admin still see
+  // all reliant stores; managers see stores they manage (via store_managers);
+  // agents see stores tagged to their assigned market_id.
+  let stores = [];
+  if(isAdmin){
+    let q = sb.from('stores').select('id, name, market_id, markets(name)').eq('active', true);
+    try { q = q.or('campaign_id.eq.reliant,campaign_id.is.null'); } catch(_){}
+    const { data } = await q.order('name');
+    stores = data || [];
+  } else if(role === 'manager'){
+    // Managers see only stores they're assigned to as MM
+    const { data: smRows } = await sb.from('store_managers').select('store_id').eq('user_id', currentProfile.id);
+    const ids = (smRows || []).map(x => x.store_id);
+    if(ids.length){
+      let q = sb.from('stores').select('id, name, market_id, markets(name)').eq('active', true).in('id', ids);
+      try { q = q.or('campaign_id.eq.reliant,campaign_id.is.null'); } catch(_){}
+      const { data } = await q.order('name');
+      stores = data || [];
+    }
+  } else {
+    // Agents: stores in their assigned market
+    if(currentProfile.market_id){
+      let q = sb.from('stores').select('id, name, market_id, markets(name)').eq('active', true).eq('market_id', currentProfile.market_id);
+      try { q = q.or('campaign_id.eq.reliant,campaign_id.is.null'); } catch(_){}
+      const { data } = await q.order('name');
+      stores = data || [];
+    }
+  }
 
-  const today = new Date().toISOString().slice(0,10);
+  const storeOptions = stores.map(s => {
+    const mktName = s.markets?.name ? ' — ' + s.markets.name : '';
+    return `<option value="${s.id}">${escapeHtml(s.name + mktName)}</option>`;
+  }).join('');
+
+  const noStoresMsg = stores.length === 0
+    ? `<div style="background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.3);border-radius:8px;padding:10px 14px;margin-bottom:14px;color:#F87171;font-size:12.5px;">⛔ No stores are assigned to your market yet. Ask your manager to add stores to your market before submitting a sale.</div>`
+    : '';
 
   el.innerHTML = `
     <div style="margin-bottom:24px;max-width:680px;">
       <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">⚡ Submit Reliant Sale</h1>
-      <p style="font-size:14px;color:rgba(255,255,255,0.5);">Fill out this form for every Reliant customer enrollment. All sales are reviewed by the payroll department before they count toward your leaderboard ranking. Date and time of submission are tracked automatically.</p>
+      <p style="font-size:14px;color:rgba(255,255,255,0.5);">Log a new Reliant customer enrollment. Payroll reviews and approves — once approved, your scoreboard and leaderboard update automatically. Date and time stamped on submit.</p>
     </div>
 
     <div class="bo-card" style="max-width:680px;">
+      ${noStoresMsg}
+
       <div class="form-group">
         <label class="form-label">CUSTOMER NAME *</label>
         <input id="rs-name" class="form-input" placeholder="Full name as on the agreement" maxlength="120"/>
@@ -15075,10 +15116,11 @@ async function renderReliantSaleEntry(el){
 
       <div class="form-group">
         <label class="form-label">STORE *</label>
-        <select id="rs-store" class="form-input">
-          <option value="">— Pick the store where they signed up —</option>
+        <select id="rs-store" class="form-input" ${stores.length === 0 ? 'disabled' : ''}>
+          <option value="">— Pick the store —</option>
           ${storeOptions}
         </select>
+        <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">${stores.length} store${stores.length === 1 ? '' : 's'} in your market.</div>
       </div>
 
       <div class="form-group">
@@ -15086,21 +15128,10 @@ async function renderReliantSaleEntry(el){
         <input id="rs-account" class="form-input" placeholder="Reliant account number" maxlength="40"/>
       </div>
 
-      <div class="form-group">
-        <label class="form-label">INSTALL DATE *</label>
-        <input id="rs-install" type="date" class="form-input" value="${today}"/>
-        <div style="font-size:11px;color:rgba(255,255,255,0.45);margin-top:4px;">Defaults to today. Change if the install is scheduled for a different day.</div>
-      </div>
-
-      <div class="form-group">
-        <label class="form-label">NOTES (optional)</label>
-        <textarea id="rs-notes" class="form-input" rows="2" placeholder="Anything payroll should know — e.g., same-day connect, Spanish welcome packet, etc."></textarea>
-      </div>
-
       <div id="rs-msg" style="margin:10px 0;min-height:18px;font-size:13px;"></div>
 
       <div style="display:flex;gap:10px;flex-wrap:wrap;">
-        <button class="bo-btn bo-btn-primary" onclick="submitReliantSale()" style="padding:12px 24px;font-size:14px;background:linear-gradient(135deg,#FF6B00,#FF0080);">Submit for Approval →</button>
+        <button class="bo-btn bo-btn-primary" onclick="submitReliantSale()" style="padding:12px 24px;font-size:14px;background:linear-gradient(135deg,#FF6B00,#FF0080);" ${stores.length === 0 ? 'disabled' : ''}>Submit for Approval →</button>
         <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('reliant-my-sales')" style="padding:12px 24px;font-size:14px;">View My Submissions</button>
       </div>
 
@@ -15119,13 +15150,17 @@ async function submitReliantSale(){
   const name    = (document.getElementById('rs-name')?.value || '').trim();
   const storeId = document.getElementById('rs-store')?.value || '';
   const account = (document.getElementById('rs-account')?.value || '').trim();
-  const install = document.getElementById('rs-install')?.value || '';
-  const notes   = (document.getElementById('rs-notes')?.value || '').trim();
+  // Phase 3.30 — install date is auto-set to today (sale = enrollment moment).
+  // If payroll needs to record a future install, they can edit the
+  // resulting daily_sales row directly. Removing the field cuts agent
+  // friction (Calvin: "all we need to input is customer name and
+  // account number").
+  const install = new Date().toISOString().slice(0,10);
+  const notes   = null;
 
   if(!name)    { msg.innerHTML = '<span style="color:#F87171;">Customer name is required.</span>'; return; }
   if(!storeId) { msg.innerHTML = '<span style="color:#F87171;">Pick the store.</span>'; return; }
   if(!account) { msg.innerHTML = '<span style="color:#F87171;">Account number is required.</span>'; return; }
-  if(!install) { msg.innerHTML = '<span style="color:#F87171;">Install date is required.</span>'; return; }
 
   msg.innerHTML = '<span style="color:rgba(255,255,255,0.5);">Submitting…</span>';
 
@@ -15134,7 +15169,7 @@ async function submitReliantSale(){
     p_customer_name: name,
     p_account_number: account,
     p_install_date: install,
-    p_notes: notes || null
+    p_notes: notes
   });
 
   if(error){
@@ -15142,10 +15177,10 @@ async function submitReliantSale(){
     return;
   }
 
-  msg.innerHTML = '<span style="color:#00FF88;">✓ Submitted. Payroll has been notified for review.</span>';
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Submitted. Payroll and the store manager have been notified for review.</span>';
 
-  // Fire notifications in the background — owner + admin + payroll + agent's manager.
-  // Phase 3.29 spec from Calvin: "as soon as it's submitted"
+  // Fire notifications in the background — owner + admin + payroll + agent's
+  // direct manager + the MM(s) of the store the sale was logged at.
   (async () => {
     try {
       await notifyReliantSaleSubmitted({
@@ -15162,7 +15197,6 @@ async function submitReliantSale(){
   // Reset the form for the next entry
   document.getElementById('rs-name').value = '';
   document.getElementById('rs-account').value = '';
-  document.getElementById('rs-notes').value = '';
   document.getElementById('rs-name')?.focus();
   try { renderUrgentFlyer(); } catch(_){}
 }
@@ -15174,7 +15208,10 @@ async function notifyReliantSaleSubmitted(payload){
   const { data: agent } = await sb.from('profiles').select('full_name,email,reports_to').eq('id', currentProfile.id).single();
   const agentName = agent?.full_name || agent?.email || 'Agent';
 
-  // Recipients: owner + admin + payroll managers + agent's direct manager.
+  // Recipients: owner + admin + payroll managers + agent's direct manager
+  // + every market manager assigned to THE STORE the sale was logged at.
+  // Calvin: "the market manager will also get a notification that the
+  // agent submitted a sale (pending office approval)"
   const recipientIds = new Set();
   const { data: owners } = await sb.from('profiles').select('id').eq('role','owner').eq('active',true);
   (owners || []).forEach(o => recipientIds.add(o.id));
@@ -15185,6 +15222,16 @@ async function notifyReliantSaleSubmitted(payload){
     (payroll || []).forEach(p => recipientIds.add(p.id));
   } catch(_){}
   if(agent?.reports_to) recipientIds.add(agent.reports_to);
+
+  // Store's MM(s) — from store_managers join
+  if(payload.storeId){
+    try {
+      const { data: smRows } = await sb.from('store_managers').select('user_id').eq('store_id', payload.storeId);
+      (smRows || []).forEach(sm => { if(sm.user_id) recipientIds.add(sm.user_id); });
+    } catch(_){}
+  }
+
+  // Don't notify the agent themselves (in case they're also an MM at the store)
   if(currentProfile?.id) recipientIds.delete(currentProfile.id);
 
   // Resolve store name
@@ -15362,7 +15409,7 @@ window.rejectReliant = rejectReliant;
 
 
 async function notifyReliantSaleDecision(pendingId, decision){
-  // Pull the row to get agent + customer info
+  // Pull the row to get agent + customer + store info
   const { data: row } = await sb.from('pending_reliant_sales').select('*').eq('id', pendingId).single();
   if(!row) return;
   const { data: agent } = await sb.from('profiles').select('id,full_name,email,reports_to').eq('id', row.agent_id).single();
@@ -15371,35 +15418,50 @@ async function notifyReliantSaleDecision(pendingId, decision){
   const recipientIds = new Set();
   recipientIds.add(agent.id);
   if(agent.reports_to) recipientIds.add(agent.reports_to);
-  // On approval, also ping owner so they see it landed on the leaderboard.
+
+  // On approval, also notify owner + store MMs so their scoreboard
+  // updates land in their notifications too. Phase 3.30 — Calvin: "when
+  // it updates as accurate the agents scoreboard and the market managers
+  // scoreboard updates to the new enrollment number(s) for the week".
   if(decision === 'approved'){
     const { data: owners } = await sb.from('profiles').select('id').eq('role','owner').eq('active',true);
     (owners || []).forEach(o => recipientIds.add(o.id));
+    if(row.store_id){
+      try {
+        const { data: smRows } = await sb.from('store_managers').select('user_id').eq('store_id', row.store_id);
+        (smRows || []).forEach(sm => { if(sm.user_id) recipientIds.add(sm.user_id); });
+      } catch(_){}
+    }
   }
 
+  const agentName = agent.full_name || agent.email || 'Agent';
   const title = decision === 'approved'
-    ? '✓ Your Reliant sale was approved'
-    : '✕ Your Reliant sale needs a fix';
-  const body = decision === 'approved'
+    ? '✓ Reliant sale approved — leaderboard updated'
+    : '✕ Reliant sale needs a fix';
+  const bodyAgent = decision === 'approved'
     ? 'Your enrollment for ' + row.customer_name + ' has been approved. The sale is now on the leaderboard.'
     : 'Your enrollment for ' + row.customer_name + ' was rejected. Reason: ' + (row.rejection_reason || '(no reason given)') + '. Fix and resubmit from the Reliant Sale form.';
+  const bodyOther = decision === 'approved'
+    ? agentName + '\'s enrollment for ' + row.customer_name + ' was approved. Your scoreboard now includes this sale.'
+    : agentName + '\'s enrollment for ' + row.customer_name + ' was rejected. Reason: ' + (row.rejection_reason || '(no reason given)');
 
   for(const rid of recipientIds){
     try {
       const { data: r } = await sb.from('profiles').select('id,email,full_name').eq('id', rid).single();
       if(!r) continue;
+      const useBody = (rid === agent.id) ? bodyAgent : bodyOther;
       try {
         await notifyUser(r.id, {
           type: decision === 'approved' ? 'generic' : 'urgent',
           title: title,
-          body: body,
+          body: useBody,
           link_view: rid === agent.id ? 'reliant-my-sales' : 'reliant-pending-approvals'
         });
       } catch(_){}
       try {
         await sendEmailViaFunction('announcement', r.email, {
           title: title,
-          body: body,
+          body: useBody,
           posted_by: 'Circle Solutions Reliant System'
         });
       } catch(_){}
@@ -15502,9 +15564,7 @@ async function resubmitRejectedReliant(pendingId){
     sourceId: row.id,
     customer_name: row.customer_name,
     store_id: row.store_id,
-    account_number: row.account_number,
-    install_date: row.install_date,
-    notes: row.notes
+    account_number: row.account_number
   };
   boShowAdmin('reliant-sale-entry');
   // After render, populate fields
@@ -15514,8 +15574,6 @@ async function resubmitRejectedReliant(pendingId){
     const n = document.getElementById('rs-name');     if(n) n.value = pre.customer_name || '';
     const s = document.getElementById('rs-store');    if(s) s.value = pre.store_id || '';
     const a = document.getElementById('rs-account');  if(a) a.value = pre.account_number || '';
-    const i = document.getElementById('rs-install');  if(i) i.value = pre.install_date || i.value;
-    const nt= document.getElementById('rs-notes');    if(nt) nt.value = pre.notes || '';
     window._reliantPrefill = null;
   }, 200);
 }
