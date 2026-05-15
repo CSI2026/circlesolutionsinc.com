@@ -2673,7 +2673,16 @@ function renderSidebar(){
     // Phase 3.28: weekly hours totals + auto-lock alerts
     adminNavItems.push({ id:'payroll-hours', label:'⏱️ Payroll Hours' });
     adminNavItems.push({ id:'lock-alerts', label:'🚨 Lock Alerts' });
+    // Phase 3.29: Reliant sales awaiting payroll approval
+    adminNavItems.push({ id:'reliant-pending-approvals', label:'⚡ Reliant Approvals' });
   }
+  // Phase 3.29 — Reliant agent/MM company-section items.
+  // Only show to users tagged into the reliant campaign (or owner/admin
+  // who can see everything anyway via the admin section).
+  const inReliantCampaign =
+    isOwner || isAdmin ||
+    currentProfile.campaign_id === 'reliant' ||
+    (Array.isArray(currentProfile.campaigns) && currentProfile.campaigns.includes('reliant'));
   if(isOwner || currentProfile.has_master_center_access){
     adminNavItems.push({ id:'onboarding-master', label:'🎯 Onboarding Center' });
   }
@@ -2686,7 +2695,7 @@ function renderSidebar(){
   let openSection = sessionStorage.getItem('bo_open_section');
   if(activeAdminView){
     // If currently viewing an admin item, open the section that contains it
-    const inCompany = ['global-docs','my-forms','my-contracts','my-credentials','leaderboard','photo-audit-checkin','my-inventory'].includes(activeAdminView);
+    const inCompany = ['global-docs','my-forms','my-contracts','my-credentials','leaderboard','photo-audit-checkin','my-inventory','reliant-sale-entry','reliant-my-sales'].includes(activeAdminView);
     const inAccount = ['profile','credentials'].includes(activeAdminView);
     if(inCompany) openSection = 'company';
     else if(inAccount) openSection = 'account';
@@ -2737,6 +2746,13 @@ function renderSidebar(){
     // Daily Check-In moved into Retail Energy → Tool Box (one-tap access alongside other daily tools)
     { id:'my-inventory', label:'📦 My Inventory', show:'async-myinv' }
   ];
+  // Phase 3.29: Reliant sales — visible to anyone in the reliant campaign
+  // OR to managers / owner / admin (who can submit on an agent's behalf or
+  // monitor activity).
+  if(inReliantCampaign){
+    companyItems.push({ id:'reliant-sale-entry', label:'⚡ Submit Reliant Sale', show:true });
+    companyItems.push({ id:'reliant-my-sales',   label:'📊 My Reliant Sales',   show:true });
+  }
   const companyBody = companyItems.map(it => `
     <button class="bo-nav-item ${activeAdminView === it.id ? 'active' : ''}"
             data-conditional="${it.show === 'async-checkin' ? 'checkin' : it.show === 'async-myinv' ? 'myinv' : it.show === 'async-onboarding' ? 'onboarding' : ''}"
@@ -3048,6 +3064,9 @@ function renderMainContent(){
   if(activeAdminView === 'payroll'){ renderPayroll(el); return; }
   if(activeAdminView === 'lock-alerts'){ renderLockAlertsPanel(el); return; }
   if(activeAdminView === 'payroll-hours'){ renderPayrollHours(el); return; }
+  if(activeAdminView === 'reliant-sale-entry'){ renderReliantSaleEntry(el); return; }
+  if(activeAdminView === 'reliant-pending-approvals'){ renderReliantPendingApprovals(el); return; }
+  if(activeAdminView === 'reliant-my-sales'){ renderReliantMySales(el); return; }
   if(activeAdminView === 'photo-audit-checkin'){ renderPhotoAuditCheckin(el); return; }
   if(activeAdminView === 'my-inventory'){ renderMyInventory(el); return; }
   if(activeAdminView === 'agent-profile'){
@@ -14602,7 +14621,7 @@ async function renderUrgentFlyer(){
 
   // Pull data
   const since24h = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
-  const [locksR, auditsR] = await Promise.all([
+  const [locksR, auditsR, pendingR] = await Promise.all([
     sb.from('agent_lock_alerts')
       .select('id, agent_id, trigger_type, trigger_detail, created_at')
       .is('acknowledged_at', null)
@@ -14612,18 +14631,27 @@ async function renderUrgentFlyer(){
       .select('id, user_id, audit_type, store_id, created_at, geofence_passed')
       .gte('created_at', since24h)
       .order('created_at', { ascending: false })
-      .limit(40)
+      .limit(40),
+    // Phase 3.29 — pending Reliant sales awaiting approval
+    sb.from('pending_reliant_sales')
+      .select('id, agent_id, store_id, customer_name, account_number, install_date, submitted_at')
+      .eq('status', 'pending')
+      .order('submitted_at', { ascending: false })
+      .limit(20)
   ]);
   const lockAlerts = locksR.data || [];
   const recentAudits = auditsR.data || [];
-  if(lockAlerts.length === 0 && recentAudits.length === 0) return;
+  const pendingReliant = pendingR.data || [];
+  if(lockAlerts.length === 0 && recentAudits.length === 0 && pendingReliant.length === 0) return;
 
   // Resolve agent + store names for display
   const agentIds = new Set();
   lockAlerts.forEach(a => agentIds.add(a.agent_id));
   recentAudits.forEach(a => agentIds.add(a.user_id));
+  pendingReliant.forEach(p => agentIds.add(p.agent_id));
   const storeIds = new Set();
   recentAudits.forEach(a => { if(a.store_id) storeIds.add(a.store_id); });
+  pendingReliant.forEach(p => { if(p.store_id) storeIds.add(p.store_id); });
   const [agentsR, storesR] = await Promise.all([
     agentIds.size ? sb.from('profiles').select('id,full_name,email').in('id', Array.from(agentIds)) : Promise.resolve({ data: [] }),
     storeIds.size ? sb.from('stores').select('id,name').in('id', Array.from(storeIds)) : Promise.resolve({ data: [] })
@@ -14684,7 +14712,34 @@ async function renderUrgentFlyer(){
       </div>
     </div>` : '';
 
-  host.innerHTML = lockHtml + auditHtml;
+  // Phase 3.29 — Pending Reliant sales awaiting payroll approval (yellow)
+  const reliantHtml = pendingReliant.length > 0 ? `
+    <div style="background:linear-gradient(135deg,#78350f,#92400e);color:#fff;padding:24px 28px;border:3px solid #f59e0b;border-radius:14px;margin:14px;box-shadow:0 8px 30px rgba(245,158,11,0.32);">
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px;flex-wrap:wrap;">
+        <div style="font-size:42px;line-height:1;">⚡</div>
+        <div style="flex:1;min-width:240px;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:32px;letter-spacing:2px;color:#fff;line-height:1;">PENDING RELIANT SALES</div>
+          <div style="font-size:13px;color:#fde68a;margin-top:4px;">${pendingReliant.length} enrollment${pendingReliant.length === 1 ? '' : 's'} awaiting payroll approval before they hit the leaderboard</div>
+        </div>
+        <button onclick="boShowAdmin('reliant-pending-approvals')" style="background:#fff;color:#78350f;border:none;padding:12px 24px;border-radius:50px;cursor:pointer;font-size:13px;font-weight:800;letter-spacing:1px;text-transform:uppercase;white-space:nowrap;">Review & Approve →</button>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:8px;">
+        ${pendingReliant.slice(0,8).map(p => {
+          const agName = agentMap[p.agent_id] || 'Agent';
+          const sName  = storeMap[p.store_id]  || '—';
+          return `<div style="background:rgba(0,0,0,0.25);padding:10px 14px;border-radius:8px;font-size:12.5px;">
+            <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline;">
+              <strong style="color:#fff;">${escapeHtml(p.customer_name)}</strong>
+              <span style="color:#fde68a;font-size:11px;">${new Date(p.submitted_at).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'})}</span>
+            </div>
+            <div style="font-size:11px;color:#fde68a;margin-top:2px;">${escapeHtml(agName)} · ${escapeHtml(sName)} · acct ${escapeHtml(p.account_number)}</div>
+          </div>`;
+        }).join('')}
+        ${pendingReliant.length > 8 ? `<div style="font-size:11.5px;color:#fde68a;align-self:center;text-align:center;padding:6px;">+ ${pendingReliant.length - 8} more</div>` : ''}
+      </div>
+    </div>` : '';
+
+  host.innerHTML = reliantHtml + lockHtml + auditHtml;
 }
 window.renderUrgentFlyer = renderUrgentFlyer;
 
@@ -14970,6 +15025,501 @@ window.applyPayrollRange = applyPayrollRange;
 window.setPayrollPriorWeek = setPayrollPriorWeek;
 window.setPayrollThisWeek = setPayrollThisWeek;
 window.exportPayrollCSV = exportPayrollCSV;
+
+
+// ═══════════════════════════════════════════════════════════════
+// PHASE 3.29 — RELIANT RETAIL SALES (payroll-gated approval)
+// ═══════════════════════════════════════════════════════════════
+// Three views:
+//   • renderReliantSaleEntry        — agent/MM submit form
+//   • renderReliantPendingApprovals — owner+admin+payroll approval panel
+//   • renderReliantMySales          — agent's own list with status badges
+// ═══════════════════════════════════════════════════════════════
+
+async function renderReliantSaleEntry(el){
+  // Load stores the agent has access to. For agents, restrict to assigned
+  // stores (via store_managers + their market). For owner/admin we let
+  // them pick any retail store. Reliant-only — non-reliant users redirected.
+  const role = currentProfile.role;
+  const isAdmin = role === 'owner' || role === 'admin';
+  const isReliant = isAdmin
+    || currentProfile.campaign_id === 'reliant'
+    || (Array.isArray(currentProfile.campaigns) && currentProfile.campaigns.includes('reliant'));
+  if(!isReliant){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">This form is only for agents and managers tagged into the Reliant Energy campaign.</div>';
+    return;
+  }
+
+  el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading…</div>';
+
+  // Pull stores. Stores carry campaign_id since Phase 3.23.
+  let storesQ = sb.from('stores').select('id, name, market_id').eq('active', true);
+  // Filter to retail/reliant where the schema supports it
+  try { storesQ = storesQ.or('campaign_id.eq.reliant,campaign_id.is.null'); } catch(_){}
+  const { data: stores } = await storesQ.order('name');
+  const storeOptions = (stores || []).map(s => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
+
+  const today = new Date().toISOString().slice(0,10);
+
+  el.innerHTML = `
+    <div style="margin-bottom:24px;max-width:680px;">
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">⚡ Submit Reliant Sale</h1>
+      <p style="font-size:14px;color:rgba(255,255,255,0.5);">Fill out this form for every Reliant customer enrollment. All sales are reviewed by the payroll department before they count toward your leaderboard ranking. Date and time of submission are tracked automatically.</p>
+    </div>
+
+    <div class="bo-card" style="max-width:680px;">
+      <div class="form-group">
+        <label class="form-label">CUSTOMER NAME *</label>
+        <input id="rs-name" class="form-input" placeholder="Full name as on the agreement" maxlength="120"/>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">STORE *</label>
+        <select id="rs-store" class="form-input">
+          <option value="">— Pick the store where they signed up —</option>
+          ${storeOptions}
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">ACCOUNT NUMBER *</label>
+        <input id="rs-account" class="form-input" placeholder="Reliant account number" maxlength="40"/>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">INSTALL DATE *</label>
+        <input id="rs-install" type="date" class="form-input" value="${today}"/>
+        <div style="font-size:11px;color:rgba(255,255,255,0.45);margin-top:4px;">Defaults to today. Change if the install is scheduled for a different day.</div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">NOTES (optional)</label>
+        <textarea id="rs-notes" class="form-input" rows="2" placeholder="Anything payroll should know — e.g., same-day connect, Spanish welcome packet, etc."></textarea>
+      </div>
+
+      <div id="rs-msg" style="margin:10px 0;min-height:18px;font-size:13px;"></div>
+
+      <div style="display:flex;gap:10px;flex-wrap:wrap;">
+        <button class="bo-btn bo-btn-primary" onclick="submitReliantSale()" style="padding:12px 24px;font-size:14px;background:linear-gradient(135deg,#FF6B00,#FF0080);">Submit for Approval →</button>
+        <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('reliant-my-sales')" style="padding:12px 24px;font-size:14px;">View My Submissions</button>
+      </div>
+
+      <div style="margin-top:18px;padding:12px 14px;background:rgba(255,193,7,0.08);border:1px solid rgba(255,193,7,0.25);border-radius:8px;font-size:12.5px;color:#FFD700;line-height:1.55;">
+        <strong>How it works:</strong> Submit your enrollment — payroll reviews it — once approved your sale lands on the scoreboard, your ranking updates, and your owner + payroll get notified. If something needs correction, payroll will reject with a note and you can fix and resubmit.
+      </div>
+    </div>`;
+
+  setTimeout(()=>{ document.getElementById('rs-name')?.focus(); }, 50);
+}
+
+async function submitReliantSale(){
+  const msg = document.getElementById('rs-msg');
+  if(!msg) return;
+  msg.innerHTML = '';
+  const name    = (document.getElementById('rs-name')?.value || '').trim();
+  const storeId = document.getElementById('rs-store')?.value || '';
+  const account = (document.getElementById('rs-account')?.value || '').trim();
+  const install = document.getElementById('rs-install')?.value || '';
+  const notes   = (document.getElementById('rs-notes')?.value || '').trim();
+
+  if(!name)    { msg.innerHTML = '<span style="color:#F87171;">Customer name is required.</span>'; return; }
+  if(!storeId) { msg.innerHTML = '<span style="color:#F87171;">Pick the store.</span>'; return; }
+  if(!account) { msg.innerHTML = '<span style="color:#F87171;">Account number is required.</span>'; return; }
+  if(!install) { msg.innerHTML = '<span style="color:#F87171;">Install date is required.</span>'; return; }
+
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.5);">Submitting…</span>';
+
+  const { data: pendingId, error } = await sb.rpc('submit_reliant_sale', {
+    p_store_id: storeId,
+    p_customer_name: name,
+    p_account_number: account,
+    p_install_date: install,
+    p_notes: notes || null
+  });
+
+  if(error){
+    msg.innerHTML = '<span style="color:#F87171;">Submit failed: ' + escapeHtml(error.message) + '</span>';
+    return;
+  }
+
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Submitted. Payroll has been notified for review.</span>';
+
+  // Fire notifications in the background — owner + admin + payroll + agent's manager.
+  // Phase 3.29 spec from Calvin: "as soon as it's submitted"
+  (async () => {
+    try {
+      await notifyReliantSaleSubmitted({
+        pendingId: pendingId,
+        customerName: name,
+        accountNumber: account,
+        installDate: install,
+        notes: notes,
+        storeId: storeId
+      });
+    } catch(e){ console.warn('Reliant notify failed:', e); }
+  })();
+
+  // Reset the form for the next entry
+  document.getElementById('rs-name').value = '';
+  document.getElementById('rs-account').value = '';
+  document.getElementById('rs-notes').value = '';
+  document.getElementById('rs-name')?.focus();
+  try { renderUrgentFlyer(); } catch(_){}
+}
+window.submitReliantSale = submitReliantSale;
+window.renderReliantSaleEntry = renderReliantSaleEntry;
+
+
+async function notifyReliantSaleSubmitted(payload){
+  const { data: agent } = await sb.from('profiles').select('full_name,email,reports_to').eq('id', currentProfile.id).single();
+  const agentName = agent?.full_name || agent?.email || 'Agent';
+
+  // Recipients: owner + admin + payroll managers + agent's direct manager.
+  const recipientIds = new Set();
+  const { data: owners } = await sb.from('profiles').select('id').eq('role','owner').eq('active',true);
+  (owners || []).forEach(o => recipientIds.add(o.id));
+  const { data: admins } = await sb.from('profiles').select('id').eq('role','admin').eq('active',true);
+  (admins || []).forEach(a => recipientIds.add(a.id));
+  try {
+    const { data: payroll } = await sb.from('profiles').select('id').eq('is_payroll_manager',true).eq('active',true);
+    (payroll || []).forEach(p => recipientIds.add(p.id));
+  } catch(_){}
+  if(agent?.reports_to) recipientIds.add(agent.reports_to);
+  if(currentProfile?.id) recipientIds.delete(currentProfile.id);
+
+  // Resolve store name
+  let storeName = '';
+  if(payload.storeId){
+    const { data: s } = await sb.from('stores').select('name').eq('id', payload.storeId).maybeSingle();
+    storeName = s?.name || '';
+  }
+
+  const title = '⚡ NEW RELIANT SALE — needs approval';
+  const body  = agentName + ' submitted a Reliant enrollment for ' + payload.customerName +
+                (storeName ? ' at ' + storeName : '') +
+                ' (acct ' + payload.accountNumber + ', install ' + payload.installDate + ').';
+
+  for(const rid of recipientIds){
+    try {
+      const { data: r } = await sb.from('profiles').select('id,email,full_name').eq('id', rid).single();
+      if(!r) continue;
+      try {
+        await notifyUser(r.id, {
+          type: 'urgent',
+          title: title,
+          body: body,
+          link_view: 'reliant-pending-approvals'
+        });
+      } catch(_){}
+      try {
+        await sendEmailViaFunction('urgent_custom', r.email, {
+          full_name: r.full_name,
+          subject_line: title,
+          message: body + '\n\nReview & approve at https://circlesolutionsinc.com/#backoffice (Reliant Approvals panel).',
+          action_required: 'Approve or reject this sale.',
+          sent_by: 'Circle Solutions Reliant System'
+        });
+      } catch(_){}
+    } catch(_){}
+  }
+}
+
+
+async function renderReliantPendingApprovals(el){
+  const role = currentProfile.role;
+  const isPayroll = !!currentProfile.is_payroll_manager;
+  const canDecide = role === 'owner' || role === 'admin' || isPayroll;
+  if(!canDecide){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied. Owner, Admin, or Payroll Manager only.</div>';
+    return;
+  }
+
+  el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading pending Reliant sales…</div>';
+
+  const showAll = !!window._reliantShowAllStatuses;
+  let q = sb.from('pending_reliant_sales').select('*').order('submitted_at', { ascending: false });
+  if(!showAll) q = q.eq('status', 'pending');
+  q = q.limit(200);
+
+  const { data: rows, error } = await q;
+  if(error){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Failed to load: ' + escapeHtml(error.message) + '</div>';
+    return;
+  }
+  const list = rows || [];
+
+  // Resolve agent + store names
+  const agentIds = Array.from(new Set(list.map(r => r.agent_id).filter(Boolean)));
+  const storeIds = Array.from(new Set(list.map(r => r.store_id).filter(Boolean)));
+  const [agentsR, storesR] = await Promise.all([
+    agentIds.length ? sb.from('profiles').select('id,full_name,email,phone').in('id', agentIds) : Promise.resolve({ data: [] }),
+    storeIds.length ? sb.from('stores').select('id,name').in('id', storeIds) : Promise.resolve({ data: [] })
+  ]);
+  const agentMap = Object.fromEntries((agentsR.data || []).map(a => [a.id, a]));
+  const storeMap = Object.fromEntries((storesR.data || []).map(s => [s.id, s.name]));
+
+  const pendingCount = list.filter(r => r.status === 'pending').length;
+
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px;flex-wrap:wrap;gap:12px;">
+      <div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">⚡ Reliant Approvals</h1>
+        <p style="font-size:14px;color:rgba(255,255,255,0.5);max-width:680px;">Reliant retail sales submitted by agents. Approving a sale increments the agent's daily count and immediately updates the leaderboard. Rejecting sends a notification back to the agent with your reason.</p>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="bo-btn bo-btn-ghost" onclick="window._reliantShowAllStatuses = ${!showAll}; renderMainContent();">${showAll ? 'Show pending only' : 'Show full history'}</button>
+      </div>
+    </div>
+
+    ${list.length === 0 ? `
+      <div class="bo-card" style="text-align:center;padding:40px;">
+        <div style="font-size:46px;margin-bottom:10px;">✓</div>
+        <div style="color:rgba(255,255,255,0.5);font-size:14px;">${showAll ? 'No Reliant sales submitted yet.' : 'No pending Reliant sales. All caught up.'}</div>
+      </div>
+    ` : `
+      ${pendingCount > 0 && !showAll ? `<div style="font-size:11px;letter-spacing:2px;color:rgba(255,255,255,0.5);margin-bottom:8px;">${pendingCount} PENDING</div>` : ''}
+      <div style="display:flex;flex-direction:column;gap:12px;">
+        ${list.map(r => {
+          const ag = agentMap[r.agent_id] || {};
+          const agName = ag.full_name || ag.email || 'Agent';
+          const storeName = storeMap[r.store_id] || '—';
+          const pending  = r.status === 'pending';
+          const approved = r.status === 'approved';
+          const rejected = r.status === 'rejected';
+          const tone = pending ? '#FFD700' : approved ? '#00FF88' : '#F87171';
+          const bg   = pending ? 'rgba(255,215,0,0.08)' : approved ? 'rgba(0,255,136,0.05)' : 'rgba(248,113,113,0.05)';
+          const badge = pending
+            ? '<span style="background:rgba(255,215,0,0.18);color:#FFD700;padding:3px 10px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1.5px;">⏳ PENDING</span>'
+            : approved
+              ? '<span style="background:rgba(0,255,136,0.18);color:#00FF88;padding:3px 10px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1.5px;">✓ APPROVED</span>'
+              : '<span style="background:rgba(248,113,113,0.18);color:#F87171;padding:3px 10px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1.5px;">✕ REJECTED</span>';
+          return `
+            <div style="background:${bg};border:1px solid ${tone}40;border-radius:14px;padding:18px;">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap;">
+                <div style="flex:1;min-width:0;">
+                  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px;">
+                    <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:0.5px;">${escapeHtml(r.customer_name)}</div>
+                    ${badge}
+                  </div>
+                  <div style="font-size:12.5px;color:rgba(255,255,255,0.6);line-height:1.6;">
+                    Agent: <strong style="color:#fff;">${escapeHtml(agName)}</strong> · Store: <strong style="color:#fff;">${escapeHtml(storeName)}</strong><br>
+                    Account: <span style="font-family:monospace;color:#fff;">${escapeHtml(r.account_number)}</span> · Install: <strong style="color:#fff;">${r.install_date}</strong><br>
+                    Submitted: ${new Date(r.submitted_at).toLocaleString()}
+                    ${r.notes ? `<br>Notes: <em style="color:rgba(255,255,255,0.7);">${escapeHtml(r.notes)}</em>` : ''}
+                    ${r.rejection_reason ? `<br><span style="color:#F87171;">Rejection: ${escapeHtml(r.rejection_reason)}</span>` : ''}
+                    ${approved && r.decided_at ? `<br>Approved: ${new Date(r.decided_at).toLocaleString()}` : ''}
+                    ${rejected && r.decided_at ? `<br>Rejected: ${new Date(r.decided_at).toLocaleString()}` : ''}
+                  </div>
+                </div>
+                ${pending ? `
+                  <div style="display:flex;flex-direction:column;gap:6px;min-width:160px;">
+                    <button class="bo-btn bo-btn-primary" onclick="approveReliant('${r.id}', '${escapeHtml(r.customer_name).replace(/'/g,"\\'")}')" style="padding:10px 18px;font-size:12.5px;background:linear-gradient(135deg,#00FF88,#00C6FF);color:#000;">✓ Approve</button>
+                    <button class="bo-btn bo-btn-ghost" onclick="rejectReliant('${r.id}', '${escapeHtml(r.customer_name).replace(/'/g,"\\'")}')" style="padding:10px 18px;font-size:12.5px;color:#F87171;border-color:rgba(248,113,113,0.4);">✕ Reject</button>
+                  </div>
+                ` : ''}
+              </div>
+            </div>`;
+        }).join('')}
+      </div>
+    `}`;
+}
+window.renderReliantPendingApprovals = renderReliantPendingApprovals;
+
+
+async function approveReliant(pendingId, customerName){
+  if(!confirm('Approve the Reliant sale for ' + customerName + '?\n\nThis will add 1 to the agent\'s Retail count for the install date and update the leaderboard.')) return;
+  const { error } = await sb.rpc('approve_reliant_sale', { p_pending_id: pendingId });
+  if(error){ alert('Approval failed: ' + error.message); return; }
+
+  // Notify the agent + their manager + owner
+  (async () => {
+    try { await notifyReliantSaleDecision(pendingId, 'approved'); } catch(_){}
+  })();
+
+  renderMainContent();
+  try { renderUrgentFlyer(); } catch(_){}
+}
+
+async function rejectReliant(pendingId, customerName){
+  const reason = prompt('Reject the Reliant sale for ' + customerName + '?\n\nGive a reason the agent can read and act on (e.g. "Account # is wrong format — should be 10 digits"). They can fix and resubmit:');
+  if(reason === null) return; // cancelled
+  if(!reason || !reason.trim()){
+    alert('A reason is required so the agent knows what to fix.');
+    return;
+  }
+  const { error } = await sb.rpc('reject_reliant_sale', { p_pending_id: pendingId, p_reason: reason });
+  if(error){ alert('Rejection failed: ' + error.message); return; }
+
+  (async () => {
+    try { await notifyReliantSaleDecision(pendingId, 'rejected'); } catch(_){}
+  })();
+
+  renderMainContent();
+  try { renderUrgentFlyer(); } catch(_){}
+}
+window.approveReliant = approveReliant;
+window.rejectReliant = rejectReliant;
+
+
+async function notifyReliantSaleDecision(pendingId, decision){
+  // Pull the row to get agent + customer info
+  const { data: row } = await sb.from('pending_reliant_sales').select('*').eq('id', pendingId).single();
+  if(!row) return;
+  const { data: agent } = await sb.from('profiles').select('id,full_name,email,reports_to').eq('id', row.agent_id).single();
+  if(!agent) return;
+
+  const recipientIds = new Set();
+  recipientIds.add(agent.id);
+  if(agent.reports_to) recipientIds.add(agent.reports_to);
+  // On approval, also ping owner so they see it landed on the leaderboard.
+  if(decision === 'approved'){
+    const { data: owners } = await sb.from('profiles').select('id').eq('role','owner').eq('active',true);
+    (owners || []).forEach(o => recipientIds.add(o.id));
+  }
+
+  const title = decision === 'approved'
+    ? '✓ Your Reliant sale was approved'
+    : '✕ Your Reliant sale needs a fix';
+  const body = decision === 'approved'
+    ? 'Your enrollment for ' + row.customer_name + ' has been approved. The sale is now on the leaderboard.'
+    : 'Your enrollment for ' + row.customer_name + ' was rejected. Reason: ' + (row.rejection_reason || '(no reason given)') + '. Fix and resubmit from the Reliant Sale form.';
+
+  for(const rid of recipientIds){
+    try {
+      const { data: r } = await sb.from('profiles').select('id,email,full_name').eq('id', rid).single();
+      if(!r) continue;
+      try {
+        await notifyUser(r.id, {
+          type: decision === 'approved' ? 'generic' : 'urgent',
+          title: title,
+          body: body,
+          link_view: rid === agent.id ? 'reliant-my-sales' : 'reliant-pending-approvals'
+        });
+      } catch(_){}
+      try {
+        await sendEmailViaFunction('announcement', r.email, {
+          title: title,
+          body: body,
+          posted_by: 'Circle Solutions Reliant System'
+        });
+      } catch(_){}
+    } catch(_){}
+  }
+}
+
+
+async function renderReliantMySales(el){
+  el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading your Reliant sales…</div>';
+  const { data: rows, error } = await sb.from('pending_reliant_sales')
+    .select('*')
+    .eq('agent_id', currentProfile.id)
+    .order('submitted_at', { ascending: false })
+    .limit(200);
+  if(error){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Failed to load: ' + escapeHtml(error.message) + '</div>';
+    return;
+  }
+  const list = rows || [];
+  const storeIds = Array.from(new Set(list.map(r => r.store_id).filter(Boolean)));
+  const { data: stores } = storeIds.length
+    ? await sb.from('stores').select('id,name').in('id', storeIds)
+    : { data: [] };
+  const storeMap = Object.fromEntries((stores || []).map(s => [s.id, s.name]));
+
+  const pending  = list.filter(r => r.status === 'pending').length;
+  const approved = list.filter(r => r.status === 'approved').length;
+  const rejected = list.filter(r => r.status === 'rejected').length;
+
+  el.innerHTML = `
+    <div style="margin-bottom:24px;">
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">📊 My Reliant Sales</h1>
+      <p style="font-size:14px;color:rgba(255,255,255,0.5);">Every Reliant enrollment you've submitted, with status.</p>
+    </div>
+
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:18px;">
+      <div style="background:rgba(255,215,0,0.08);border:1px solid rgba(255,215,0,0.25);border-radius:10px;padding:14px 20px;">
+        <div style="font-size:11px;letter-spacing:1.5px;color:#FFD700;font-weight:700;">PENDING</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:32px;color:#fff;margin-top:2px;">${pending}</div>
+      </div>
+      <div style="background:rgba(0,255,136,0.08);border:1px solid rgba(0,255,136,0.25);border-radius:10px;padding:14px 20px;">
+        <div style="font-size:11px;letter-spacing:1.5px;color:#00FF88;font-weight:700;">APPROVED</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:32px;color:#fff;margin-top:2px;">${approved}</div>
+      </div>
+      <div style="background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.25);border-radius:10px;padding:14px 20px;">
+        <div style="font-size:11px;letter-spacing:1.5px;color:#F87171;font-weight:700;">REJECTED</div>
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:32px;color:#fff;margin-top:2px;">${rejected}</div>
+      </div>
+      <button class="bo-btn bo-btn-primary" onclick="boShowAdmin('reliant-sale-entry')" style="padding:12px 24px;font-size:13px;background:linear-gradient(135deg,#FF6B00,#FF0080);align-self:center;">+ Submit Another Sale</button>
+    </div>
+
+    ${list.length === 0 ? `
+      <div class="bo-card" style="text-align:center;padding:40px;">
+        <div style="font-size:46px;margin-bottom:10px;">📊</div>
+        <div style="color:rgba(255,255,255,0.5);font-size:14px;">You haven't submitted any Reliant sales yet.</div>
+      </div>
+    ` : `
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        ${list.map(r => {
+          const storeName = storeMap[r.store_id] || '—';
+          const tone = r.status === 'pending' ? '#FFD700' : r.status === 'approved' ? '#00FF88' : '#F87171';
+          const badge = r.status === 'pending'
+            ? '<span style="background:rgba(255,215,0,0.18);color:#FFD700;padding:3px 10px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1.5px;">⏳ PENDING</span>'
+            : r.status === 'approved'
+              ? '<span style="background:rgba(0,255,136,0.18);color:#00FF88;padding:3px 10px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1.5px;">✓ APPROVED</span>'
+              : '<span style="background:rgba(248,113,113,0.18);color:#F87171;padding:3px 10px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1.5px;">✕ REJECTED — fix & resubmit</span>';
+          return `
+            <div style="background:rgba(255,255,255,0.03);border:1px solid ${tone}30;border-radius:12px;padding:14px 18px;">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
+                <div style="flex:1;min-width:0;">
+                  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px;">
+                    <div style="font-weight:700;color:#fff;font-size:15px;">${escapeHtml(r.customer_name)}</div>
+                    ${badge}
+                  </div>
+                  <div style="font-size:12px;color:rgba(255,255,255,0.55);line-height:1.6;">
+                    ${escapeHtml(storeName)} · acct <span style="font-family:monospace;">${escapeHtml(r.account_number)}</span> · install ${r.install_date}<br>
+                    Submitted ${new Date(r.submitted_at).toLocaleString()}
+                    ${r.rejection_reason ? `<br><span style="color:#F87171;">Rejection: ${escapeHtml(r.rejection_reason)}</span>` : ''}
+                  </div>
+                </div>
+                ${r.status === 'rejected' ? `
+                  <button class="bo-btn bo-btn-primary" onclick="resubmitRejectedReliant('${r.id}')" style="padding:8px 14px;font-size:12px;">↻ Fix & Resubmit</button>
+                ` : ''}
+              </div>
+            </div>`;
+        }).join('')}
+      </div>
+    `}`;
+}
+window.renderReliantMySales = renderReliantMySales;
+
+
+// Pre-fill the submit form with a rejected sale's data so the agent can correct + resubmit.
+async function resubmitRejectedReliant(pendingId){
+  const { data: row } = await sb.from('pending_reliant_sales').select('*').eq('id', pendingId).single();
+  if(!row){ alert('Sale not found.'); return; }
+  // Stash for the form to pick up
+  window._reliantPrefill = {
+    sourceId: row.id,
+    customer_name: row.customer_name,
+    store_id: row.store_id,
+    account_number: row.account_number,
+    install_date: row.install_date,
+    notes: row.notes
+  };
+  boShowAdmin('reliant-sale-entry');
+  // After render, populate fields
+  setTimeout(() => {
+    const pre = window._reliantPrefill;
+    if(!pre) return;
+    const n = document.getElementById('rs-name');     if(n) n.value = pre.customer_name || '';
+    const s = document.getElementById('rs-store');    if(s) s.value = pre.store_id || '';
+    const a = document.getElementById('rs-account');  if(a) a.value = pre.account_number || '';
+    const i = document.getElementById('rs-install');  if(i) i.value = pre.install_date || i.value;
+    const nt= document.getElementById('rs-notes');    if(nt) nt.value = pre.notes || '';
+    window._reliantPrefill = null;
+  }, 200);
+}
+window.resubmitRejectedReliant = resubmitRejectedReliant;
 
 
 async function notifyAuditSubmitted(audit, passed, storeName){
