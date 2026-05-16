@@ -3713,6 +3713,9 @@ async function renderLeaderboard(el, prog){
   const tally = {};
   (enrollments || []).forEach(e => {
     if(!e.profiles || !e.profiles.active) return;
+    // Phase 3.32 — exclude admin + owner from leaderboards entirely.
+    // Calvin: "admins work for CSI not sales agents".
+    if(e.profiles.role === 'admin' || e.profiles.role === 'owner') return;
     const uid = e.user_id;
     if(!tally[uid]){
       tally[uid] = {
@@ -5425,6 +5428,51 @@ async function _getMySalesAggregates(userId, programId){
   return { weekly, monthly, today: todayCount, week, month };
 }
 
+// Phase 3.32 — team aggregates for the manager scoreboard tile.
+// Managers usually have ZERO personal sales (they aren't on the floor
+// selling), so the personal-sales tile on their scoreboard always read 0
+// and never moved when their agents sold. This function returns the SUM
+// of (manager's own + direct reports') sales for the week, month, today —
+// drop-in compatible shape with _getMySalesAggregates.
+// Calvin: "the agents score board updates but the mangers dont".
+async function _getMyTeamAggregates(managerId, programId){
+  const week  = _scoreboardWeekRange();
+  const month = _scoreboardMonthRange();
+  const today = new Date().toISOString().slice(0,10);
+
+  // Pull every user who reports to this manager + the manager themselves.
+  // We can't rely on _myDirectReportIds because it may not be prewarmed
+  // when this is first called; query fresh to be safe.
+  const { data: reports } = await sb.from('profiles')
+    .select('id, role')
+    .eq('reports_to', managerId);
+  const teamIds = [managerId].concat((reports || [])
+    .filter(r => r.role !== 'admin' && r.role !== 'owner')   // exclude CSI back-office
+    .map(r => r.id));
+
+  // Same straddle-month logic as _getMySalesAggregates
+  const startStr = (week.mondayStr < month.firstStr) ? week.mondayStr : month.firstStr;
+  const endStr   = (week.sundayStr > month.lastStr)  ? week.sundayStr : month.lastStr;
+
+  const { data, error } = await sb.from('daily_sales')
+    .select('sale_date, count, program_id, user_id')
+    .in('user_id', teamIds)
+    .gte('sale_date', startStr)
+    .lte('sale_date', endStr);
+
+  if(error || !data) return { weekly: 0, monthly: 0, today: 0, week, month, teamSize: teamIds.length };
+
+  let weekly = 0, monthly = 0, todayCount = 0;
+  const targetProg = (programId || '').trim().toLowerCase();
+  for(const row of data){
+    if((row.program_id || '').trim().toLowerCase() !== targetProg) continue;
+    if(row.sale_date >= month.firstStr && row.sale_date <= month.lastStr) monthly += row.count;
+    if(row.sale_date >= week.mondayStr  && row.sale_date <= week.sundayStr) weekly += row.count;
+    if(row.sale_date === today) todayCount += row.count;
+  }
+  return { weekly, monthly, today: todayCount, week, month, teamSize: teamIds.length };
+}
+
 async function _getProgramLeaderboard(programId){
   const week = _scoreboardWeekRange();
 
@@ -5438,6 +5486,7 @@ async function _getProgramLeaderboard(programId){
     sb.from('profiles').select('id, full_name, email, role, avatar_url, programs')
       .contains('programs', [programId])
       .eq('active', true)
+      .not('role', 'in', '(admin,owner)')
   ]);
 
   if(rowsErr) console.warn('[leaderboard] error:', rowsErr);
@@ -5461,6 +5510,33 @@ async function _getProgramLeaderboard(programId){
 }
 
 // ─── Scoreboard widget ────────────────────────────────────────────────
+// Phase 3.32: Force every visible scoreboard mount to re-render so the
+// dashboard reflects new sales the moment they land in daily_sales (either
+// via Daily Sales Entry save OR Reliant approval). Without this hook, the
+// scoreboard widget only renders once on dashboard mount and shows stale
+// counts until the user navigates away and back.
+function _bustScoreboardCache(){
+  // Re-render every mounted scoreboard widget on the page. There's one
+  // mount node per program (id="bo-scoreboard-mount-<programId>").
+  try {
+    document.querySelectorAll('[id^="bo-scoreboard-mount-"]').forEach(node => {
+      const programId = node.id.replace('bo-scoreboard-mount-', '');
+      if(programId){
+        try { renderScoreboardWidget(programId); } catch(_){}
+      }
+    });
+  } catch(_){}
+  // Also re-render the main content area in case a leaderboard is showing.
+  // Defer to next tick so any pending Supabase write has time to commit.
+  setTimeout(() => {
+    try {
+      const onLeaderboard = activeAdminView === 'leaderboard' || activeSubView === 'leaderboard';
+      if(onLeaderboard) renderMainContent();
+    } catch(_){}
+  }, 250);
+}
+window._bustScoreboardCache = _bustScoreboardCache;
+
 async function renderScoreboardWidget(programId){
   const mountId = 'bo-scoreboard-mount-' + programId;
   const mount = document.getElementById(mountId);
@@ -5472,8 +5548,12 @@ async function renderScoreboardWidget(programId){
   const isMgr = me.role === 'manager' || me.role === 'team_lead';
   const roleBucket = isMgr ? 'manager' : 'agent';
 
+  // Phase 3.32 — for managers, the scoreboard tile reflects TEAM totals
+  // (manager + their direct reports) instead of the manager's own personal
+  // sales. Managers don't sell directly; their tile should move when their
+  // agents sell. Calvin: "the agents score board updates but the mangers dont".
   const [agg, goals, leaderboard] = await Promise.all([
-    _getMySalesAggregates(me.id, programId),
+    isMgr ? _getMyTeamAggregates(me.id, programId) : _getMySalesAggregates(me.id, programId),
     _getEffectiveSalesGoal(me.id, programId, roleBucket),
     _getProgramLeaderboard(programId)
   ]);
@@ -5748,9 +5828,13 @@ async function renderDailySalesEntry(el){
   const programFilter = window._dseProgram || (currentProfile.programs?.[0] || (allPrograms[0] || {}).id);
 
   // Fetch agents in scope
+  // Phase 3.32 — admins and owner are CSI back-office staff, not sales
+  // people. They should never appear on the sales entry roster, leaderboard,
+  // or scoreboard. Calvin: "admins work for CSI not sales agents".
   let agentQuery = sb.from('profiles').select('id, full_name, email, role, programs, market_id, reports_to')
     .eq('active', true)
     .contains('programs', [programFilter])
+    .not('role', 'in', '(admin,owner)')
     .order('full_name');
   if(isMgr && !isAdmin && !isOnboarding){
     // MM sees only their direct reports + themselves
@@ -5906,6 +5990,13 @@ async function saveAllDailySales(programId, dateStr){
 
   msg.innerHTML = '<span style="color:#00FF88;">✓ Saved ' + rows.length + ' contractor' + (rows.length === 1 ? '' : 's') + '.</span>';
   setTimeout(() => { if(msg && msg.innerHTML.includes('✓ Saved')) msg.innerHTML = ''; }, 2400);
+
+  // Phase 3.32 — bust the scoreboard cache so the next render shows the
+  // updated counts. The personal scoreboard widget caches aggregates per
+  // (user, program) in memory; without this, agents see stale numbers
+  // until they navigate away and back. Calvin: "the dashboard for the
+  // agent and managers updates for new sales that week and that month".
+  try { _bustScoreboardCache(); } catch(_){}
 }
 
 window.renderDailySalesEntry = renderDailySalesEntry;
@@ -12941,8 +13032,29 @@ async function openStoreEditor(storeId){
   }
   const [{ data: markets }, { data: managers }] = await Promise.all([
     sb.from('markets').select('id,name').order('name'),
-    sb.from('profiles').select('id,full_name,email,market_id').eq('active', true).eq('role', 'manager').order('full_name')
+    sb.from('profiles').select('id,full_name,email,market_id,campaign_id,campaigns').eq('active', true).eq('role', 'manager').order('full_name')
   ]);
+
+  // Phase 3.31: filter managers to those tagged into the store's campaign.
+  // Calvin: "we need to only have agent profiles that are associated with
+  // that campaign available to be a market manager over any stores".
+  // We default the picker to all managers when the store has no campaign
+  // yet (new-store flow before campaign is picked), and re-filter on the
+  // fly when the campaign dropdown changes.
+  function _filterManagersByCampaign(allMgrs, campaignId){
+    if(!campaignId) return allMgrs;
+    return (allMgrs || []).filter(m => {
+      if(m.campaign_id === campaignId) return true;
+      if(Array.isArray(m.campaigns) && m.campaigns.includes(campaignId)) return true;
+      return false;
+    });
+  }
+  // Initial campaign at open: edit -> s.campaign_id; new -> null
+  let initialCampaignId = s.campaign_id || null;
+  let visibleManagers = _filterManagersByCampaign(managers, initialCampaignId);
+  // Expose so the campaign-change handler can re-filter
+  window._storeEditorAllManagers = managers;
+  window._storeEditorAssignedMMs = assignedMMs;
 
   document.getElementById('modal-box').innerHTML = `
     <h2 style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:#fff;margin-bottom:14px;letter-spacing:1px;">${isEdit ? 'Edit' : 'New'} Store</h2>
@@ -12959,7 +13071,7 @@ async function openStoreEditor(storeId){
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
       <div class="form-group">
         <label class="form-label">Program</label>
-        <select id="se-program" class="form-input">
+        <select id="se-program" class="form-input" onchange="_seOnProgramChange()">
           <option value="">— Any program —</option>
           ${allPrograms.filter(p => p.status !== 'archived').map(p => `<option value="${p.id}" ${s.program_id === p.id ? 'selected' : ''}>${p.icon} ${escapeHtml(p.name)}</option>`).join('')}
         </select>
@@ -12973,14 +13085,27 @@ async function openStoreEditor(storeId){
       </div>
     </div>
 
+    <!-- Phase 3.31: Campaign picker on stores. Filters dynamically based
+         on the selected program. Required for Reliant Sale routing — if
+         a store isn't tagged campaign_id='reliant' it won't appear in
+         the agent's store dropdown on the sale form. -->
+    <div class="form-group">
+      <label class="form-label">Campaign</label>
+      <select id="se-campaign" class="form-input" onchange="_seOnCampaignChange()">
+        <option value="">— No campaign —</option>
+        ${(allCampaigns || []).filter(c => c.is_active !== false && (!s.program_id || c.program_id === s.program_id)).map(c => `<option value="${c.id}" ${s.campaign_id === c.id ? 'selected' : ''}>${c.icon || '📋'} ${escapeHtml(c.name)}</option>`).join('')}
+      </select>
+      <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">For retail stores choose <strong>Reliant Energy</strong>. The Reliant Sale form filters its store dropdown by this.</div>
+    </div>
+
     <hr style="border:none;border-top:1px solid rgba(255,255,255,0.08);margin:18px 0;"/>
     <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#00C6FF;letter-spacing:1.5px;margin-bottom:10px;">👔 Store Managers</div>
-    <div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-bottom:10px;line-height:1.55;">Pick which manager(s) run this store. They'll see it in their Stores list, can assign their agents to it via Weekly Schedule, and their direct-reports auto-inherit access for daily check-ins.</div>
-    <div class="form-group">
-      ${(managers || []).length === 0
-        ? '<div style="font-size:12px;color:rgba(255,255,255,0.4);padding:10px;background:rgba(255,255,255,0.03);border-radius:6px;">No managers in the system yet. Add managers to your team first.</div>'
+    <div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-bottom:10px;line-height:1.55;">Pick which manager(s) run this store. They'll see it in their Stores list, can assign their agents to it via Weekly Schedule, and their direct-reports auto-inherit access for daily check-ins. <strong style="color:#00C6FF;">List is filtered to managers tagged into the store's campaign.</strong></div>
+    <div id="se-mm-list-host" class="form-group">
+      ${(visibleManagers || []).length === 0
+        ? `<div style="font-size:12px;color:rgba(255,255,255,0.4);padding:10px;background:rgba(255,255,255,0.03);border-radius:6px;">No managers ${initialCampaignId ? 'are tagged into this campaign yet. Tag a manager into the campaign (edit their profile → set their campaign), then come back here.' : 'in the system yet. Add managers to your team first.'}</div>`
         : `<div style="max-height:200px;overflow-y:auto;background:rgba(0,0,0,0.2);border-radius:8px;padding:6px;">
-          ${(managers || []).map(m => `
+          ${(visibleManagers || []).map(m => `
             <label style="display:flex;align-items:center;gap:10px;padding:6px 10px;cursor:pointer;border-radius:6px;" onmouseover="this.style.background='rgba(255,255,255,0.04)'" onmouseout="this.style.background=''">
               <input type="checkbox" class="se-mm" value="${m.id}" ${assignedMMs.includes(m.id) ? 'checked' : ''} style="width:16px;height:16px;accent-color:#00C6FF;"/>
               <div style="flex:1;">
@@ -13107,6 +13232,7 @@ async function saveStore(existingId){
     state: (document.getElementById('se-state').value.trim() || '').toUpperCase() || null,
     zip: document.getElementById('se-zip').value.trim() || null,
     program_id: document.getElementById('se-program').value || null,
+    campaign_id: document.getElementById('se-campaign')?.value || null,  // Phase 3.31
     market_id: document.getElementById('se-market').value || null,
     latitude: parseFloat(document.getElementById('se-lat').value) || null,
     longitude: parseFloat(document.getElementById('se-lng').value) || null,
@@ -13158,6 +13284,57 @@ async function saveStore(existingId){
   msg.innerHTML = '<span style="color:#00FF88;">✓ Saved.</span>';
   setTimeout(() => { closeAllModals(); renderMainContent(); }, 700);
 }
+
+// Phase 3.31 — Store editor dynamic helpers
+// When the Program dropdown changes, narrow the Campaign dropdown to
+// campaigns under that program. When the Campaign dropdown changes,
+// re-render the MM picker to show only managers tagged into that campaign.
+function _seOnProgramChange(){
+  const progSel = document.getElementById('se-program');
+  const campSel = document.getElementById('se-campaign');
+  if(!progSel || !campSel) return;
+  const programId = progSel.value;
+  const currentCamp = campSel.value;
+  const filtered = (allCampaigns || []).filter(c => c.is_active !== false && (!programId || c.program_id === programId));
+  campSel.innerHTML = '<option value="">— No campaign —</option>' +
+    filtered.map(c => `<option value="${c.id}" ${currentCamp === c.id ? 'selected' : ''}>${c.icon || '📋'} ${escapeHtml(c.name)}</option>`).join('');
+  // If the previously-selected campaign isn't under the new program, clear it
+  if(currentCamp && !filtered.find(c => c.id === currentCamp)){
+    campSel.value = '';
+    _seOnCampaignChange();
+  }
+}
+window._seOnProgramChange = _seOnProgramChange;
+
+function _seOnCampaignChange(){
+  const campSel = document.getElementById('se-campaign');
+  const host = document.getElementById('se-mm-list-host');
+  if(!host || !campSel) return;
+  const campaignId = campSel.value || null;
+  const allMgrs = window._storeEditorAllManagers || [];
+  const assigned = window._storeEditorAssignedMMs || [];
+
+  const filtered = !campaignId
+    ? allMgrs
+    : allMgrs.filter(m => m.campaign_id === campaignId || (Array.isArray(m.campaigns) && m.campaigns.includes(campaignId)));
+
+  if(filtered.length === 0){
+    host.innerHTML = `<div style="font-size:12px;color:rgba(255,255,255,0.4);padding:10px;background:rgba(255,255,255,0.03);border-radius:6px;">No managers ${campaignId ? 'are tagged into this campaign yet. Tag a manager into the campaign (edit their profile → set their campaign), then come back here.' : 'in the system yet. Add managers to your team first.'}</div>`;
+    return;
+  }
+  host.innerHTML = `<div style="max-height:200px;overflow-y:auto;background:rgba(0,0,0,0.2);border-radius:8px;padding:6px;">
+    ${filtered.map(m => `
+      <label style="display:flex;align-items:center;gap:10px;padding:6px 10px;cursor:pointer;border-radius:6px;" onmouseover="this.style.background='rgba(255,255,255,0.04)'" onmouseout="this.style.background=''">
+        <input type="checkbox" class="se-mm" value="${m.id}" ${assigned.includes(m.id) ? 'checked' : ''} style="width:16px;height:16px;accent-color:#00C6FF;"/>
+        <div style="flex:1;">
+          <div style="font-size:13px;color:#fff;">${escapeHtml(m.full_name || m.email)}</div>
+          <div style="font-size:10.5px;color:rgba(255,255,255,0.45);">${escapeHtml(m.email)}</div>
+        </div>
+      </label>
+    `).join('')}
+  </div>`;
+}
+window._seOnCampaignChange = _seOnCampaignChange;
 
 async function deleteStore(storeId, storeName){
   if(!confirm('Delete store "' + storeName + '"?\n\nAll agent assignments to this store will be removed. Past photo audits remain.')) return;
@@ -14945,7 +15122,8 @@ async function loadPayrollResults(start, end){
       <table style="width:100%;border-collapse:collapse;font-size:13px;">
         <thead>
           <tr style="border-bottom:1px solid rgba(255,255,255,0.1);">
-            <th style="text-align:left;padding:10px 12px;color:rgba(255,255,255,0.55);font-size:11px;letter-spacing:1.5px;">AGENT</th>
+            <th style="text-align:left;padding:10px 12px;color:rgba(255,255,255,0.55);font-size:11px;letter-spacing:1.5px;">CONTRACTOR</th>
+            <th style="text-align:left;padding:10px 12px;color:rgba(255,255,255,0.55);font-size:11px;letter-spacing:1.5px;">ROLE</th>
             <th style="text-align:left;padding:10px 12px;color:rgba(255,255,255,0.55);font-size:11px;letter-spacing:1.5px;">EMAIL</th>
             <th style="text-align:right;padding:10px 12px;color:rgba(255,255,255,0.55);font-size:11px;letter-spacing:1.5px;">DAYS</th>
             <th style="text-align:right;padding:10px 12px;color:rgba(255,255,255,0.55);font-size:11px;letter-spacing:1.5px;">HOURS</th>
@@ -14958,13 +15136,25 @@ async function loadPayrollResults(start, end){
             const hrs = Number(r.total_hours || 0);
             const sls = Number(r.total_sales || 0);
             const sph = hrs > 0 ? (sls / hrs).toFixed(2) : '—';
-            return `<tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
+            const role = (r.agent_role || 'agent').toLowerCase();
+            const isAdminRow = role === 'admin';
+            // Phase 3.32 — admins are paid for admin work and get a visual
+            // tag so K-Anna doesn't confuse them with sales staff. They
+            // never have sales (Phase 3.32 filter removes them from sales
+            // entry / leaderboard), so SALES/SALES-HR show as "—".
+            const roleBadge = isAdminRow
+              ? '<span style="background:rgba(0,198,255,0.15);color:#00C6FF;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1.5px;">ADMIN</span>'
+              : role === 'manager' || role === 'team_lead'
+                ? '<span style="background:rgba(255,107,0,0.15);color:#FF6B00;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1.5px;">' + role.toUpperCase().replace('_',' ') + '</span>'
+                : '<span style="background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.55);padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1.5px;">AGENT</span>';
+            return `<tr style="border-bottom:1px solid rgba(255,255,255,0.05);${isAdminRow ? 'background:rgba(0,198,255,0.025);' : ''}">
               <td style="padding:10px 12px;color:#fff;font-weight:600;">${escapeHtml(r.agent_name || '')}</td>
+              <td style="padding:10px 12px;">${roleBadge}</td>
               <td style="padding:10px 12px;color:rgba(255,255,255,0.55);">${escapeHtml(r.agent_email || '')}</td>
               <td style="padding:10px 12px;text-align:right;color:rgba(255,255,255,0.75);">${r.total_days || 0}</td>
               <td style="padding:10px 12px;text-align:right;color:#00C6FF;font-weight:700;">${hrs.toFixed(2)}</td>
-              <td style="padding:10px 12px;text-align:right;color:#00FF88;font-weight:700;">${sls}</td>
-              <td style="padding:10px 12px;text-align:right;color:rgba(255,255,255,0.6);">${sph}</td>
+              <td style="padding:10px 12px;text-align:right;color:${isAdminRow ? 'rgba(255,255,255,0.3)' : '#00FF88'};font-weight:700;">${isAdminRow ? '—' : sls}</td>
+              <td style="padding:10px 12px;text-align:right;color:rgba(255,255,255,0.6);">${isAdminRow ? '—' : sph}</td>
             </tr>`;
           }).join('')}
         </tbody>
@@ -15009,15 +15199,19 @@ async function exportPayrollCSV(){
   const { data, error } = await sb.rpc('payroll_weekly_hours', { p_start_date: s, p_end_date: e });
   if(error){ alert('Export failed: ' + error.message); return; }
   const rows = data || [];
+  // Phase 3.32 — include role so K-Anna can split admin vs sales pay
   const lines = [
-    ['Agent','Email','Days','Hours','Sales','Sales/Hr'].join(',')
+    ['Contractor','Role','Email','Days','Hours','Sales','Sales/Hr'].join(',')
   ];
   rows.forEach(r => {
+    const role = (r.agent_role || 'agent').toLowerCase();
+    const isAdminRow = role === 'admin';
     const hrs = Number(r.total_hours || 0);
-    const sls = Number(r.total_sales || 0);
-    const sph = hrs > 0 ? (sls/hrs).toFixed(2) : '';
+    const sls = isAdminRow ? '' : Number(r.total_sales || 0);
+    const sph = (isAdminRow || !hrs) ? '' : (Number(r.total_sales || 0)/hrs).toFixed(2);
     lines.push([
       '"' + (r.agent_name || '').replace(/"/g,'""') + '"',
+      '"' + role + '"',
       '"' + (r.agent_email || '').replace(/"/g,'""') + '"',
       r.total_days || 0, hrs.toFixed(2), sls, sph
     ].join(','));
@@ -15062,24 +15256,45 @@ async function renderReliantSaleEntry(el){
 
   el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading…</div>';
 
-  // Phase 3.30: Scope stores to the agent's market. Owner/admin still see
-  // all reliant stores; managers see stores they manage (via store_managers);
-  // agents see stores tagged to their assigned market_id.
+  // Phase 3.30/3.31: Scope stores to the agent's market.
+  //   • Owner/Admin: every reliant store
+  //   • Manager: stores they manage via store_managers, OR fall back to
+  //     stores in their assigned market_id (covers cases where the MM
+  //     is tagged to a market but the per-store store_managers row hasn't
+  //     been created yet — common when the team was onboarded by market
+  //     before the store_managers feature shipped).
+  //   • Agent: stores in their assigned market_id
+  // Diagnostic state is returned alongside the stores so the empty-state
+  // banner can tell the user exactly which assignment is missing.
   let stores = [];
+  let storeSourceNote = '';   // human-readable description of where the list came from
+  let mmRoleCount = null;     // for managers: number of store_managers rows
+
   if(isAdmin){
     let q = sb.from('stores').select('id, name, market_id, markets(name)').eq('active', true);
     try { q = q.or('campaign_id.eq.reliant,campaign_id.is.null'); } catch(_){}
     const { data } = await q.order('name');
     stores = data || [];
+    storeSourceNote = 'All reliant stores (admin view)';
   } else if(role === 'manager'){
-    // Managers see only stores they're assigned to as MM
+    // Try store_managers first
     const { data: smRows } = await sb.from('store_managers').select('store_id').eq('user_id', currentProfile.id);
     const ids = (smRows || []).map(x => x.store_id);
+    mmRoleCount = ids.length;
     if(ids.length){
       let q = sb.from('stores').select('id, name, market_id, markets(name)').eq('active', true).in('id', ids);
       try { q = q.or('campaign_id.eq.reliant,campaign_id.is.null'); } catch(_){}
       const { data } = await q.order('name');
       stores = data || [];
+      storeSourceNote = ids.length + ' store(s) you manage';
+    }
+    // Fallback: if no store_managers rows, use market_id (same as agents)
+    if(stores.length === 0 && currentProfile.market_id){
+      let q = sb.from('stores').select('id, name, market_id, markets(name)').eq('active', true).eq('market_id', currentProfile.market_id);
+      try { q = q.or('campaign_id.eq.reliant,campaign_id.is.null'); } catch(_){}
+      const { data } = await q.order('name');
+      stores = data || [];
+      if(stores.length > 0) storeSourceNote = 'Stores in your assigned market (fallback — you have no per-store MM assignments)';
     }
   } else {
     // Agents: stores in their assigned market
@@ -15088,6 +15303,7 @@ async function renderReliantSaleEntry(el){
       try { q = q.or('campaign_id.eq.reliant,campaign_id.is.null'); } catch(_){}
       const { data } = await q.order('name');
       stores = data || [];
+      storeSourceNote = 'Stores in your assigned market';
     }
   }
 
@@ -15096,9 +15312,31 @@ async function renderReliantSaleEntry(el){
     return `<option value="${s.id}">${escapeHtml(s.name + mktName)}</option>`;
   }).join('');
 
-  const noStoresMsg = stores.length === 0
-    ? `<div style="background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.3);border-radius:8px;padding:10px 14px;margin-bottom:14px;color:#F87171;font-size:12.5px;">⛔ No stores are assigned to your market yet. Ask your manager to add stores to your market before submitting a sale.</div>`
-    : '';
+  // Diagnostic empty-state — tells the user (and Calvin) exactly which
+  // assignment is missing so it can be fixed in one place.
+  let noStoresMsg = '';
+  if(stores.length === 0){
+    if(role === 'manager'){
+      const lines = [];
+      lines.push('⛔ <strong>No stores available.</strong>');
+      lines.push(mmRoleCount === 0
+        ? '• You have <strong>0</strong> stores assigned to you as Market Manager (via Store Managers list).'
+        : '• You have <strong>' + mmRoleCount + '</strong> store(s) assigned but none are tagged to the Reliant campaign.');
+      lines.push(currentProfile.market_id
+        ? '• Your profile is assigned to a market, but no Reliant stores exist in it yet.'
+        : '• Your profile has <strong>no market_id</strong> set.');
+      lines.push('<br><em style="color:rgba(255,255,255,0.6);">Owner: open Stores admin → edit the store(s) Cedric should manage → check his name in the Store Managers section AND set Campaign = Reliant Energy. Or set the manager profile market_id to the matching market and tag the stores to the same market.</em>');
+      noStoresMsg = `<div style="background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.3);border-radius:8px;padding:12px 14px;margin-bottom:14px;color:#F87171;font-size:12.5px;line-height:1.7;">${lines.join('<br>')}</div>`;
+    } else {
+      const lines = [];
+      lines.push('⛔ <strong>No stores in your market yet.</strong>');
+      lines.push(currentProfile.market_id
+        ? '• Your profile is assigned to a market, but no Reliant stores have been tagged to it yet.'
+        : '• Your profile has <strong>no market_id</strong> set — your manager needs to assign you to a market first.');
+      lines.push('<br><em style="color:rgba(255,255,255,0.6);">Ask your manager to confirm your market assignment and that stores in your market are tagged Campaign = Reliant Energy.</em>');
+      noStoresMsg = `<div style="background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.3);border-radius:8px;padding:12px 14px;margin-bottom:14px;color:#F87171;font-size:12.5px;line-height:1.7;">${lines.join('<br>')}</div>`;
+    }
+  }
 
   el.innerHTML = `
     <div style="margin-bottom:24px;max-width:680px;">
@@ -15382,6 +15620,11 @@ async function approveReliant(pendingId, customerName){
   (async () => {
     try { await notifyReliantSaleDecision(pendingId, 'approved'); } catch(_){}
   })();
+
+  // Phase 3.32 — bust scoreboard cache so the agent's + manager's
+  // dashboards reflect the +1 immediately. Without this, counts stay
+  // stale until they navigate away and back.
+  try { _bustScoreboardCache(); } catch(_){}
 
   renderMainContent();
   try { renderUrgentFlyer(); } catch(_){}
