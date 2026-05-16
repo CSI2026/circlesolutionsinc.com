@@ -13032,7 +13032,7 @@ async function openStoreEditor(storeId){
   }
   const [{ data: markets }, { data: managers }] = await Promise.all([
     sb.from('markets').select('id,name').order('name'),
-    sb.from('profiles').select('id,full_name,email,market_id,campaign_id,campaigns').eq('active', true).eq('role', 'manager').order('full_name')
+    sb.from('profiles').select('id,full_name,email,market_id,campaign_id').eq('active', true).eq('role', 'manager').order('full_name')
   ]);
 
   // Phase 3.31: filter managers to those tagged into the store's campaign.
