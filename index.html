@@ -2581,6 +2581,10 @@ function enterBackOffice(){
   // Phase 3.28: Show the huge flyer banner for unacknowledged alerts +
   // fresh audit activity. Owner / admin / payroll managers only.
   try { renderUrgentFlyer(); } catch(e){ console.warn('Flyer render failed:', e); }
+
+  // Phase 3.33 — if the agent reloaded mid-shift, restart the geofence
+  // monitor from the persisted sessionStorage anchor.
+  try { _resumeGeofenceMonitorIfNeeded(); } catch(e){ console.warn('Geofence monitor resume failed:', e); }
 }
 
 function renderSidebar(){
@@ -14729,6 +14733,25 @@ async function submitPhotoAudit(){
         }
       } catch(_){}
     }
+    // Phase 3.33 — start the live geofence monitor immediately after a
+    // SUCCESSFUL geofence-passed check-in. If the agent leaves the
+    // 150-yard radius for 3+ consecutive minutes, the monitor auto-clocks
+    // them out and notifies everyone.
+    if(auditType === 'check_in' && passed){
+      try {
+        await startGeofenceMonitor({
+          checkInAuditId: audit.id,
+          storeId: audit.store_id,
+          storeLat: storeLat,
+          storeLng: storeLng,
+          storeName: storeOpt.text
+        });
+      } catch(e){ console.warn('Geofence monitor start failed:', e); }
+    }
+    // Phase 3.33 — stop the monitor on check-out (manual or auto)
+    if(auditType === 'check_out'){
+      try { stopGeofenceMonitor(); } catch(_){}
+    }
   })();
 
   if(passed){
@@ -14774,6 +14797,392 @@ function checkinGoHome(){
   scrollMainToTop();
 }
 window.checkinGoHome = checkinGoHome;
+
+// ═══════════════════════════════════════════════════════════════
+// PHASE 3.33 — LIVE GEOFENCE MONITOR
+// ═══════════════════════════════════════════════════════════════
+// After a successful check-in, the monitor polls GPS every 2 minutes.
+// If the agent is more than 150 yards (137.16 m) from the store for
+// 3+ consecutive minutes, they're auto-clocked-out and notifications
+// fire to owner + agent + agent's MM + every MM at the store + payroll.
+//
+// State persists in sessionStorage so a page reload mid-shift restarts
+// the monitor from the same anchor.
+//
+// Calvin's spec (Phase 3.33):
+//   • 150 yards = 137.16 meters
+//   • 2-minute polling
+//   • 3-minute consecutive off-site before triggering (handles bathroom
+//     trips and GPS jumps)
+//   • GPS permission revoked / location services off → auto-logout
+//     immediately (per Q3 answer)
+//   • Recipient list: owner + agent + agent's MM + ANY MM at the store
+//     + payroll managers
+//
+// IMPORTANT: this monitor is ONLY a frontend safeguard. If the agent
+// closes the browser tab, the monitor stops. Server-side enforcement
+// (a cron-based check that auto-clocks-out abandoned shifts) is a
+// separate hardening project — flagged in roadmap.
+// ═══════════════════════════════════════════════════════════════
+
+const GEOFENCE_BREACH_RADIUS_METERS = 137.16;      // 150 yards in meters
+const GEOFENCE_POLL_INTERVAL_MS     = 2 * 60_000; // 2 minutes
+const GEOFENCE_TRIGGER_AFTER_MS     = 3 * 60_000; // 3 minutes off-site = trigger
+
+let _geofenceMonitorId = null;          // setInterval handle
+let _geofenceState     = null;          // current monitor state (mirrors sessionStorage)
+
+function _gmReadState(){
+  try {
+    const raw = sessionStorage.getItem('csi_geofence_monitor');
+    if(!raw) return null;
+    return JSON.parse(raw);
+  } catch(_){ return null; }
+}
+function _gmWriteState(state){
+  try {
+    if(state === null) sessionStorage.removeItem('csi_geofence_monitor');
+    else sessionStorage.setItem('csi_geofence_monitor', JSON.stringify(state));
+  } catch(_){}
+  _geofenceState = state;
+}
+
+// Public: called by submitPhotoAudit after a successful check-in
+async function startGeofenceMonitor(opts){
+  // opts: { checkInAuditId, storeId, storeLat, storeLng, storeName }
+  stopGeofenceMonitor();  // tear down any prior monitor cleanly
+
+  const state = {
+    checkInAuditId: opts.checkInAuditId,
+    storeId:        opts.storeId,
+    storeLat:       opts.storeLat,
+    storeLng:       opts.storeLng,
+    storeName:      opts.storeName || '',
+    startedAt:      Date.now(),
+    firstBreachAt:  null,           // ms timestamp of first off-site reading; null if currently on-site
+    lastCheckedAt:  null,
+    lastDistance:   null,
+    triggered:      false
+  };
+  _gmWriteState(state);
+
+  // Poll once immediately so the first reading lands fast, then on interval
+  _geofenceMonitorId = setInterval(_geofenceTick, GEOFENCE_POLL_INTERVAL_MS);
+  // Defer the first tick by 30s so the agent has a moment to settle in.
+  setTimeout(() => { try { _geofenceTick(); } catch(_){} }, 30_000);
+}
+window.startGeofenceMonitor = startGeofenceMonitor;
+
+function stopGeofenceMonitor(){
+  if(_geofenceMonitorId){
+    clearInterval(_geofenceMonitorId);
+    _geofenceMonitorId = null;
+  }
+  _gmWriteState(null);
+}
+window.stopGeofenceMonitor = stopGeofenceMonitor;
+
+// On page load: if there's a live monitor state in sessionStorage AND the
+// agent still has an open shift (no check_out since check_in), resume the
+// monitor. This handles reloads, BFCache restoration, and the iOS/Android
+// JS-context-loss scenarios from Phase 3.25.
+async function _resumeGeofenceMonitorIfNeeded(){
+  if(!currentProfile) return;
+  const state = _gmReadState();
+  if(!state || state.triggered) return;
+
+  // Verify the shift is still actually open server-side. If the agent
+  // already checked out (or auto-clocked-out from another tab), drop state.
+  try {
+    const { data: openShift } = await sb.from('v_open_shift')
+      .select('check_in_audit_id, store_id')
+      .eq('agent_id', currentProfile.id)
+      .maybeSingle();
+    if(!openShift || openShift.check_in_audit_id !== state.checkInAuditId){
+      _gmWriteState(null);
+      return;
+    }
+  } catch(_){
+    // If the view doesn't exist yet (Phase 3.33 migration not run), bail
+    // quietly — no monitor on legacy DBs. Once the migration runs, this
+    // will start working.
+    return;
+  }
+
+  if(_geofenceMonitorId) clearInterval(_geofenceMonitorId);
+  _geofenceMonitorId = setInterval(_geofenceTick, GEOFENCE_POLL_INTERVAL_MS);
+  setTimeout(() => { try { _geofenceTick(); } catch(_){} }, 5_000);
+  _geofenceState = state;
+}
+
+// Hook resume into auth flow (run after currentProfile is set)
+const _origLoadCurrentProfile = window.loadCurrentProfile || null;
+// We rely on enterBackOffice() to kick this on initial load.
+// Also add a one-shot DOMContentLoaded fallback in case the agent reloads
+// directly into the back office.
+window.addEventListener('DOMContentLoaded', () => {
+  // Wait a beat for the auth flow to populate currentProfile, then check
+  setTimeout(() => { try { _resumeGeofenceMonitorIfNeeded(); } catch(_){} }, 2_500);
+});
+
+async function _geofenceTick(){
+  const state = _gmReadState();
+  if(!state || state.triggered) return;
+  if(!currentProfile) return;
+
+  // Pull current GPS. If permission is revoked OR location unavailable,
+  // auto-clock-out per Calvin's Q3 answer.
+  if(!navigator.geolocation){
+    return _geofenceFire(state, 'gps_unavailable', null, null, null, 'Browser has no geolocation API.');
+  }
+
+  let pos;
+  try {
+    pos = await new Promise((resolve, reject) => {
+      navigator.geolocation.getCurrentPosition(resolve, reject, {
+        enableHighAccuracy: true,
+        timeout: 30_000,
+        maximumAge: 15_000      // OK to reuse a slightly-stale reading
+      });
+    });
+  } catch(e){
+    // Permission denied / position unavailable / timeout
+    const reasonByCode = {
+      1: 'gps_permission_revoked',
+      2: 'gps_unavailable',
+      3: 'gps_unavailable'
+    };
+    const reason = reasonByCode[e.code] || 'gps_unavailable';
+    const note = (e.code === 1)
+      ? 'Agent revoked GPS permission after check-in.'
+      : 'GPS position unavailable for the polling attempt.';
+    return _geofenceFire(state, reason, null, null, null, note);
+  }
+
+  const lat = pos.coords.latitude;
+  const lng = pos.coords.longitude;
+  const distance = haversineDistance(lat, lng, state.storeLat, state.storeLng);
+  const onSite = distance <= GEOFENCE_BREACH_RADIUS_METERS;
+
+  const now = Date.now();
+  state.lastCheckedAt = now;
+  state.lastDistance  = distance;
+
+  if(onSite){
+    // Back on site (or never left) — reset the breach timer
+    state.firstBreachAt = null;
+    _gmWriteState(state);
+    return;
+  }
+
+  // Off site
+  if(!state.firstBreachAt){
+    state.firstBreachAt = now;
+    _gmWriteState(state);
+    return;
+  }
+
+  // Off site for how long?
+  const offSiteFor = now - state.firstBreachAt;
+  if(offSiteFor < GEOFENCE_TRIGGER_AFTER_MS){
+    _gmWriteState(state);
+    return;
+  }
+
+  // 3+ minutes off-site → fire
+  _geofenceFire(state, 'off_site_3min', lat, lng, distance,
+    'Agent has been more than 150 yards from the store for ' + Math.round(offSiteFor / 60_000) + ' consecutive minutes.');
+}
+
+async function _geofenceFire(state, reason, lat, lng, distance, note){
+  if(!state || state.triggered) return;
+  state.triggered = true;
+  _gmWriteState(state);
+  stopGeofenceMonitor();   // also clears sessionStorage
+
+  // Best-effort: capture a final position even if reason is GPS-related
+  let useLat = lat, useLng = lng, useDist = distance;
+  if(useLat === null || useLng === null){
+    // Try once more with a short timeout — we may still get a stale reading
+    try {
+      const pos = await new Promise((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: false, timeout: 5_000, maximumAge: 60_000 });
+      });
+      useLat = pos.coords.latitude;
+      useLng = pos.coords.longitude;
+      useDist = haversineDistance(useLat, useLng, state.storeLat, state.storeLng);
+    } catch(_){
+      // Still no position — write nulls; the RPC handles them.
+      useLat = useLat ?? null;
+      useLng = useLng ?? null;
+      useDist = useDist ?? null;
+    }
+  }
+
+  // Insert the auto-clock-out + breach event atomically
+  let checkOutAuditId = null, breachEventId = null;
+  try {
+    const { data, error } = await sb.rpc('auto_clock_out_for_breach', {
+      p_check_in_audit_id: state.checkInAuditId,
+      p_store_id:          state.storeId,
+      p_first_breach_at:   state.firstBreachAt ? new Date(state.firstBreachAt).toISOString() : null,
+      p_breach_latitude:   useLat,
+      p_breach_longitude:  useLng,
+      p_distance_meters:   useDist,
+      p_trigger_reason:    reason,
+      p_notes:             note
+    });
+    if(error) throw error;
+    if(data && data[0]){
+      checkOutAuditId = data[0].check_out_audit_id;
+      breachEventId   = data[0].breach_event_id;
+    }
+  } catch(e){
+    console.warn('Auto-clock-out RPC failed:', e);
+    // Don't bail — still try to notify the humans involved.
+  }
+
+  // Fire notifications in the background — owner + agent + agent's MM
+  // + every MM at the store + payroll managers
+  (async () => {
+    try {
+      await notifyGeofenceBreach({
+        storeId:       state.storeId,
+        storeName:     state.storeName,
+        reason:        reason,
+        distance:      useDist,
+        note:          note
+      });
+    } catch(e){ console.warn('Breach notify failed:', e); }
+  })();
+
+  // Visible in-app banner so the agent KNOWS they got logged out
+  _showGeofenceLogoutBanner(state, reason, useDist);
+}
+
+function _showGeofenceLogoutBanner(state, reason, distance){
+  // Build a sticky, hard-to-miss banner inside the back office.
+  let host = document.getElementById('bo-geofence-banner-host');
+  if(!host){
+    const main = document.querySelector('#backoffice .bo-main') ||
+                 document.querySelector('#backoffice main') ||
+                 document.getElementById('bo-content') ||
+                 document.querySelector('#backoffice');
+    if(!main) return;
+    host = document.createElement('div');
+    host.id = 'bo-geofence-banner-host';
+    host.style.cssText = 'position:sticky;top:0;z-index:6000;';
+    main.insertBefore(host, main.firstChild);
+  }
+  const distLine = (distance !== null && distance !== undefined)
+    ? ('You were ' + Math.round(distance) + ' meters from the store (limit: ' + Math.round(GEOFENCE_BREACH_RADIUS_METERS) + ' m).')
+    : 'Your phone\'s GPS was unavailable while you were on the clock.';
+  const reasonText = ({
+    'off_site_3min':         'You walked more than 150 yards from your store for 3+ minutes.',
+    'gps_permission_revoked':'You turned off GPS permission while clocked in.',
+    'gps_unavailable':       'Your phone\'s location services stopped reporting.'
+  })[reason] || reason;
+
+  host.innerHTML = `
+    <div style="background:linear-gradient(135deg,#7f1d1d,#991b1b);color:#fff;padding:22px 26px;border:3px solid #ef4444;border-radius:14px;margin:14px;box-shadow:0 8px 30px rgba(239,68,68,0.4);">
+      <div style="display:flex;align-items:flex-start;gap:14px;flex-wrap:wrap;">
+        <div style="font-size:42px;line-height:1;flex-shrink:0;">🚨</div>
+        <div style="flex:1;min-width:240px;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:30px;letter-spacing:2px;color:#fff;line-height:1;">YOU'VE BEEN AUTO-CLOCKED OUT</div>
+          <div style="font-size:13px;color:#fecaca;margin-top:6px;line-height:1.5;">
+            ${escapeHtml(reasonText)}<br>
+            ${escapeHtml(distLine)}<br>
+            ${state.storeName ? 'Store: <strong>' + escapeHtml(state.storeName) + '</strong>' : ''}
+          </div>
+          <div style="font-size:12.5px;color:#fecaca;margin-top:10px;line-height:1.55;">
+            <strong>Your owner, manager, and payroll have been notified.</strong> If you're still on shift, return to the store and check in again from your back office.
+          </div>
+        </div>
+        <button onclick="this.closest('div[style*=sticky]').remove();" style="background:rgba(0,0,0,0.25);color:#fff;border:1px solid rgba(255,255,255,0.3);padding:8px 14px;border-radius:50px;cursor:pointer;font-size:12px;font-weight:600;flex-shrink:0;">Dismiss</button>
+      </div>
+    </div>`;
+}
+
+async function notifyGeofenceBreach(payload){
+  // payload: { storeId, storeName, reason, distance, note }
+  const { data: agent } = await sb.from('profiles').select('full_name,email,reports_to').eq('id', currentProfile.id).single();
+  const agentName = agent?.full_name || agent?.email || 'Agent';
+
+  // Recipients per Calvin's Q5 answer:
+  //   • Owner (all active owners)
+  //   • Agent themselves
+  //   • Agent's direct manager (reports_to)
+  //   • ANY MM at that store (from store_managers)
+  //   • Payroll managers (is_payroll_manager = true)
+  const recipientIds = new Set();
+  recipientIds.add(currentProfile.id);   // agent themselves
+  if(agent?.reports_to) recipientIds.add(agent.reports_to);
+  const { data: owners } = await sb.from('profiles').select('id').eq('role','owner').eq('active',true);
+  (owners || []).forEach(o => recipientIds.add(o.id));
+  try {
+    const { data: payroll } = await sb.from('profiles').select('id').eq('is_payroll_manager',true).eq('active',true);
+    (payroll || []).forEach(p => recipientIds.add(p.id));
+  } catch(_){}
+  if(payload.storeId){
+    try {
+      const { data: smRows } = await sb.from('store_managers').select('user_id').eq('store_id', payload.storeId);
+      (smRows || []).forEach(sm => { if(sm.user_id) recipientIds.add(sm.user_id); });
+    } catch(_){}
+  }
+
+  const reasonText = ({
+    'off_site_3min':         agentName + ' walked >150 yards from ' + (payload.storeName || 'their store') + ' for 3+ minutes and was auto-clocked-out.',
+    'gps_permission_revoked':agentName + ' turned off GPS permission while clocked in at ' + (payload.storeName || 'their store') + ' — auto-clocked-out.',
+    'gps_unavailable':       agentName + '\'s phone GPS became unavailable while clocked in at ' + (payload.storeName || 'their store') + ' — auto-clocked-out.'
+  })[payload.reason] || (agentName + ' was auto-clocked-out from ' + (payload.storeName || 'their store') + '.');
+  const distLine = (payload.distance !== null && payload.distance !== undefined)
+    ? ' Distance from store: ' + Math.round(payload.distance) + ' m.'
+    : '';
+  const titleAgent = '🚨 You were auto-clocked-out';
+  const titleStaff = '🚨 GEOFENCE BREACH — ' + agentName;
+  const timeStamp  = new Date().toLocaleString();
+
+  for(const rid of recipientIds){
+    try {
+      const { data: r } = await sb.from('profiles').select('id,email,full_name').eq('id', rid).single();
+      if(!r) continue;
+      const isAgent = (rid === currentProfile.id);
+      const title = isAgent ? titleAgent : titleStaff;
+      const body  = (isAgent
+                       ? 'You have been auto-clocked-out. '
+                       : '') + reasonText + distLine + ' (' + timeStamp + ')';
+      try {
+        await notifyUser(r.id, {
+          type: 'urgent',
+          title: title,
+          body: body,
+          link_view: isAgent ? 'photo-audit-checkin' : 'photo-audits-review'
+        });
+      } catch(_){}
+      try {
+        await sendEmailViaFunction('urgent_custom', r.email, {
+          full_name: r.full_name,
+          subject_line: title,
+          message: body +
+            '\n\nReason: ' + payload.reason +
+            (payload.note ? '\n\nDetails: ' + payload.note : '') +
+            '\n\nReview this breach in the Photo Audits & Time panel of the back office.',
+          action_required: isAgent
+            ? 'Return to your store and check in again to resume your shift.'
+            : 'Review the breach event and confirm with the agent whether to record any payroll adjustments.',
+          sent_by: 'Circle Solutions Geofence Monitor'
+        });
+      } catch(_){}
+    } catch(_){}
+  }
+}
+
+window.notifyGeofenceBreach = notifyGeofenceBreach;
+
+// ═══════════════════════════════════════════════════════════════
+// END PHASE 3.33 GEOFENCE MONITOR
+// ═══════════════════════════════════════════════════════════════
+
 
 // ═══════════════════════════════════════════════════════════════
 // PHASE 3.28 — URGENT FLYER BANNER
