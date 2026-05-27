@@ -13002,7 +13002,7 @@ async function renderStoresAdmin(el){
                     <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#fff;letter-spacing:1px;">${escapeHtml(s.name)}${s.store_number ? ' #' + escapeHtml(s.store_number) : ''}</div>
                     ${prog ? `<span style="background:${prog.color}22;color:${prog.color};padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;">${prog.icon} ${escapeHtml(prog.name.split(' ')[0])}</span>` : ''}
                     ${!s.active ? '<span style="background:rgba(248,113,113,0.15);color:#F87171;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">INACTIVE</span>' : ''}
-                    ${hasGps ? `<span style="background:rgba(0,255,136,0.12);color:#00FF88;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;">📍 ${s.geofence_radius_meters || 100}m fence</span>` : '<span style="background:rgba(255,193,7,0.12);color:#FFD700;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;">⚠️ NO GPS</span>'}
+                    ${hasGps ? `<span style="background:rgba(0,255,136,0.12);color:#00FF88;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;">📍 ${feetLabel(s.geofence_radius_meters || 10)} fence</span>` : '<span style="background:rgba(255,193,7,0.12);color:#FFD700;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;">⚠️ NO GPS</span>'}
                   </div>
                   <div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-top:4px;">
                     ${s.street_address ? escapeHtml(s.street_address) + ' · ' : ''}${escapeHtml(s.city || '')}${s.state ? ', ' + escapeHtml(s.state) : ''}${s.zip ? ' ' + escapeHtml(s.zip) : ''}
@@ -13025,7 +13025,7 @@ async function renderStoresAdmin(el){
 async function openStoreEditor(storeId){
   const isEdit = !!storeId;
   let s = { id:'', name:'', store_number:'', street_address:'', city:'', state:'', zip:'',
-    latitude:null, longitude:null, geofence_radius_meters:100,
+    latitude:null, longitude:null, geofence_radius_meters:10,
     market_id:null, program_id:null, active:true, notes:'' };
   let assignedMMs = [];
   if(isEdit){
@@ -13135,9 +13135,9 @@ async function openStoreEditor(storeId){
       <button class="bo-btn bo-btn-ghost" style="padding:8px 14px;font-size:12px;" onclick="seUseMyLocation()">📡 Use My Current Location</button>
     </div>
     <div class="form-group">
-      <label class="form-label">Geofence Radius (meters)</label>
-      <input id="se-radius" class="form-input" type="number" min="50" max="2000" value="${s.geofence_radius_meters || 100}"/>
-      <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">100m (~330 ft) is strict. 250m allows the parking lot. 500m is generous.</div>
+      <label class="form-label">Check-in Geofence Radius (meters)</label>
+      <input id="se-radius" class="form-input" type="number" min="10" max="2000" value="${s.geofence_radius_meters || 10}"/>
+      <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">10m (~30 ft) keeps agents AT the kiosk — they can't clock in from the parking lot. This is the recommended setting. (Note: once checked in, agents have a separate 100m walk-off limit so they can move around the store.)</div>
     </div>
 
     <hr style="border:none;border-top:1px solid rgba(255,255,255,0.08);margin:18px 0;"/>
@@ -13240,7 +13240,7 @@ async function saveStore(existingId){
     market_id: document.getElementById('se-market').value || null,
     latitude: parseFloat(document.getElementById('se-lat').value) || null,
     longitude: parseFloat(document.getElementById('se-lng').value) || null,
-    geofence_radius_meters: parseInt(document.getElementById('se-radius').value) || 100,
+    geofence_radius_meters: parseInt(document.getElementById('se-radius').value) || 10,
     active: document.getElementById('se-active').checked,
     notes: document.getElementById('se-notes').value.trim() || null,
     hours_override: hoursOverride
@@ -14100,6 +14100,19 @@ function haversineDistance(lat1, lon1, lat2, lon2){
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
+// Phase 3.34 — distance display in feet. Calvin + the MMs read feet more
+// naturally than meters. Stored values stay in meters (DB columns,
+// geofence math); only what humans SEE is converted.
+function metersToFeet(m){
+  if(m === null || m === undefined || isNaN(m)) return null;
+  return Math.round(m * 3.28084);
+}
+// Convenience: "330 ft" string, or "—" if no value
+function feetLabel(m){
+  const ft = metersToFeet(m);
+  return (ft === null) ? '—' : (ft + ' ft');
+}
+
 let _paPhotoBlob = null;   // kiosk photo (existing)
 let _paSelfieBlob = null;  // selfie photo (new — check-in only)
 
@@ -14291,7 +14304,7 @@ async function renderPhotoAuditCheckin(el){
       <div class="form-group">
         <label class="form-label">Store *</label>
         <select id="pa-store" class="form-input">
-          ${stores.map(s => `<option value="${s.id}" data-lat="${s.latitude}" data-lng="${s.longitude}" data-radius="${s.geofence_radius_meters || 100}">${escapeHtml(s.name)}${s.store_number ? ' #' + escapeHtml(s.store_number) : ''}${s.city ? ' — ' + escapeHtml(s.city) : ''}</option>`).join('')}
+          ${stores.map(s => `<option value="${s.id}" data-lat="${s.latitude}" data-lng="${s.longitude}" data-radius="${s.geofence_radius_meters || 10}">${escapeHtml(s.name)}${s.store_number ? ' #' + escapeHtml(s.store_number) : ''}${s.city ? ' — ' + escapeHtml(s.city) : ''}</option>`).join('')}
         </select>
       </div>
 
@@ -14618,7 +14631,7 @@ async function submitPhotoAudit(){
   const storeOpt = storeSelect.options[storeSelect.selectedIndex];
   const storeLat = parseFloat(storeOpt.dataset.lat);
   const storeLng = parseFloat(storeOpt.dataset.lng);
-  const radius = parseInt(storeOpt.dataset.radius) || 100;
+  const radius = parseInt(storeOpt.dataset.radius) || 10;
   const notes = document.getElementById('pa-notes').value.trim() || null;
 
   if(!auditType){ msg.innerHTML = '<span style="color:#F87171;">Pick check-in or check-out.</span>'; return; }
@@ -14669,7 +14682,7 @@ async function submitPhotoAudit(){
   const distance = haversineDistance(myLat, myLng, storeLat, storeLng);
   const passed = distance <= radius;
 
-  status.innerHTML = `<span style="color:${passed ? '#00FF88' : '#F87171'};">📍 You are <strong>${Math.round(distance)}m</strong> from the store (limit: ${radius}m). GPS accuracy: ±${Math.round(accuracy)}m.</span>`;
+  status.innerHTML = `<span style="color:${passed ? '#00FF88' : '#F87171'};">📍 You are <strong>${feetLabel(distance)}</strong> from the store (limit: ${feetLabel(radius)}). GPS accuracy: ±${feetLabel(accuracy)}.</span>`;
 
   status.innerHTML += '<br><span style="color:rgba(255,255,255,0.6);">⬆️ Uploading photo…</span>';
   const photoPath = currentProfile.id + '/' + Date.now() + '.jpg';
@@ -14778,7 +14791,7 @@ async function submitPhotoAudit(){
         <button class="bo-btn bo-btn-ghost" onclick="checkinGoHome()" style="padding:10px 20px;font-size:13px;">✓ Done</button>
       </div>`;
   } else {
-    msg.innerHTML = '<div style="background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.4);border-radius:8px;padding:14px;color:#F87171;font-size:13px;line-height:1.5;text-align:left;">⛔ <strong>FRAUD ALERT TRIGGERED</strong><br><br>You were ' + Math.round(distance) + 'm from the store (allowed: ' + radius + 'm). The submission has been logged and your manager + the owner have been notified immediately.</div>' + `
+    msg.innerHTML = '<div style="background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.4);border-radius:8px;padding:14px;color:#F87171;font-size:13px;line-height:1.5;text-align:left;">⛔ <strong>FRAUD ALERT TRIGGERED</strong><br><br>You were ' + feetLabel(distance) + ' from the store (allowed: ' + feetLabel(radius) + '). The submission has been logged and your manager + the owner have been notified immediately.</div>' + `
       <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;justify-content:center;">
         <button class="bo-btn bo-btn-ghost" onclick="checkinGoHome()" style="padding:10px 20px;font-size:13px;">← Back to Dashboard</button>
       </div>`;
@@ -14799,18 +14812,19 @@ function checkinGoHome(){
 window.checkinGoHome = checkinGoHome;
 
 // ═══════════════════════════════════════════════════════════════
-// PHASE 3.33 — LIVE GEOFENCE MONITOR
+// PHASE 3.33 — LIVE GEOFENCE MONITOR  (radius updated Phase 3.34)
 // ═══════════════════════════════════════════════════════════════
 // After a successful check-in, the monitor polls GPS every 2 minutes.
-// If the agent is more than 150 yards (137.16 m) from the store for
+// If the agent is more than 100 m (~330 ft) from the store for
 // 3+ consecutive minutes, they're auto-clocked-out and notifications
 // fire to owner + agent + agent's MM + every MM at the store + payroll.
 //
 // State persists in sessionStorage so a page reload mid-shift restarts
 // the monitor from the same anchor.
 //
-// Calvin's spec (Phase 3.33):
-//   • 150 yards = 137.16 meters
+// Calvin's spec (Phase 3.34):
+//   • Check-in fence: ~10 m (~30 ft) — tight, keeps agents at the kiosk
+//   • Walk-off fence: 100 m (~330 ft) — generous, lets them move in-store
 //   • 2-minute polling
 //   • 3-minute consecutive off-site before triggering (handles bathroom
 //     trips and GPS jumps)
@@ -14825,7 +14839,7 @@ window.checkinGoHome = checkinGoHome;
 // separate hardening project — flagged in roadmap.
 // ═══════════════════════════════════════════════════════════════
 
-const GEOFENCE_BREACH_RADIUS_METERS = 137.16;      // 150 yards in meters
+const GEOFENCE_BREACH_RADIUS_METERS = 100;        // 100 m (~330 ft) — walk-off limit after check-in
 const GEOFENCE_POLL_INTERVAL_MS     = 2 * 60_000; // 2 minutes
 const GEOFENCE_TRIGGER_AFTER_MS     = 3 * 60_000; // 3 minutes off-site = trigger
 
@@ -14991,7 +15005,7 @@ async function _geofenceTick(){
 
   // 3+ minutes off-site → fire
   _geofenceFire(state, 'off_site_3min', lat, lng, distance,
-    'Agent has been more than 150 yards from the store for ' + Math.round(offSiteFor / 60_000) + ' consecutive minutes.');
+    'Agent has been more than ' + feetLabel(GEOFENCE_BREACH_RADIUS_METERS) + ' from the store for ' + Math.round(offSiteFor / 60_000) + ' consecutive minutes.');
 }
 
 async function _geofenceFire(state, reason, lat, lng, distance, note){
@@ -15075,10 +15089,10 @@ function _showGeofenceLogoutBanner(state, reason, distance){
     main.insertBefore(host, main.firstChild);
   }
   const distLine = (distance !== null && distance !== undefined)
-    ? ('You were ' + Math.round(distance) + ' meters from the store (limit: ' + Math.round(GEOFENCE_BREACH_RADIUS_METERS) + ' m).')
+    ? ('You were ' + feetLabel(distance) + ' from the store (limit: ' + feetLabel(GEOFENCE_BREACH_RADIUS_METERS) + ').')
     : 'Your phone\'s GPS was unavailable while you were on the clock.';
   const reasonText = ({
-    'off_site_3min':         'You walked more than 150 yards from your store for 3+ minutes.',
+    'off_site_3min':         'You walked more than ' + feetLabel(GEOFENCE_BREACH_RADIUS_METERS) + ' from your store for 3+ minutes.',
     'gps_permission_revoked':'You turned off GPS permission while clocked in.',
     'gps_unavailable':       'Your phone\'s location services stopped reporting.'
   })[reason] || reason;
@@ -15131,12 +15145,12 @@ async function notifyGeofenceBreach(payload){
   }
 
   const reasonText = ({
-    'off_site_3min':         agentName + ' walked >150 yards from ' + (payload.storeName || 'their store') + ' for 3+ minutes and was auto-clocked-out.',
+    'off_site_3min':         agentName + ' walked more than ' + feetLabel(GEOFENCE_BREACH_RADIUS_METERS) + ' from ' + (payload.storeName || 'their store') + ' for 3+ minutes and was auto-clocked-out.',
     'gps_permission_revoked':agentName + ' turned off GPS permission while clocked in at ' + (payload.storeName || 'their store') + ' — auto-clocked-out.',
     'gps_unavailable':       agentName + '\'s phone GPS became unavailable while clocked in at ' + (payload.storeName || 'their store') + ' — auto-clocked-out.'
   })[payload.reason] || (agentName + ' was auto-clocked-out from ' + (payload.storeName || 'their store') + '.');
   const distLine = (payload.distance !== null && payload.distance !== undefined)
-    ? ' Distance from store: ' + Math.round(payload.distance) + ' m.'
+    ? ' Distance from store: ' + feetLabel(payload.distance) + '.'
     : '';
   const titleAgent = '🚨 You were auto-clocked-out';
   const titleStaff = '🚨 GEOFENCE BREACH — ' + agentName;
@@ -16271,7 +16285,7 @@ async function notifyAuditSubmitted(audit, passed, storeName){
   if(currentProfile?.id) recipientIds.delete(currentProfile.id);
 
   const agentName = agent?.full_name || agent?.email || 'agent';
-  const distance = Math.round(audit.distance_from_store_meters);
+  const distanceFt = feetLabel(audit.distance_from_store_meters);   // "72 ft" display
   const action = audit.audit_type === 'check_in' ? 'checked IN' : 'checked OUT';
   const timeStr = new Date().toLocaleTimeString();
 
@@ -16285,13 +16299,13 @@ async function notifyAuditSubmitted(audit, passed, storeName){
           await notifyUser(r.id, {
             type: 'generic',
             title: '✓ ' + agentName + ' ' + action,
-            body: storeName + ' · ' + distance + 'm from store · ' + timeStr
+            body: storeName + ' · ' + distanceFt + ' from store · ' + timeStr
           });
         } catch(_){}
         try {
           await sendEmailViaFunction('announcement', r.email, {
             title: '✓ ' + agentName + ' ' + action,
-            body: storeName + '\nDistance from store: ' + distance + 'm\nTime: ' + new Date().toLocaleString(),
+            body: storeName + '\nDistance from store: ' + distanceFt + '\nTime: ' + new Date().toLocaleString(),
             posted_by: 'Circle Solutions Audit System'
           });
         } catch(_){}
@@ -16305,14 +16319,14 @@ async function notifyAuditSubmitted(audit, passed, storeName){
         await notifyUser(rid, {
           type: 'urgent',
           title: '🚨 GEOFENCE FAIL: ' + agentName,
-          body: agentName + ' tried to ' + action.toUpperCase() + ' at ' + storeName + ' but was ' + distance + 'm away. Possible fraud.',
+          body: agentName + ' tried to ' + action.toUpperCase() + ' at ' + storeName + ' but was ' + distanceFt + ' away. Possible fraud.',
           link_view: 'photo-audits-review'
         });
         try {
           await sendEmailViaFunction('urgent_custom', r.email, {
             full_name: r.full_name,
             subject_line: '🚨 GEOFENCE FAIL: ' + agentName,
-            message: agentName + ' attempted to ' + action + ' at ' + storeName + ' but their GPS shows them ' + distance + ' meters from the store.\n\nThis may indicate the agent is not actually at the store. The photo and GPS data are saved for review under "Photo Audits".\n\nTime: ' + new Date().toLocaleString(),
+            message: agentName + ' attempted to ' + action + ' at ' + storeName + ' but their GPS shows them ' + distanceFt + ' from the store.\n\nThis may indicate the agent is not actually at the store. The photo and GPS data are saved for review under "Photo Audits".\n\nTime: ' + new Date().toLocaleString(),
             action_required: 'Review the audit immediately and contact the agent.',
             sent_by: 'Circle Solutions Audit System'
           });
@@ -16321,7 +16335,7 @@ async function notifyAuditSubmitted(audit, passed, storeName){
           try {
             await sendSmsViaFunction({
               to_phone: r.phone, carrier: r.phone_carrier,
-              message: 'CSI ALERT: ' + agentName + ' geofence FAIL at ' + storeName + ' (' + distance + 'm away). Check back office.'
+              message: 'CSI ALERT: ' + agentName + ' geofence FAIL at ' + storeName + ' (' + distanceFt + ' away). Check back office.'
             });
           } catch(_){}
         }
@@ -17862,7 +17876,7 @@ window._logImpersonationAction = _logImpersonationAction;
 
 function renderAuditRow(a){
   const passed = a.geofence_passed;
-  const dist = Math.round(a.distance_from_store_meters || 0);
+  const dist = feetLabel(a.distance_from_store_meters || 0);
   const acc = Math.round(a.reported_accuracy_meters || 0);
   const avatarHtml = a.profiles?.avatar_url
     ? `<img src="${a.profiles.avatar_url}" style="width:32px;height:32px;border-radius:50%;object-fit:cover;"/>`
@@ -17878,8 +17892,8 @@ function renderAuditRow(a){
               <div style="font-size:13px;font-weight:600;color:#fff;">${escapeHtml(a.profiles?.full_name || a.profiles?.email || 'Unknown')}</div>
               <span style="background:${a.audit_type === 'check_in' ? 'rgba(0,255,136,0.12)' : 'rgba(0,198,255,0.12)'};color:${a.audit_type === 'check_in' ? '#00FF88' : '#00C6FF'};padding:1px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">${a.audit_type === 'check_in' ? 'CHECK IN' : 'CHECK OUT'}</span>
               ${passed
-                ? `<span style="background:rgba(0,255,136,0.12);color:#00FF88;padding:1px 8px;border-radius:50px;font-size:10px;font-weight:700;">✓ ${dist}m (ok)</span>`
-                : `<span style="background:rgba(248,113,113,0.12);color:#F87171;padding:1px 8px;border-radius:50px;font-size:10px;font-weight:700;">⛔ ${dist}m (FAIL)</span>`}
+                ? `<span style="background:rgba(0,255,136,0.12);color:#00FF88;padding:1px 8px;border-radius:50px;font-size:10px;font-weight:700;">✓ ${dist} (ok)</span>`
+                : `<span style="background:rgba(248,113,113,0.12);color:#F87171;padding:1px 8px;border-radius:50px;font-size:10px;font-weight:700;">⛔ ${dist} (FAIL)</span>`}
             </div>
             <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-top:3px;">
               ${escapeHtml(a.stores?.name || 'Unknown store')}${a.stores?.city ? ' — ' + escapeHtml(a.stores.city) : ''}
@@ -17908,7 +17922,7 @@ async function viewAuditPhoto(auditId, photoPath){
     selfieUrl = ssig?.signedUrl || '';
   }
   const passed = audit.geofence_passed;
-  const dist = Math.round(audit.distance_from_store_meters || 0);
+  const dist = feetLabel(audit.distance_from_store_meters || 0);
   const mapLink = `https://www.google.com/maps?q=${audit.reported_latitude},${audit.reported_longitude}`;
   const storeMapLink = audit.stores?.latitude && audit.stores?.longitude
     ? `https://www.google.com/maps?q=${audit.stores.latitude},${audit.stores.longitude}` : null;
@@ -17934,7 +17948,7 @@ async function viewAuditPhoto(auditId, photoPath){
       <div style="font-size:12.5px;color:rgba(255,255,255,0.75);line-height:1.7;">
         <strong>Action:</strong> ${audit.audit_type === 'check_in' ? 'CHECK IN' : 'CHECK OUT'}<br/>
         <strong>Store:</strong> ${escapeHtml(audit.stores?.name || 'Unknown')}<br/>
-        <strong>Distance from store:</strong> ${dist}m<br/>
+        <strong>Distance from store:</strong> ${dist}<br/>
         <strong>GPS accuracy:</strong> ±${Math.round(audit.reported_accuracy_meters || 0)}m<br/>
         <strong>Reported coords:</strong> <a href="${mapLink}" target="_blank" style="color:#00C6FF;">${audit.reported_latitude}, ${audit.reported_longitude} →</a><br/>
         ${storeMapLink ? `<strong>Store coords:</strong> <a href="${storeMapLink}" target="_blank" style="color:#00C6FF;">${audit.stores.latitude}, ${audit.stores.longitude} →</a><br/>` : ''}
