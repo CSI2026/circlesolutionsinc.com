@@ -14678,11 +14678,42 @@ async function submitPhotoAudit(){
   }
   const myLat = pos.coords.latitude;
   const myLng = pos.coords.longitude;
-  const accuracy = pos.coords.accuracy;
+  const accuracy = pos.coords.accuracy;       // meters of GPS-reported uncertainty
   const distance = haversineDistance(myLat, myLng, storeLat, storeLng);
-  const passed = distance <= radius;
 
-  status.innerHTML = `<span style="color:${passed ? '#00FF88' : '#F87171'};">📍 You are <strong>${feetLabel(distance)}</strong> from the store (limit: ${feetLabel(radius)}). GPS accuracy: ±${feetLabel(accuracy)}.</span>`;
+  // Phase 3.35 — GPS-accuracy compensation. Indoor GPS in big-box retail
+  // (steel roof, racking) routinely reads 80–200 ft (25–60 m) off even when
+  // the phone is at the kiosk. The geolocation API reports its OWN
+  // uncertainty in `accuracy` (the radius, in meters, of the circle within
+  // which there's ~68% confidence the true location lies). If the agent's
+  // best-case position — i.e. the reported point shifted by the full
+  // accuracy radius toward the store — is inside the fence, we pass.
+  //
+  //   effective_distance = max(0, distance − accuracy)
+  //   passed             = effective_distance ≤ radius
+  //
+  // Hard ceiling: if reported accuracy is laughably bad (> 1000m / ~3300ft)
+  // we don't trust the reading at all — fail the audit so the agent retries
+  // with a fresh GPS lock instead of getting a free pass from a junk fix.
+  const ACCURACY_CEILING_M = 1000;
+  let passed = false;
+  let effectiveDistance = distance;
+  if(accuracy > ACCURACY_CEILING_M){
+    passed = false;  // junk reading
+  } else {
+    effectiveDistance = Math.max(0, distance - accuracy);
+    passed = effectiveDistance <= radius;
+  }
+
+  // Tell the agent what the math actually said. When accuracy materially
+  // affects the verdict, show the effective distance so they understand
+  // they were within tolerance, not "scraping in" the hard way.
+  const accuracyHelped = (accuracy >= radius && distance > radius && passed);
+  const passVerb = passed ? 'You are' : 'You are';
+  const accuracyDetail = accuracyHelped
+    ? ` (effective: <strong>${feetLabel(effectiveDistance)}</strong> after GPS accuracy compensation)`
+    : '';
+  status.innerHTML = `<span style="color:${passed ? '#00FF88' : '#F87171'};">📍 ${passVerb} <strong>${feetLabel(distance)}</strong> from the store (limit: ${feetLabel(radius)}). GPS accuracy: ±${feetLabel(accuracy)}.${accuracyDetail}</span>`;
 
   status.innerHTML += '<br><span style="color:rgba(255,255,255,0.6);">⬆️ Uploading photo…</span>';
   const photoPath = currentProfile.id + '/' + Date.now() + '.jpg';
@@ -14975,8 +15006,28 @@ async function _geofenceTick(){
 
   const lat = pos.coords.latitude;
   const lng = pos.coords.longitude;
+  const accuracy = pos.coords.accuracy;       // GPS-reported uncertainty in meters
   const distance = haversineDistance(lat, lng, state.storeLat, state.storeLng);
-  const onSite = distance <= GEOFENCE_BREACH_RADIUS_METERS;
+
+  // Phase 3.35 — same accuracy compensation as check-in. The 100 m walk-off
+  // fence is generous, but indoor GPS scatter on a long shift inside a
+  // Walmart can still drift the reading past 100 m even when the agent
+  // hasn't moved. Without this compensation we'd auto-clock-out agents
+  // who are still on the floor. We trust the GPS's own uncertainty:
+  //   effective_distance = max(0, distance − accuracy)
+  //   onSite             = effective_distance ≤ fence
+  // Junk readings (accuracy > 1000m) are treated as "no usable signal" —
+  // we DON'T auto-clock-out on a single junk fix; we wait for the next
+  // poll to give a real answer (avoids false logouts from one bad reading).
+  const ACCURACY_CEILING_M = 1000;
+  if(accuracy > ACCURACY_CEILING_M){
+    // Too uncertain to act on. Skip this tick but don't reset the
+    // off-site timer — if they were already drifting off-site, the next
+    // good reading will resume the timer.
+    return;
+  }
+  const effectiveDistance = Math.max(0, distance - accuracy);
+  const onSite = effectiveDistance <= GEOFENCE_BREACH_RADIUS_METERS;
 
   const now = Date.now();
   state.lastCheckedAt = now;
