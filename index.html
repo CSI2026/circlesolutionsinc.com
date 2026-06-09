@@ -13002,7 +13002,7 @@ async function renderStoresAdmin(el){
                     <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#fff;letter-spacing:1px;">${escapeHtml(s.name)}${s.store_number ? ' #' + escapeHtml(s.store_number) : ''}</div>
                     ${prog ? `<span style="background:${prog.color}22;color:${prog.color};padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;">${prog.icon} ${escapeHtml(prog.name.split(' ')[0])}</span>` : ''}
                     ${!s.active ? '<span style="background:rgba(248,113,113,0.15);color:#F87171;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">INACTIVE</span>' : ''}
-                    ${hasGps ? `<span style="background:rgba(0,255,136,0.12);color:#00FF88;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;">📍 ${feetLabel(s.geofence_radius_meters || 10)} fence</span>` : '<span style="background:rgba(255,193,7,0.12);color:#FFD700;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;">⚠️ NO GPS</span>'}
+                    ${hasGps ? `<span style="background:rgba(0,255,136,0.12);color:#00FF88;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;">📍 ${feetLabel(s.geofence_radius_meters || 50)} fence</span>` : '<span style="background:rgba(255,193,7,0.12);color:#FFD700;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;">⚠️ NO GPS</span>'}
                   </div>
                   <div style="font-size:12.5px;color:rgba(255,255,255,0.55);margin-top:4px;">
                     ${s.street_address ? escapeHtml(s.street_address) + ' · ' : ''}${escapeHtml(s.city || '')}${s.state ? ', ' + escapeHtml(s.state) : ''}${s.zip ? ' ' + escapeHtml(s.zip) : ''}
@@ -13025,7 +13025,7 @@ async function renderStoresAdmin(el){
 async function openStoreEditor(storeId){
   const isEdit = !!storeId;
   let s = { id:'', name:'', store_number:'', street_address:'', city:'', state:'', zip:'',
-    latitude:null, longitude:null, geofence_radius_meters:10,
+    latitude:null, longitude:null, geofence_radius_meters:50,
     market_id:null, program_id:null, active:true, notes:'' };
   let assignedMMs = [];
   if(isEdit){
@@ -13136,8 +13136,8 @@ async function openStoreEditor(storeId){
     </div>
     <div class="form-group">
       <label class="form-label">Check-in Geofence Radius (meters)</label>
-      <input id="se-radius" class="form-input" type="number" min="10" max="2000" value="${s.geofence_radius_meters || 10}"/>
-      <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">10m (~30 ft) keeps agents AT the kiosk — they can't clock in from the parking lot. This is the recommended setting. (Note: once checked in, agents have a separate 100m walk-off limit so they can move around the store.)</div>
+      <input id="se-radius" class="form-input" type="number" min="10" max="2000" value="${s.geofence_radius_meters || 50}"/>
+      <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">50m (~165 ft) is the standard. Tight enough to keep agents from clocking in from the parking lot, generous enough to handle indoor GPS scatter. Once checked in, a separate 100m walk-off limit applies so agents can move freely inside.</div>
     </div>
 
     <hr style="border:none;border-top:1px solid rgba(255,255,255,0.08);margin:18px 0;"/>
@@ -13240,7 +13240,7 @@ async function saveStore(existingId){
     market_id: document.getElementById('se-market').value || null,
     latitude: parseFloat(document.getElementById('se-lat').value) || null,
     longitude: parseFloat(document.getElementById('se-lng').value) || null,
-    geofence_radius_meters: parseInt(document.getElementById('se-radius').value) || 10,
+    geofence_radius_meters: parseInt(document.getElementById('se-radius').value) || 50,
     active: document.getElementById('se-active').checked,
     notes: document.getElementById('se-notes').value.trim() || null,
     hours_override: hoursOverride
@@ -14304,7 +14304,7 @@ async function renderPhotoAuditCheckin(el){
       <div class="form-group">
         <label class="form-label">Store *</label>
         <select id="pa-store" class="form-input">
-          ${stores.map(s => `<option value="${s.id}" data-lat="${s.latitude}" data-lng="${s.longitude}" data-radius="${s.geofence_radius_meters || 10}">${escapeHtml(s.name)}${s.store_number ? ' #' + escapeHtml(s.store_number) : ''}${s.city ? ' — ' + escapeHtml(s.city) : ''}</option>`).join('')}
+          ${stores.map(s => `<option value="${s.id}" data-lat="${s.latitude}" data-lng="${s.longitude}" data-radius="${s.geofence_radius_meters || 50}">${escapeHtml(s.name)}${s.store_number ? ' #' + escapeHtml(s.store_number) : ''}${s.city ? ' — ' + escapeHtml(s.city) : ''}</option>`).join('')}
         </select>
       </div>
 
@@ -14631,7 +14631,7 @@ async function submitPhotoAudit(){
   const storeOpt = storeSelect.options[storeSelect.selectedIndex];
   const storeLat = parseFloat(storeOpt.dataset.lat);
   const storeLng = parseFloat(storeOpt.dataset.lng);
-  const radius = parseInt(storeOpt.dataset.radius) || 10;
+  const radius = parseInt(storeOpt.dataset.radius) || 50;
   const notes = document.getElementById('pa-notes').value.trim() || null;
 
   if(!auditType){ msg.innerHTML = '<span style="color:#F87171;">Pick check-in or check-out.</span>'; return; }
