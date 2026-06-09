@@ -17675,22 +17675,26 @@ async function openToolBoxResource(resourceId){
         <div style="display:flex;flex-direction:column;height:100%;position:relative;">
           ${linkBarHtml}
           ${fallbackHtml}
-          ${hideUrl ? `
-            <!-- Phase 3.36 — CSI Internet banner overlay.
-                 Sits ON TOP of the iframe's first ~80px so partner branding
-                 (logo, partner name, partner phone) is visually covered.
-                 We cannot reach into the cross-origin iframe DOM to hide
-                 anything inside it; an overlay is the only mechanism. -->
-            <div style="position:relative;height:84px;background:linear-gradient(135deg,#0B1E3F 0%,#1a3a6e 60%,#00C6FF 100%);display:flex;align-items:center;justify-content:center;padding:0 24px;flex-shrink:0;border-bottom:2px solid #00C6FF;box-shadow:0 4px 14px rgba(0,0,0,0.35);">
-              <div style="display:flex;align-items:center;gap:14px;">
-                <div style="font-size:32px;">🌐</div>
-                <div>
-                  <div style="font-family:'Bebas Neue',sans-serif;font-size:28px;letter-spacing:2.5px;color:#fff;line-height:1;">CSI INTERNET</div>
-                  <div style="font-size:11px;color:rgba(255,255,255,0.7);letter-spacing:1.5px;margin-top:3px;">CIRCLE SOLUTIONS · INTERNET ENROLLMENT</div>
+          <div style="flex:1;width:100%;position:relative;overflow:hidden;background:#fff;">
+            ${hideUrl ? `
+              <!-- Phase 3.36b — CSI Internet banner OVERLAYS the iframe top.
+                   Earlier version stacked the banner above the iframe, which
+                   left the partner's own logo + phone strip visible just below.
+                   Absolute positioning here covers the top ~190px of the
+                   embedded page (the partner header block on mmgallconnect
+                   measures ~180px tall in practice). Cross-origin iframe DOM
+                   is unreachable, so visual overlay is the only mechanism. -->
+              <div style="position:absolute;top:0;left:0;right:0;height:190px;background:linear-gradient(135deg,#0B1E3F 0%,#1a3a6e 60%,#00C6FF 100%);display:flex;align-items:center;justify-content:center;padding:0 24px;z-index:2;border-bottom:2px solid #00C6FF;box-shadow:0 6px 18px rgba(0,0,0,0.4);">
+                <div style="display:flex;align-items:center;gap:16px;">
+                  <div style="font-size:48px;">🌐</div>
+                  <div>
+                    <div style="font-family:'Bebas Neue',sans-serif;font-size:44px;letter-spacing:3px;color:#fff;line-height:1;">CSI INTERNET</div>
+                    <div style="font-size:13px;color:rgba(255,255,255,0.78);letter-spacing:2px;margin-top:6px;font-weight:600;">CIRCLE SOLUTIONS · INTERNET ENROLLMENT</div>
+                  </div>
                 </div>
-              </div>
-            </div>` : ''}
-          <iframe id="tbv-link-frame" src="${urlSafe}" style="flex:1;width:100%;border:0;background:#fff;" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer-when-downgrade"></iframe>
+              </div>` : ''}
+            <iframe id="tbv-link-frame" src="${urlSafe}" style="width:100%;height:100%;border:0;background:#fff;display:block;" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer-when-downgrade"></iframe>
+          </div>
         </div>`;
 
       // Detect frame blocks. Strategy:
