@@ -6948,6 +6948,15 @@ async function saveAgent(editId){
     // Auto-assign contracts for this agent's programs (filtered by their role)
     if(newUserId) await autoAssignContracts(newUserId, programs, role);
 
+    // Phase 3.36 — Auto-assign onboarding packets too. Calvin: "the agent
+    // should automatically get the agreements to fill out so they can go
+    // to the next steps and be all the way active asap without the need
+    // of waiting for anyone". Previously a manager had to manually open
+    // the agent's profile and click "Send Onboarding Packet" — that's
+    // gone now. Every active packet matching the agent's program(s)
+    // (filtered by role) gets assigned the instant the account is born.
+    if(newUserId) await autoAssignOnboardingPackets(newUserId, programs, role);
+
     // Send welcome email — best-effort
     let emailStatus = '';
     try {
@@ -6966,6 +6975,108 @@ async function saveAgent(editId){
     setTimeout(() => { closeAllModals(); renderMainContent(); }, 5500);
   } catch(e){
     msg.innerHTML = '<span style="color:#F87171;">Error: '+e.message+'. Make sure the admin-create-user Edge Function is deployed.</span>';
+  }
+}
+
+// Phase 3.36 — Auto-assign onboarding packet(s) when a new agent is born.
+// Mirrors autoAssignContracts. Pulls every active onboarding_packet whose
+// program_id matches one of the agent's assigned programs, then creates
+// the agent_onboarding + agent_onboarding_steps rows so the agent lands
+// on the wizard the very first time they log in (no "waiting on your
+// onboarding packet" holding screen).
+//
+// SAFE TO RE-RUN: skips any packet the agent already has assigned (any
+// status). Won't duplicate. Sends ONE notification + email per agent
+// (not per packet) to avoid spamming new hires.
+async function autoAssignOnboardingPackets(userId, programs, userRole){
+  if(!userId || !programs || programs.length === 0) return;
+
+  try {
+    // Pull every active packet for the agent's programs
+    const { data: packets } = await sb.from('onboarding_packets')
+      .select('*')
+      .eq('active', true)
+      .in('program_id', programs);
+    if(!packets || packets.length === 0) return;
+
+    // What does the agent already have? (idempotent guard)
+    const { data: existing } = await sb.from('agent_onboarding')
+      .select('packet_id')
+      .eq('user_id', userId);
+    const alreadyHas = new Set((existing || []).map(r => r.packet_id));
+
+    const newlyAssigned = [];
+
+    for(const pk of packets){
+      if(alreadyHas.has(pk.id)) continue;
+
+      // Load packet steps to snapshot
+      const { data: steps } = await sb.from('onboarding_steps')
+        .select('*')
+        .eq('packet_id', pk.id)
+        .order('display_order');
+
+      const snapshot = { ...pk, steps: steps || [] };
+
+      const { data: ao, error: aoErr } = await sb.from('agent_onboarding').insert({
+        user_id: userId,
+        packet_id: pk.id,
+        packet_snapshot: snapshot,
+        assigned_by: currentProfile.id,
+        status: 'in_progress'
+      }).select().single();
+      if(aoErr){ console.warn('Auto-packet insert failed:', aoErr); continue; }
+
+      // Per-step progress rows
+      const stepRows = (steps || []).map(s => ({
+        agent_onboarding_id: ao.id,
+        step_id: s.id,
+        step_type: s.step_type,
+        title: s.title,
+        display_order: s.display_order,
+        contains_pii: PII_STEPS.includes(s.step_type),
+        status: 'pending'
+      }));
+      if(stepRows.length > 0){
+        const { error: spErr } = await sb.from('agent_onboarding_steps').insert(stepRows);
+        if(spErr){ console.warn('Auto-step insert failed:', spErr); }
+      }
+
+      newlyAssigned.push(pk);
+    }
+
+    if(newlyAssigned.length === 0) return;
+
+    // Mark profile so the lockout/onboarding gate triggers on first login
+    try {
+      await sb.from('profiles').update({ onboarding_status: 'not_started' }).eq('id', userId);
+    } catch(_){}
+
+    // One notification + email per agent, listing every packet
+    try {
+      const { data: profile } = await sb.from('profiles').select('email,full_name').eq('id', userId).single();
+      const packetNames = newlyAssigned.map(p => p.name).filter(Boolean);
+      if(profile){
+        try {
+          await sendEmailViaFunction('onboarding_assigned', profile.email, {
+            full_name: profile.full_name,
+            packet_count: newlyAssigned.length,
+            packet_names: packetNames
+          });
+        } catch(_){}
+        try {
+          await notifyUser(userId, {
+            type: 'onboarding_assigned',
+            title: newlyAssigned.length > 1
+              ? newlyAssigned.length + ' onboarding packets assigned'
+              : 'Onboarding packet assigned',
+            body: packetNames.join(', ') + ' — sign in to begin.'
+          });
+        } catch(_){}
+      }
+    } catch(_){}
+  } catch(e){
+    console.warn('autoAssignOnboardingPackets failed:', e);
   }
 }
 
@@ -20697,13 +20808,19 @@ async function checkAndShowOnboardingLockout(){
     .eq('status', 'in_progress');
 
   if(!packets || packets.length === 0){
-    // No packets assigned yet — show a holding screen
+    // No packets assigned yet — show a holding screen.
+    // Phase 3.36 — Calvin's go-live rule: every new retail agent SHOULD
+    // already have a packet auto-assigned by saveAgent → autoAssignOnboardingPackets.
+    // If we're here, either (a) no active packet exists for any of their
+    // programs (configuration gap on the owner side), or (b) the auto-
+    // assign failed mid-flight. Tell them exactly that — don't tell them
+    // "your manager will send it shortly".
     document.getElementById('bo-content').innerHTML = `
       <div style="max-width:560px;margin:80px auto;text-align:center;padding:40px;background:#0d0d0d;border:1px solid rgba(255,255,255,0.08);border-radius:18px;">
-        <div style="font-size:60px;margin-bottom:18px;">⏳</div>
-        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:36px;color:#fff;margin-bottom:10px;letter-spacing:1px;">WELCOME TO CIRCLE SOLUTIONS</h1>
-        <p style="color:rgba(255,255,255,0.6);font-size:14px;line-height:1.6;margin-bottom:24px;">Your account is set up and waiting on your onboarding packet.<br/>Your manager will send it to you shortly.</p>
-        <p style="color:rgba(255,255,255,0.4);font-size:12.5px;line-height:1.6;">Once they do, you'll see a banner at the top of this page guiding you through it. You'll have access to the rest of the back office once your onboarding is complete.</p>
+        <div style="font-size:60px;margin-bottom:18px;">⚠️</div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:36px;color:#fff;margin-bottom:10px;letter-spacing:1px;">SETUP INCOMPLETE</h1>
+        <p style="color:rgba(255,255,255,0.6);font-size:14px;line-height:1.6;margin-bottom:24px;">No onboarding packet is available for your assigned program(s) yet. This is a setup issue on our side, not yours.</p>
+        <p style="color:rgba(255,255,255,0.4);font-size:12.5px;line-height:1.6;">Please contact the owner at <a href="mailto:info@circlesolutionsinc.com" style="color:#00C6FF;">info@circlesolutionsinc.com</a> or your hiring manager so they can finish your setup. You'll be able to begin the onboarding wizard within minutes of that call.</p>
         <button class="bo-btn bo-btn-ghost" style="margin-top:24px;" onclick="doLogout()">Sign Out</button>
       </div>`;
     // Hide sidebar to prevent navigation away
