@@ -17639,10 +17639,18 @@ async function openToolBoxResource(resourceId){
       // UNLESS hide_url is set on the resource (Phase 3.36), in which case
       // we never expose the URL or an external-tab button. Calvin: "I do
       // NOT want any external links happening" for masked resources.
+      //
+      // Belt-and-suspenders: even if the DB flag is FALSE (e.g. the row
+      // was created before the hide_url column was added and the post-
+      // migration UPDATE didn't run yet), we hard-mask any payload_url
+      // that points at mmgallconnect.com so the URL never leaks. Future
+      // partners we want to mask get added to MASKED_DOMAINS below.
       const url = r.payload_url;
       const titleSafe = escapeHtml(r.title);
       const urlSafe = escapeHtml(url);
-      const hideUrl = (r.hide_url === true);
+      const MASKED_DOMAINS = ['mmgallconnect.com'];
+      const isMaskedDomain = MASKED_DOMAINS.some(d => (url || '').toLowerCase().includes(d));
+      const hideUrl = (r.hide_url === true) || isMaskedDomain;
       const linkBarHtml = hideUrl
         ? '' // no link bar at all when masked — agent sees only the embedded page
         : `<div id="tbv-link-bar" style="padding:10px 16px;border-bottom:1px solid rgba(255,255,255,0.08);background:rgba(0,0,0,0.4);display:flex;align-items:center;gap:14px;font-size:11.5px;color:rgba(255,255,255,0.6);flex-shrink:0;">
@@ -17664,9 +17672,24 @@ async function openToolBoxResource(resourceId){
             <div style="margin-top:18px;font-size:11px;color:rgba(255,255,255,0.35);font-family:monospace;">${urlSafe}</div>
           </div>`;
       body.innerHTML = `
-        <div style="display:flex;flex-direction:column;height:100%;">
+        <div style="display:flex;flex-direction:column;height:100%;position:relative;">
           ${linkBarHtml}
           ${fallbackHtml}
+          ${hideUrl ? `
+            <!-- Phase 3.36 — CSI Internet banner overlay.
+                 Sits ON TOP of the iframe's first ~80px so partner branding
+                 (logo, partner name, partner phone) is visually covered.
+                 We cannot reach into the cross-origin iframe DOM to hide
+                 anything inside it; an overlay is the only mechanism. -->
+            <div style="position:relative;height:84px;background:linear-gradient(135deg,#0B1E3F 0%,#1a3a6e 60%,#00C6FF 100%);display:flex;align-items:center;justify-content:center;padding:0 24px;flex-shrink:0;border-bottom:2px solid #00C6FF;box-shadow:0 4px 14px rgba(0,0,0,0.35);">
+              <div style="display:flex;align-items:center;gap:14px;">
+                <div style="font-size:32px;">🌐</div>
+                <div>
+                  <div style="font-family:'Bebas Neue',sans-serif;font-size:28px;letter-spacing:2.5px;color:#fff;line-height:1;">CSI INTERNET</div>
+                  <div style="font-size:11px;color:rgba(255,255,255,0.7);letter-spacing:1.5px;margin-top:3px;">CIRCLE SOLUTIONS · INTERNET ENROLLMENT</div>
+                </div>
+              </div>
+            </div>` : ''}
           <iframe id="tbv-link-frame" src="${urlSafe}" style="flex:1;width:100%;border:0;background:#fff;" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer-when-downgrade"></iframe>
         </div>`;
 
