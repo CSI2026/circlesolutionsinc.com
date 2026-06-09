@@ -17635,24 +17635,38 @@ async function openToolBoxResource(resourceId){
       // portals (PowerKiosk, NRG rewards, banking sites, etc.) set
       // X-Frame-Options: DENY or CSP frame-ancestors and refuse to render
       // inside any iframe — there is no way to override that from our side.
-      // For those we surface a big "Open in New Tab" button right away.
+      // For those we surface a big "Open in New Tab" button right away —
+      // UNLESS hide_url is set on the resource (Phase 3.36), in which case
+      // we never expose the URL or an external-tab button. Calvin: "I do
+      // NOT want any external links happening" for masked resources.
       const url = r.payload_url;
       const titleSafe = escapeHtml(r.title);
       const urlSafe = escapeHtml(url);
-      body.innerHTML = `
-        <div style="display:flex;flex-direction:column;height:100%;">
-          <div id="tbv-link-bar" style="padding:10px 16px;border-bottom:1px solid rgba(255,255,255,0.08);background:rgba(0,0,0,0.4);display:flex;align-items:center;gap:14px;font-size:11.5px;color:rgba(255,255,255,0.6);flex-shrink:0;">
+      const hideUrl = (r.hide_url === true);
+      const linkBarHtml = hideUrl
+        ? '' // no link bar at all when masked — agent sees only the embedded page
+        : `<div id="tbv-link-bar" style="padding:10px 16px;border-bottom:1px solid rgba(255,255,255,0.08);background:rgba(0,0,0,0.4);display:flex;align-items:center;gap:14px;font-size:11.5px;color:rgba(255,255,255,0.6);flex-shrink:0;">
             <span style="opacity:0.6;">🔗</span>
             <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;font-family:monospace;">${urlSafe}</span>
             <a href="${urlSafe}" target="_blank" rel="noopener" class="bo-btn bo-btn-primary" style="text-decoration:none;display:inline-block;padding:6px 14px;font-size:11.5px;font-weight:700;letter-spacing:1px;white-space:nowrap;">OPEN IN NEW TAB ↗</a>
-          </div>
-          <div id="tbv-link-fallback" style="display:none;padding:48px 32px;color:rgba(255,255,255,0.85);text-align:center;flex:1;display:none;flex-direction:column;align-items:center;justify-content:center;">
+          </div>`;
+      const fallbackHtml = hideUrl
+        ? `<div id="tbv-link-fallback" style="display:none;padding:48px 32px;color:rgba(255,255,255,0.85);text-align:center;flex:1;flex-direction:column;align-items:center;justify-content:center;">
+            <div style="font-size:54px;margin-bottom:18px;">⏳</div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:28px;color:#fff;margin-bottom:10px;letter-spacing:1px;">${titleSafe}</div>
+            <p style="font-size:14px;color:rgba(255,255,255,0.6);margin-bottom:8px;max-width:520px;line-height:1.7;">This resource isn't available to load right now. Please contact the office for assistance.</p>
+          </div>`
+        : `<div id="tbv-link-fallback" style="display:none;padding:48px 32px;color:rgba(255,255,255,0.85);text-align:center;flex:1;display:none;flex-direction:column;align-items:center;justify-content:center;">
             <div style="font-size:54px;margin-bottom:18px;">🔒</div>
             <div style="font-family:'Bebas Neue',sans-serif;font-size:28px;color:#fff;margin-bottom:10px;letter-spacing:1px;">${titleSafe}</div>
             <p style="font-size:14px;color:rgba(255,255,255,0.6);margin-bottom:24px;max-width:520px;line-height:1.7;">This site is built for security and refuses to load inside another page. Click below to open it in a new tab — you'll stay signed in here in the back office.</p>
             <a href="${urlSafe}" target="_blank" rel="noopener" class="bo-btn bo-btn-primary" style="text-decoration:none;display:inline-flex;align-items:center;gap:10px;padding:14px 28px;font-size:14px;font-weight:700;letter-spacing:1px;">Open ${titleSafe} ↗</a>
             <div style="margin-top:18px;font-size:11px;color:rgba(255,255,255,0.35);font-family:monospace;">${urlSafe}</div>
-          </div>
+          </div>`;
+      body.innerHTML = `
+        <div style="display:flex;flex-direction:column;height:100%;">
+          ${linkBarHtml}
+          ${fallbackHtml}
           <iframe id="tbv-link-frame" src="${urlSafe}" style="flex:1;width:100%;border:0;background:#fff;" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer-when-downgrade"></iframe>
         </div>`;
 
