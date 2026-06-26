@@ -2231,6 +2231,14 @@ window.addEventListener("DOMContentLoaded",function(){
 // latest build. Scheme: YYYY.MM.DD.N  (N = the Nth build that day).
 // ───────────────────────────────────────────────────────────────
 // BUILD LOG (newest first)
+//   2026.06.26.8 — Live time clock. New 'On the Clock' board (owner/admin/
+//                  payroll) shows everyone currently checked in, live, auto-
+//                  refreshing every 20s — works from the audit log so people
+//                  appear the moment they clock in (pings add live GPS). Also
+//                  shown on the home page. FIX: managers who manage stores
+//                  directly (e.g. Reliant managers) can now check in/out and
+//                  see their stores — previously the tool only looked at their
+//                  MM's or agent_stores, so managers got an empty list.
 //   2026.06.26.7 — Check-out no longer asks which store (uses the open shift's
 //                  store automatically). App icon is now the real Circle
 //                  Solutions logo. Home button added to the top bar -> back to
@@ -2258,7 +2266,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.06.26.7';
+const BUILD_VERSION = '2026.06.26.8';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -2902,6 +2910,7 @@ function renderSidebar(){
     adminNavItems.push({ id:'photo-audits-review', label:'📸 Photo Audits & Time' });
   }
   if(isOwner || isAdmin || currentProfile.is_payroll_manager){
+    adminNavItems.push({ id:'on-the-clock', label:'🟢 On the Clock' });
     adminNavItems.push({ id:'payroll', label:'💵 Payroll' });
     // Phase 3.28: weekly hours totals + auto-lock alerts
     adminNavItems.push({ id:'payroll-hours', label:'⏱️ Payroll Hours' });
@@ -3036,6 +3045,13 @@ function renderSidebar(){
         .select('id', { count:'exact', head:true })
         .eq('user_id', currentProfile.id);
       if(directCount && directCount > 0) canCheckin = true;
+    }
+    // Managers / MMs who manage stores directly also get the check-in tool.
+    if(!canCheckin){
+      const { count: ownStoreCount } = await sb.from('store_managers')
+        .select('id', { count:'exact', head:true })
+        .eq('user_id', currentProfile.id);
+      if(ownStoreCount && ownStoreCount > 0) canCheckin = true;
     }
     document.querySelectorAll('[data-conditional="checkin"]').forEach(b => { b.style.display = canCheckin ? 'flex' : 'none'; });
 
@@ -3314,6 +3330,7 @@ function renderMainContent(){
   if(activeAdminView === 'lock-alerts'){ renderLockAlertsPanel(el); return; }
   if(activeAdminView === 'payroll-hours'){ renderPayrollHours(el); return; }
   if(activeAdminView === 'payroll-log-sheets'){ renderPayrollLogSheets(el); return; }
+  if(activeAdminView === 'on-the-clock'){ renderOnTheClockPanel(el); return; }
   if(activeAdminView === 'reliant-sale-entry'){ renderReliantSaleEntry(el); return; }
   if(activeAdminView === 'reliant-pending-approvals'){ renderReliantPendingApprovals(el); return; }
   if(activeAdminView === 'reliant-my-sales'){ renderReliantMySales(el); return; }
@@ -3332,8 +3349,9 @@ function renderMainContent(){
         <h2 style="font-family:'Bebas Neue',sans-serif;font-size:42px;color:#fff;margin-bottom:10px;">Welcome, ${escapeHtml(currentProfile.full_name || currentProfile.email)}</h2>
         <p style="color:rgba(255,255,255,0.5);font-size:14px;">Select a program from the sidebar to get started.</p>
       </div>
+      <div id="bo-otc-home"></div>
       <div id="bo-home-activity"></div>`;
-    try { if(canAccessPayroll()) renderHomeCheckinActivity(); } catch(_){}
+    try { if(canAccessPayroll()){ renderOnTheClockHome(); renderHomeCheckinActivity(); } } catch(_){}
     return;
   }
 
@@ -3390,6 +3408,116 @@ async function renderHomeCheckinActivity(){
   </div>`;
 }
 window.renderHomeCheckinActivity = renderHomeCheckinActivity;
+
+// ═══════════════════════════════════════════════════════════════
+// LIVE "ON THE CLOCK" BOARD (build 2026.06.26.8)
+// ───────────────────────────────────────────────────────────────
+// Shows everyone currently checked in (open shift = a passed check-in with no
+// check-out after it), live, auto-refreshing. Works from the audit log alone
+// (so it shows people the moment they clock in, even before the ping migration
+// is run); if pings exist, it also shows live "inside store / ping Xs ago".
+let _otcTimer = null;
+
+function _computeOpenShifts(audits){
+  const byU = {};
+  for(const a of (audits || [])){ if(!a.geofence_passed) continue; (byU[a.user_id] = byU[a.user_id] || []).push(a); }
+  const open = [];
+  for(const uid in byU){
+    const list = byU[uid].slice().sort((x,y) => new Date(x.created_at) - new Date(y.created_at));
+    let inTs = null, store = null;
+    for(const a of list){
+      if(a.audit_type === 'check_in'){ inTs = new Date(a.created_at).getTime(); store = a.store_id; }
+      else if(a.audit_type === 'check_out'){ inTs = null; store = null; }
+    }
+    if(inTs != null) open.push({ user_id: uid, checkInTs: inTs, store_id: store });
+  }
+  return open;
+}
+
+async function renderOnTheClockInto(host, refreshFnName){
+  if(!host) return;
+  const since = new Date(Date.now() - 36 * 3600 * 1000).toISOString();
+  let audits = [];
+  try {
+    const { data } = await sb.from('photo_audits')
+      .select('user_id,audit_type,store_id,created_at,geofence_passed')
+      .gte('created_at', since).order('created_at', { ascending: true });
+    audits = data || [];
+  } catch(_){}
+  const open = _computeOpenShifts(audits);
+  const uids = open.map(o => o.user_id);
+  const sids = [...new Set(open.map(o => o.store_id).filter(Boolean))];
+  const nameMap = {}, roleMap = {}, storeMap = {}, pingMap = {};
+  if(uids.length){
+    const { data: profs } = await sb.from('profiles').select('id,full_name,email,role').in('id', uids);
+    (profs || []).forEach(p => { nameMap[p.id] = p.full_name || p.email; roleMap[p.id] = p.role; });
+    if(sids.length){
+      const { data: strs } = await sb.from('stores').select('id,name').in('id', sids);
+      (strs || []).forEach(s => storeMap[s.id] = s.name);
+    }
+    try {
+      const { data: pings } = await sb.from('shift_pings').select('user_id,created_at,on_site')
+        .in('user_id', uids).gte('created_at', since).order('created_at', { ascending: false });
+      (pings || []).forEach(p => { if(!pingMap[p.user_id]) pingMap[p.user_id] = { ts: new Date(p.created_at).getTime(), on: !!p.on_site }; });
+    } catch(_){}
+  }
+  const now = Date.now();
+  const roleLabel = r => ({owner:'Owner',admin:'Admin',manager:'Manager',team_lead:'Team Lead',agent:'Agent'}[r] || '');
+  const rows = open.sort((a,b) => a.checkInTs - b.checkInTs).map(o => {
+    const elapsed = _fmtHMS((now - o.checkInTs) / 3600000);
+    const ping = pingMap[o.user_id];
+    let live;
+    if(ping && (now - ping.ts) <= PING_BRIDGE_MS){
+      const s = Math.round((now - ping.ts) / 1000);
+      live = '<span style="color:' + (ping.on ? '#00FF88' : '#FFC800') + ';font-weight:700;">● ' + (ping.on ? 'inside store' : 'OFF-SITE') + '</span> <span style="color:rgba(255,255,255,0.4);">ping ' + (s < 60 ? s + 's' : Math.round(s/60) + 'm') + ' ago</span>';
+    } else if(ping){
+      live = '<span style="color:#F87171;font-weight:700;">■ no ping ' + Math.round((now - ping.ts)/60000) + 'm</span>';
+    } else {
+      live = '<span style="color:rgba(255,255,255,0.4);">checked in · turn on live GPS by running the ping migration</span>';
+    }
+    return `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 0;border-top:1px solid rgba(255,255,255,0.06);">
+      <div style="min-width:0;">
+        <div style="color:#fff;font-size:14px;font-weight:700;">${escapeHtml(nameMap[o.user_id] || 'Unknown')} <span style="font-size:10.5px;color:rgba(255,255,255,0.4);font-weight:500;">${roleLabel(roleMap[o.user_id])}</span></div>
+        <div style="font-size:11.5px;color:rgba(255,255,255,0.5);">${escapeHtml(storeMap[o.store_id] || '—')} · since ${new Date(o.checkInTs).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'})}</div>
+        <div style="font-size:11px;margin-top:2px;">${live}</div>
+      </div>
+      <div style="text-align:right;flex-shrink:0;"><div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#00FF88;line-height:1;">${elapsed}</div><div style="font-size:10px;color:rgba(255,255,255,0.4);">on the clock</div></div>
+    </div>`;
+  }).join('');
+  host.innerHTML = `<div class="bo-card" style="text-align:left;">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:4px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#fff;letter-spacing:1px;">🟢 ON THE CLOCK <span style="color:#00FF88;">(${open.length})</span></div>
+      <button onclick="${refreshFnName}()" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.12);color:#fff;border-radius:50px;padding:6px 13px;font-size:12px;cursor:pointer;min-height:36px;">↻ Refresh</button>
+    </div>
+    <div style="font-size:11.5px;color:rgba(255,255,255,0.45);margin-bottom:6px;">Live — updates automatically every 20s. Everyone currently checked in.</div>
+    ${open.length ? rows : '<div style="color:rgba(255,255,255,0.55);padding:16px 0;text-align:center;">No one is on the clock right now.</div>'}
+  </div>`;
+}
+
+// Home-page version (small, above the activity feed) — auto-refreshes while home is shown.
+async function renderOnTheClockHome(){
+  const host = document.getElementById('bo-otc-home');
+  if(!host) return;
+  await renderOnTheClockInto(host, 'renderOnTheClockHome');
+  if(_otcTimer){ clearTimeout(_otcTimer); _otcTimer = null; }
+  _otcTimer = setTimeout(() => { if(document.body.contains(host)) renderOnTheClockHome(); }, 20000);
+}
+window.renderOnTheClockHome = renderOnTheClockHome;
+
+// Full-page panel version (nav item) for owner/admin/payroll.
+async function renderOnTheClockPanel(el){
+  if(!canAccessPayroll()){ el.innerHTML = '<div class="bo-card">Not authorized.</div>'; return; }
+  el.innerHTML = '<div id="bo-otc-panel"></div>';
+  const host = document.getElementById('bo-otc-panel');
+  await renderOnTheClockInto(host, 'renderOnTheClockPanelRefresh');
+  if(_otcTimer){ clearTimeout(_otcTimer); _otcTimer = null; }
+  _otcTimer = setTimeout(function tick(){
+    if(document.body.contains(host)){ renderOnTheClockInto(host, 'renderOnTheClockPanelRefresh').then(() => { _otcTimer = setTimeout(tick, 20000); }); }
+  }, 20000);
+}
+function renderOnTheClockPanelRefresh(){ const h = document.getElementById('bo-otc-panel'); if(h) renderOnTheClockInto(h, 'renderOnTheClockPanelRefresh'); }
+window.renderOnTheClockPanel = renderOnTheClockPanel;
+window.renderOnTheClockPanelRefresh = renderOnTheClockPanelRefresh;
 
 // ═══════════════════════════════════════════════════════════════
 // PROGRAM VIEW (dashboard, training, contracts, codes, leaderboard, announcements)
@@ -15097,6 +15225,17 @@ async function renderPhotoAuditCheckin(el){
     .eq('week_start_date', weekMonday)
     .maybeSingle();
   if(schedRow) scheduledStoreId = schedRow.store_id;
+
+  // Managers / MMs who manage stores DIRECTLY (store_managers.user_id = them)
+  // must be able to clock in at their own stores too. (Reliant managers etc.)
+  if(stores.length === 0){
+    const { data: ownSm } = await sb.from('store_managers').select('store_id').eq('user_id', currentProfile.id);
+    const ownIds = (ownSm || []).map(x => x.store_id);
+    if(ownIds.length > 0){
+      const { data: ownStores } = await sb.from('stores').select('*').in('id', ownIds).eq('active', true).order('name');
+      stores = ownStores || [];
+    }
+  }
 
   // Fallback to legacy agent_stores direct assignments if no stores found via MM
   if(stores.length === 0){
