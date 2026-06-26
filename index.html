@@ -2127,19 +2127,24 @@ footer{
 // latest build. Scheme: YYYY.MM.DD.N  (N = the Nth build that day).
 // ───────────────────────────────────────────────────────────────
 // BUILD LOG (newest first)
+//   2026.06.26.3 — Schedule + payroll. Block check-in when the agent isn't
+//                  scheduled to work that day (store/program weekly pattern).
+//                  Hard 40-hour weekly ceiling for everyone — clamps any
+//                  program cap and caps paid hours at 40 in the log sheets.
+//                  New PAYROLL LOG SHEETS panel: week list → roster (Mon–Sun
+//                  daily hours + week total) → printable per-agent sheet.
+//                  Shift now survives tab sleep — resumes the server-side
+//                  open shift on return (visibility/focus/pageshow).
 //   2026.06.26.2 — Field-test fixes. Cleaned up check-in status (one clear
 //                  outcome, no stacked "Uploading…" lines), guarded against
-//                  double-submit (was causing repeat lines / dup-risk), made
-//                  the SUBMIT button a distinct green so it's unmistakable,
-//                  "Done" now returns to the real dashboard (not the bare
-//                  welcome), and added an always-visible ON-THE-CLOCK pill
-//                  with a live running timer + quick Check Out.
-//   2026.06.26.1 — Geofence rebuild. Replaced the dual tight-circle fence
-//                  with ONE whole-store fence auto-sized from the store's
-//                  OpenStreetMap building footprint. Walk-off grace 3→15min.
-//                  Two-walk-off daily lockout. H:M:S time. Build-number badge.
+//                  double-submit, distinct green SUBMIT button, "Done"
+//                  returns to the real dashboard, always-visible ON-THE-CLOCK
+//                  pill with live timer + quick Check Out.
+//   2026.06.26.1 — Geofence rebuild. Whole-store fence auto-sized from the
+//                  OpenStreetMap footprint. Walk-off 3→15min. Two-walk-off
+//                  daily lockout. H:M:S time. Build-number badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.06.26.2';
+const BUILD_VERSION = '2026.06.26.3';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ─── Supabase client ───
@@ -2718,6 +2723,7 @@ function renderSidebar(){
     adminNavItems.push({ id:'payroll', label:'💵 Payroll' });
     // Phase 3.28: weekly hours totals + auto-lock alerts
     adminNavItems.push({ id:'payroll-hours', label:'⏱️ Payroll Hours' });
+    adminNavItems.push({ id:'payroll-log-sheets', label:'📋 Payroll Log Sheets' });
     adminNavItems.push({ id:'lock-alerts', label:'🚨 Lock Alerts' });
     // Phase 3.29: Reliant sales awaiting payroll approval
     adminNavItems.push({ id:'reliant-pending-approvals', label:'⚡ Reliant Approvals' });
@@ -3110,6 +3116,7 @@ function renderMainContent(){
   if(activeAdminView === 'payroll'){ renderPayroll(el); return; }
   if(activeAdminView === 'lock-alerts'){ renderLockAlertsPanel(el); return; }
   if(activeAdminView === 'payroll-hours'){ renderPayrollHours(el); return; }
+  if(activeAdminView === 'payroll-log-sheets'){ renderPayrollLogSheets(el); return; }
   if(activeAdminView === 'reliant-sale-entry'){ renderReliantSaleEntry(el); return; }
   if(activeAdminView === 'reliant-pending-approvals'){ renderReliantPendingApprovals(el); return; }
   if(activeAdminView === 'reliant-my-sales'){ renderReliantMySales(el); return; }
@@ -8040,18 +8047,22 @@ async function getAgentSalesForDay(userId, day){
   return Math.max(m, e);
 }
 
+// HARD ceiling on weekly paid hours for EVERYONE — no exceptions (Calvin's
+// rule). A program may set a STRICTER cap (<40) but never a looser one.
+const HARD_WEEKLY_HOUR_CAP = 40;
+
 // Determine the per-agent weekly hour cap by looking at their programs.
-// Uses the MAX cap across all their assigned programs (if multiple).
-// Default is 40 if nothing configured.
+// Uses the MAX cap across all their assigned programs (if multiple),
+// then clamps to the hard 40-hour ceiling. Default is 40.
 async function getAgentWeeklyHourCap(userId){
   const { data: p } = await sb.from('profiles').select('programs').eq('id', userId).single();
-  if(!p || !p.programs || p.programs.length === 0) return 40;
+  if(!p || !p.programs || p.programs.length === 0) return HARD_WEEKLY_HOUR_CAP;
   const { data: progs } = await sb.from('programs').select('weekly_hour_cap').in('id', p.programs);
   let max = 40;
   for(const pr of (progs || [])){
     if(pr.weekly_hour_cap && pr.weekly_hour_cap > max) max = pr.weekly_hour_cap;
   }
-  return max;
+  return Math.min(max, HARD_WEEKLY_HOUR_CAP);  // never above 40
 }
 
 // Agent's strictest zero-sales lockout threshold across their programs (MIN since strictest wins)
@@ -8120,13 +8131,13 @@ async function checkScheduleStatus(userId, auditType, storeId){
       if(withSchedule) schedule = withSchedule.schedule;
     }
   }
-  if(!schedule) return { offHours: false, minutesOff: 0, message: null, todayWindow: null };
+  if(!schedule) return { offHours: false, minutesOff: 0, message: null, todayWindow: null, scheduleExists: false, notScheduledToday: false };
 
   const todayWindow = getTodayWindow(schedule);
-  if(!todayWindow) return { offHours: false, minutesOff: 0, message: null, todayWindow: null };
+  if(!todayWindow) return { offHours: false, minutesOff: 0, message: null, todayWindow: null, scheduleExists: true, notScheduledToday: false };
 
   if(todayWindow.missing){
-    return { offHours: false, minutesOff: 0, message: 'Today (' + todayWindow.dayLabel + ') is not a scheduled work day. Hours still count toward your weekly total.', todayWindow };
+    return { offHours: false, minutesOff: 0, message: 'Today (' + todayWindow.dayLabel + ') is not a scheduled work day.', todayWindow, scheduleExists: true, notScheduledToday: true };
   }
   if(todayWindow.optional){
     return { offHours: false, minutesOff: 0, message: null, todayWindow };
@@ -8262,6 +8273,223 @@ function canAccessPayroll(){
   const r = currentProfile?.role;
   return r === 'owner' || r === 'admin' || currentProfile?.is_payroll_manager;
 }
+
+// ═══════════════════════════════════════════════════════════════
+// PAYROLL LOG SHEETS  (build 2026.06.26.3)
+// ═══════════════════════════════════════════════════════════════
+// Weekly payroll record. Owner + admin + payroll managers see a list of
+// weeks (each completed week is a saved, finalized sheet). Click a week to
+// see everyone who logged hours that week, broken down Mon–Sun with a week
+// total. Click a name for that person's printable weekly log sheet.
+// Hours are derived from the immutable photo-audit timestamps (the system of
+// record), capped at the hard 40-hour ceiling for pay.
+let _plsSelectedWeek = null;   // ISO date of the Monday of the selected week
+let _plsSelectedAgent = null;  // user_id of the selected agent
+
+const _PLS_DAYS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+
+// PURE: given the week's valid (geofence-passed) audits, build per-user daily
+// hours. Each shift is attributed to the weekday it STARTED on. Open shifts
+// count up to min(now, weekEnd). Per-shift runaway capped at 12h.
+// Returns: { userId: { days:[7 numbers], total, paid, capped } }
+function _computeWeekGrid(audits, weekStartMs, nowMs){
+  const WEEK_END = weekStartMs + 7 * 86400000;
+  const MAX_SHIFT_MS = 12 * 3600 * 1000;
+  const byUser = {};
+  for(const a of (audits || [])){
+    if(!a.geofence_passed) continue;
+    (byUser[a.user_id] = byUser[a.user_id] || []).push(a);
+  }
+  const out = {};
+  for(const uid in byUser){
+    const list = byUser[uid].slice().sort((x,y) => new Date(x.created_at) - new Date(y.created_at));
+    const days = [0,0,0,0,0,0,0];
+    let pending = null;
+    for(const a of list){
+      if(a.audit_type === 'check_in'){
+        pending = new Date(a.created_at).getTime();
+      } else if(a.audit_type === 'check_out' && pending != null){
+        let span = new Date(a.created_at).getTime() - pending;
+        if(span > MAX_SHIFT_MS) span = MAX_SHIFT_MS;
+        if(span > 0){ const idx = _weekdayIndex(pending); days[idx] += span; }
+        pending = null;
+      }
+    }
+    if(pending != null){
+      const end = Math.min(nowMs, WEEK_END);
+      let span = end - pending;
+      if(span > MAX_SHIFT_MS) span = MAX_SHIFT_MS;
+      if(span > 0){ const idx = _weekdayIndex(pending); days[idx] += span; }
+    }
+    const hrs = days.map(ms => ms / 3600000);
+    const total = hrs.reduce((s,h) => s + h, 0);
+    out[uid] = { days: hrs, total, paid: Math.min(total, HARD_WEEKLY_HOUR_CAP), capped: total > HARD_WEEKLY_HOUR_CAP };
+  }
+  return out;
+}
+// Monday=0 … Sunday=6
+function _weekdayIndex(ms){ return (new Date(ms).getDay() + 6) % 7; }
+
+// List the last N week-start Mondays (most recent first), based on getWeekStart.
+function _plsRecentWeeks(n){
+  const weeks = [];
+  let mon = getWeekStart();
+  for(let i = 0; i < n; i++){
+    const start = new Date(mon);
+    weeks.push(start);
+    mon = new Date(mon); mon.setDate(mon.getDate() - 7);
+  }
+  return weeks;
+}
+
+async function renderPayrollLogSheets(el){
+  if(!canAccessPayroll()){ el.innerHTML = '<div class="bo-card">Not authorized.</div>'; return; }
+  el.innerHTML = '<div id="pls-root"><div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading payroll log sheets…</div></div>';
+  await _plsRenderInto(document.getElementById('pls-root'));
+}
+
+async function _plsRenderInto(root){
+  if(!root) return;
+  if(_plsSelectedWeek && _plsSelectedAgent){ return _plsRenderAgentSheet(root); }
+  if(_plsSelectedWeek){ return _plsRenderWeekRoster(root); }
+  return _plsRenderWeekList(root);
+}
+
+function _plsRenderWeekList(root){
+  const weeks = _plsRecentWeeks(12);
+  const now = new Date();
+  const rows = weeks.map(ws => {
+    const we = new Date(ws); we.setDate(we.getDate() + 7);
+    const finalized = we <= now;
+    const label = ws.toLocaleDateString(undefined,{month:'short',day:'numeric'}) + ' – ' + new Date(we - 86400000).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'});
+    const badge = finalized
+      ? '<span style="background:rgba(0,255,136,0.14);color:#00FF88;padding:3px 10px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">✓ FINALIZED</span>'
+      : '<span style="background:rgba(0,198,255,0.14);color:#00C6FF;padding:3px 10px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">● IN PROGRESS</span>';
+    return `<button onclick="plsOpenWeek('${ws.toISOString()}')" style="display:flex;align-items:center;justify-content:space-between;width:100%;text-align:left;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:14px 16px;margin-bottom:8px;cursor:pointer;color:#fff;">
+      <div><div style="font-family:'Bebas Neue',sans-serif;font-size:18px;letter-spacing:1px;">WEEK OF ${ws.toLocaleDateString(undefined,{month:'long',day:'numeric'}).toUpperCase()}</div><div style="font-size:11.5px;color:rgba(255,255,255,0.5);">${label}</div></div>
+      <div style="display:flex;align-items:center;gap:12px;">${badge}<span style="color:rgba(255,255,255,0.4);">→</span></div>
+    </button>`;
+  }).join('');
+  root.innerHTML = `
+    <div style="margin-bottom:16px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:26px;letter-spacing:1px;color:#fff;">📋 PAYROLL LOG SHEETS</div>
+      <div style="font-size:12.5px;color:rgba(255,255,255,0.55);">Each completed week is a saved payroll sheet. Open a week to see everyone's hours by day, then open a name for their printable breakdown. Pay is capped at ${HARD_WEEKLY_HOUR_CAP} hours per week.</div>
+    </div>
+    ${rows}`;
+}
+
+async function _plsRenderWeekRoster(root){
+  root.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Building week sheet…</div>';
+  const ws = new Date(_plsSelectedWeek);
+  const we = new Date(ws); we.setDate(we.getDate() + 7);
+  const { data: audits } = await sb.from('photo_audits')
+    .select('user_id,audit_type,created_at,geofence_passed')
+    .gte('created_at', ws.toISOString())
+    .lt('created_at', we.toISOString())
+    .order('created_at', { ascending: true });
+  const grid = _computeWeekGrid(audits || [], ws.getTime(), Date.now());
+  const ids = Object.keys(grid);
+  let profiles = [];
+  if(ids.length){
+    const { data: profs } = await sb.from('profiles').select('id,full_name,email,role').in('id', ids);
+    profiles = profs || [];
+  }
+  // Sort by name
+  profiles.sort((a,b) => (a.full_name||a.email||'').localeCompare(b.full_name||b.email||''));
+  const finalized = we <= new Date();
+  const roleLabel = r => ({owner:'Owner',admin:'Admin',manager:'Manager',team_lead:'Team Lead',agent:'Agent'}[r] || r || '');
+
+  const bodyRows = profiles.map(p => {
+    const g = grid[p.id];
+    const dayCells = g.days.map(h => `<td style="text-align:center;padding:7px 6px;font-size:12px;color:${h>0?'rgba(255,255,255,0.85)':'rgba(255,255,255,0.25)'};white-space:nowrap;">${h>0?_fmtHM(h):'—'}</td>`).join('');
+    const capNote = g.capped ? '<div style="font-size:9px;color:#FFC800;">capped from '+_fmtHM(g.total)+'</div>' : '';
+    return `<tr style="border-top:1px solid rgba(255,255,255,0.05);cursor:pointer;" onclick="plsOpenAgent('${p.id}')">
+      <td style="padding:9px 10px;"><div style="font-size:13px;color:#fff;font-weight:600;">${escapeHtml(p.full_name||p.email)}</div><div style="font-size:10.5px;color:rgba(255,255,255,0.4);">${roleLabel(p.role)}</div></td>
+      ${dayCells}
+      <td style="text-align:right;padding:9px 10px;font-family:'Bebas Neue',sans-serif;font-size:17px;color:#00FF88;white-space:nowrap;">${_fmtHMS(g.paid)}${capNote}</td>
+    </tr>`;
+  }).join('');
+
+  const headCells = _PLS_DAYS.map(d => `<th style="text-align:center;padding:8px 6px;font-size:10px;color:rgba(255,255,255,0.45);letter-spacing:1px;">${d}</th>`).join('');
+  root.innerHTML = `
+    <button onclick="plsBackToWeeks()" style="background:none;border:none;color:#00C6FF;font-size:13px;cursor:pointer;padding:0;margin-bottom:12px;">← All weeks</button>
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:6px;">
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:24px;letter-spacing:1px;color:#fff;">WEEK OF ${ws.toLocaleDateString(undefined,{month:'long',day:'numeric',year:'numeric'}).toUpperCase()}</div>
+      <span style="background:${finalized?'rgba(0,255,136,0.14)':'rgba(0,198,255,0.14)'};color:${finalized?'#00FF88':'#00C6FF'};padding:3px 10px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">${finalized?'✓ FINALIZED':'● IN PROGRESS'}</span>
+    </div>
+    <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-bottom:14px;">${profiles.length} ${profiles.length===1?'person':'people'} logged hours · tap a name for their breakdown · pay capped at ${HARD_WEEKLY_HOUR_CAP}h</div>
+    ${profiles.length===0 ? '<div class="bo-card" style="color:rgba(255,255,255,0.5);">No hours logged this week.</div>' : `
+    <div class="bo-card" style="overflow-x:auto;padding:0;">
+      <table style="width:100%;border-collapse:collapse;min-width:640px;">
+        <thead><tr style="background:rgba(255,255,255,0.03);">
+          <th style="text-align:left;padding:8px 10px;font-size:10px;color:rgba(255,255,255,0.45);letter-spacing:1px;">NAME</th>
+          ${headCells}
+          <th style="text-align:right;padding:8px 10px;font-size:10px;color:rgba(255,255,255,0.45);letter-spacing:1px;">WEEK PAID</th>
+        </tr></thead>
+        <tbody>${bodyRows}</tbody>
+      </table>
+    </div>`}`;
+}
+
+async function _plsRenderAgentSheet(root){
+  root.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Building sheet…</div>';
+  const ws = new Date(_plsSelectedWeek);
+  const we = new Date(ws); we.setDate(we.getDate() + 7);
+  const [{ data: audits }, { data: prof }] = await Promise.all([
+    sb.from('photo_audits').select('user_id,audit_type,created_at,geofence_passed')
+      .eq('user_id', _plsSelectedAgent).gte('created_at', ws.toISOString()).lt('created_at', we.toISOString())
+      .order('created_at', { ascending: true }),
+    sb.from('profiles').select('id,full_name,email,role').eq('id', _plsSelectedAgent).maybeSingle()
+  ]);
+  const grid = _computeWeekGrid(audits || [], ws.getTime(), Date.now());
+  const g = grid[_plsSelectedAgent] || { days:[0,0,0,0,0,0,0], total:0, paid:0, capped:false };
+  const name = prof ? (prof.full_name || prof.email) : 'Agent';
+
+  const dayRows = _PLS_DAYS.map((d, i) => {
+    const dt = new Date(ws); dt.setDate(dt.getDate() + i);
+    const h = g.days[i];
+    return `<tr style="border-top:1px solid rgba(255,255,255,0.06);">
+      <td style="padding:11px 14px;font-size:13px;color:#fff;">${d} <span style="color:rgba(255,255,255,0.4);font-size:11.5px;">${dt.toLocaleDateString(undefined,{month:'short',day:'numeric'})}</span></td>
+      <td style="padding:11px 14px;text-align:right;font-family:'Bebas Neue',sans-serif;font-size:18px;color:${h>0?'#fff':'rgba(255,255,255,0.25)'};">${h>0?_fmtHMS(h):'—'}</td>
+    </tr>`;
+  }).join('');
+
+  root.innerHTML = `
+    <button onclick="plsBackToRoster()" style="background:none;border:none;color:#00C6FF;font-size:13px;cursor:pointer;padding:0;margin-bottom:12px;">← Back to week</button>
+    <div id="pls-print" style="background:#0d0d0d;border:1px solid rgba(255,255,255,0.1);border-radius:14px;padding:22px;">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:10px;border-bottom:1px solid rgba(255,255,255,0.1);padding-bottom:14px;margin-bottom:14px;">
+        <div>
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:26px;letter-spacing:1px;color:#fff;line-height:1;">${escapeHtml(name)}</div>
+          <div style="font-size:12px;color:rgba(255,255,255,0.55);margin-top:4px;">Weekly Payroll Log Sheet · Circle Solutions</div>
+          <div style="font-size:12px;color:rgba(255,255,255,0.55);">Week of ${ws.toLocaleDateString(undefined,{month:'long',day:'numeric',year:'numeric'})}</div>
+        </div>
+        <div style="text-align:right;">
+          <div style="font-size:10.5px;color:rgba(255,255,255,0.4);letter-spacing:1px;">WEEK PAID</div>
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:34px;color:#00FF88;line-height:1;">${_fmtHMS(g.paid)}</div>
+          ${g.capped ? '<div style="font-size:11px;color:#FFC800;">Worked '+_fmtHMS(g.total)+' · capped at '+HARD_WEEKLY_HOUR_CAP+'h</div>' : ''}
+        </div>
+      </div>
+      <table style="width:100%;border-collapse:collapse;">
+        <thead><tr><th style="text-align:left;padding:6px 14px;font-size:10px;color:rgba(255,255,255,0.45);letter-spacing:1px;">DAY</th><th style="text-align:right;padding:6px 14px;font-size:10px;color:rgba(255,255,255,0.45);letter-spacing:1px;">HOURS WORKED</th></tr></thead>
+        <tbody>${dayRows}</tbody>
+        <tfoot><tr style="border-top:2px solid rgba(255,255,255,0.15);"><td style="padding:12px 14px;font-weight:700;color:#fff;">WEEK TOTAL${g.capped?' (before cap)':''}</td><td style="padding:12px 14px;text-align:right;font-family:'Bebas Neue',sans-serif;font-size:20px;color:#fff;">${_fmtHMS(g.total)}</td></tr></tfoot>
+      </table>
+    </div>
+    <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap;">
+      <button class="bo-btn bo-btn-primary" style="padding:10px 18px;font-size:13px;" onclick="window.print()">🖨️ Print / Save PDF</button>
+    </div>`;
+}
+
+function plsOpenWeek(iso){ _plsSelectedWeek = iso; _plsSelectedAgent = null; _plsRenderInto(document.getElementById('pls-root')); }
+function plsOpenAgent(id){ _plsSelectedAgent = id; _plsRenderInto(document.getElementById('pls-root')); }
+function plsBackToWeeks(){ _plsSelectedWeek = null; _plsSelectedAgent = null; _plsRenderInto(document.getElementById('pls-root')); }
+function plsBackToRoster(){ _plsSelectedAgent = null; _plsRenderInto(document.getElementById('pls-root')); }
+window.renderPayrollLogSheets = renderPayrollLogSheets;
+window.plsOpenWeek = plsOpenWeek;
+window.plsOpenAgent = plsOpenAgent;
+window.plsBackToWeeks = plsBackToWeeks;
+window.plsBackToRoster = plsBackToRoster;
+
 
 async function renderPayroll(el){
   if(!canAccessPayroll()){ el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied.</div>'; return; }
@@ -14978,12 +15206,30 @@ async function submitPhotoAudit(){
     } catch(e){ console.warn('Two-walk-off lockout check failed (allowing check-in):', e); }
   }
 
+  // ─── Schedule gate: not assigned to work today = no check-in ───
+  // (build 2026.06.26.3) Uses the store/program weekly recurring schedule.
+  // If a schedule is defined and today's weekday isn't in it, block the
+  // check-in. If NO schedule is defined for the store/program, we allow it
+  // (we won't lock everyone out over missing config) — set the schedule on
+  // the program/store to enforce specific work days.
+  if(auditType === 'check_in'){
+    try {
+      const sched = await checkScheduleStatus(currentProfile.id, auditType, storeId);
+      if(sched.scheduleExists && sched.notScheduledToday){
+        const dayName = (sched.todayWindow && sched.todayWindow.dayLabel) || 'today';
+        msg.innerHTML = '<div style="background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.4);border-radius:8px;padding:14px;color:#F87171;font-size:13px;line-height:1.5;text-align:left;">📅 <strong>NOT SCHEDULED TODAY</strong><br><br>You are not assigned to work on ' + dayName + ' at this store, so you can\'t check in. If you believe this is an error, contact your manager.</div>';
+        return;
+      }
+    } catch(e){ console.warn('Schedule gate check failed (allowing check-in):', e); }
+  }
+
   // ─── 40hr weekly cap enforcement ───
-  // Block check-ins (not check-outs) if agent has hit the cap this week
+  // Block check-ins (not check-outs) if agent has hit the cap this week.
+  // Cap is clamped to a hard 40 ceiling for everyone — no exceptions.
   if(auditType === 'check_in'){
     try {
       const hoursThisWeek = await calculateAgentWeekHours(currentProfile.id);
-      const cap = await getAgentWeeklyHourCap(currentProfile.id);
+      const cap = Math.min(await getAgentWeeklyHourCap(currentProfile.id), HARD_WEEKLY_HOUR_CAP);
       if(hoursThisWeek >= cap){
         msg.innerHTML = '<div style="background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.4);border-radius:8px;padding:14px;color:#F87171;font-size:13px;line-height:1.5;text-align:left;">⛔ <strong>WEEKLY CAP REACHED</strong><br><br>You have logged ' + hoursThisWeek.toFixed(1) + ' hours this week (cap: ' + cap + ').<br><br>No additional check-ins are allowed until Monday. If you believe this is in error, contact your manager or payroll department.</div>';
         return;
@@ -15285,6 +15531,33 @@ function _stopOnClockTicker(){
 }
 window._startOnClockTicker = _startOnClockTicker;
 window._stopOnClockTicker = _stopOnClockTicker;
+
+// ═══════════════════════════════════════════════════════════════
+// STAY-ON-THE-CLOCK across tab sleep / app-switch (web limitation)
+// ═══════════════════════════════════════════════════════════════
+// A browser tab cannot run a true background process — when the phone
+// locks or the agent switches apps, the page is suspended and the GPS
+// monitor pauses. We can't stop the OS from suspending the tab, but the
+// SHIFT itself lives server-side (the open check_in row), and hours are
+// computed from timestamps — so nothing is lost. The moment the agent
+// returns to the page, we RESUME: re-arm the GPS monitor from the
+// server's open shift and re-show the live clock. This also re-checks
+// their location promptly so a walk-off that happened while away is
+// caught on return rather than ignored.
+let _lastResumeAt = 0;
+function _resumeShiftOnReturn(){
+  try {
+    if(typeof currentProfile === 'undefined' || !currentProfile) return;
+    const now = Date.now();
+    if(now - _lastResumeAt < 3000) return;   // debounce rapid focus/visibility bursts
+    _lastResumeAt = now;
+    _resumeGeofenceMonitorIfNeeded();         // re-arm GPS monitor from server open-shift
+    _refreshOnClockBanner();                  // re-show the live on-clock pill
+  } catch(_){}
+}
+document.addEventListener('visibilitychange', () => { if(document.visibilityState === 'visible') _resumeShiftOnReturn(); });
+window.addEventListener('focus', _resumeShiftOnReturn);
+window.addEventListener('pageshow', _resumeShiftOnReturn);
 
 // ═══════════════════════════════════════════════════════════════
 // LIVE GEOFENCE MONITOR  (whole-store fence, build 2026.06.26.1)
