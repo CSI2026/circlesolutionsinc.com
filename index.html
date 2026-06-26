@@ -2127,14 +2127,19 @@ footer{
 // latest build. Scheme: YYYY.MM.DD.N  (N = the Nth build that day).
 // ───────────────────────────────────────────────────────────────
 // BUILD LOG (newest first)
-//   2026.06.26.1 — Geofence rebuild. Replaced the dual tight-circle
-//                  fence with ONE whole-store fence auto-sized from
-//                  the store's OpenStreetMap building footprint.
-//                  Walk-off grace 3min → 15min. Added two-walk-off
-//                  daily check-in lockout. Time sheets now show
-//                  precise H:M:S. Added this build-number badge.
+//   2026.06.26.2 — Field-test fixes. Cleaned up check-in status (one clear
+//                  outcome, no stacked "Uploading…" lines), guarded against
+//                  double-submit (was causing repeat lines / dup-risk), made
+//                  the SUBMIT button a distinct green so it's unmistakable,
+//                  "Done" now returns to the real dashboard (not the bare
+//                  welcome), and added an always-visible ON-THE-CLOCK pill
+//                  with a live running timer + quick Check Out.
+//   2026.06.26.1 — Geofence rebuild. Replaced the dual tight-circle fence
+//                  with ONE whole-store fence auto-sized from the store's
+//                  OpenStreetMap building footprint. Walk-off grace 3→15min.
+//                  Two-walk-off daily lockout. H:M:S time. Build-number badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.06.26.1';
+const BUILD_VERSION = '2026.06.26.2';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ─── Supabase client ───
@@ -2225,6 +2230,12 @@ function showPage(id){
   if(id === 'b2b-page'){
     loadPublicB2BPartners();
   }
+
+  // On-the-clock pill: run only inside the back office.
+  try {
+    if(id === 'backoffice' && currentProfile){ _startOnClockTicker(); }
+    else { _stopOnClockTicker(); }
+  } catch(_){}
 }
 
 // Load active campaigns under the b2b program for the public Partners section.
@@ -14586,7 +14597,7 @@ async function renderPhotoAuditCheckin(el){
       <div class="form-group">
         <label class="form-label">Store *</label>
         <select id="pa-store" class="form-input">
-          ${stores.map(s => `<option value="${s.id}" data-lat="${s.latitude}" data-lng="${s.longitude}" data-radius="${s.geofence_radius_meters || 50}">${escapeHtml(s.name)}${s.store_number ? ' #' + escapeHtml(s.store_number) : ''}${s.city ? ' — ' + escapeHtml(s.city) : ''}</option>`).join('')}
+          ${stores.map(s => `<option value="${s.id}" data-lat="${s.latitude}" data-lng="${s.longitude}" data-radius="${s.geofence_radius_meters || GEOFENCE_DEFAULT_FENCE_METERS}">${escapeHtml(s.name)}${s.store_number ? ' #' + escapeHtml(s.store_number) : ''}${s.city ? ' — ' + escapeHtml(s.city) : ''}</option>`).join('')}
         </select>
       </div>
 
@@ -14617,7 +14628,8 @@ async function renderPhotoAuditCheckin(el){
 
       <div class="form-group"><label class="form-label">Notes (optional)</label><textarea id="pa-notes" class="form-input" rows="2" placeholder="Anything to log? Issues, observations, etc."></textarea></div>
       <div id="pa-status" style="margin:10px 0;font-size:12.5px;color:rgba(255,255,255,0.5);"></div>
-      <button class="bo-btn bo-btn-primary" style="width:100%;padding:14px;font-size:14px;" onclick="submitPhotoAudit()">Submit Check-${suggested === 'check_out' ? 'Out' : 'In'}</button>
+      <div style="border-top:1px solid rgba(255,255,255,0.08);margin:6px 0 14px;"></div>
+      <button id="pa-submit-btn" class="bo-btn" style="width:100%;padding:18px;font-size:17px;font-weight:800;letter-spacing:1px;border:none;border-radius:12px;background:linear-gradient(135deg,#00C853,#00FF88);color:#06210f;box-shadow:0 6px 22px rgba(0,255,136,0.32);cursor:pointer;" onclick="submitPhotoAudit()">✓ SUBMIT CHECK-${suggested === 'check_out' ? 'OUT' : 'IN'}</button>
       <div id="pa-msg" style="margin-top:12px;font-size:13px;text-align:center;"></div>
     </div>`;
 }
@@ -14902,18 +14914,32 @@ function paOnTypeChange(){
     const preview = document.getElementById('pa-selfie-preview');
     if(preview) preview.innerHTML = '';
   }
+  // Keep the green submit button label in sync with the selected action.
+  const sbtn = document.getElementById('pa-submit-btn');
+  if(sbtn && !window._paSubmitting){
+    sbtn.innerHTML = '✓ SUBMIT CHECK-' + (auditType === 'check_out' ? 'OUT' : 'IN');
+  }
 }
 
 async function submitPhotoAudit(){
+  // Guard against double-tap / concurrent submits. This was the root cause of
+  // the stacked "Uploading…" lines and risked duplicate check-in rows.
+  if(window._paSubmitting) return;
+  window._paSubmitting = true;
+  const _submitBtn = document.getElementById('pa-submit-btn');
+  const _origBtnLabel = _submitBtn ? _submitBtn.innerHTML : '';
+  if(_submitBtn){ _submitBtn.disabled = true; _submitBtn.style.opacity = '0.55'; _submitBtn.style.cursor = 'wait'; _submitBtn.innerHTML = '⏳ Submitting…'; }
+
   const msg = document.getElementById('pa-msg');
   const status = document.getElementById('pa-status');
+  try {
   const auditType = document.querySelector('input[name="pa-type"]:checked')?.value;
   const storeSelect = document.getElementById('pa-store');
   const storeId = storeSelect.value;
   const storeOpt = storeSelect.options[storeSelect.selectedIndex];
   const storeLat = parseFloat(storeOpt.dataset.lat);
   const storeLng = parseFloat(storeOpt.dataset.lng);
-  const radius = parseInt(storeOpt.dataset.radius) || 50;
+  const radius = parseInt(storeOpt.dataset.radius) || GEOFENCE_DEFAULT_FENCE_METERS;
   const notes = document.getElementById('pa-notes').value.trim() || null;
 
   if(!auditType){ msg.innerHTML = '<span style="color:#F87171;">Pick check-in or check-out.</span>'; return; }
@@ -15017,28 +15043,28 @@ async function submitPhotoAudit(){
   // affects the verdict, show the effective distance so they understand
   // they were within tolerance, not "scraping in" the hard way.
   const accuracyHelped = (accuracy >= radius && distance > radius && passed);
-  const passVerb = passed ? 'You are' : 'You are';
   const accuracyDetail = accuracyHelped
     ? ` (effective: <strong>${feetLabel(effectiveDistance)}</strong> after GPS accuracy compensation)`
     : '';
-  status.innerHTML = `<span style="color:${passed ? '#00FF88' : '#F87171'};">📍 ${passVerb} <strong>${feetLabel(distance)}</strong> from the store (limit: ${feetLabel(radius)}). GPS accuracy: ±${feetLabel(accuracy)}.${accuracyDetail}</span>`;
+  const _distanceLine = `<span style="color:${passed ? '#00FF88' : '#F87171'};">📍 You are <strong>${feetLabel(distance)}</strong> from the store (limit: ${feetLabel(radius)}). GPS accuracy: ±${feetLabel(accuracy)}.${accuracyDetail}</span>`;
+  status.innerHTML = _distanceLine + '<br><span style="color:rgba(255,255,255,0.6);">⬆️ Uploading photos…</span>';
 
-  status.innerHTML += '<br><span style="color:rgba(255,255,255,0.6);">⬆️ Uploading photo…</span>';
   const photoPath = currentProfile.id + '/' + Date.now() + '.jpg';
   const { error: upErr } = await sb.storage.from('photo-audits').upload(photoPath, _paPhotoBlob);
   if(upErr){
-    msg.innerHTML = '<span style="color:#F87171;">Photo upload failed: ' + upErr.message + '</span>';
+    status.innerHTML = _distanceLine;
+    msg.innerHTML = '<span style="color:#F87171;">Photo upload failed: ' + upErr.message + '. Tap submit to try again.</span>';
     return;
   }
 
-  // Upload selfie if present (check-in only)
+  // Upload selfie if present (check-in only) — same single status line, no stacking
   let selfiePath = null;
   if(_paSelfieBlob){
-    status.innerHTML += '<br><span style="color:rgba(255,255,255,0.6);">⬆️ Uploading selfie…</span>';
     selfiePath = currentProfile.id + '/selfie-' + Date.now() + '.jpg';
     const { error: selfieErr } = await sb.storage.from('photo-audits').upload(selfiePath, _paSelfieBlob);
     if(selfieErr){
-      msg.innerHTML = '<span style="color:#F87171;">Selfie upload failed: ' + selfieErr.message + '</span>';
+      status.innerHTML = _distanceLine;
+      msg.innerHTML = '<span style="color:#F87171;">Selfie upload failed: ' + selfieErr.message + '. Tap submit to try again.</span>';
       return;
     }
   }
@@ -15097,7 +15123,8 @@ async function submitPhotoAudit(){
           storeLat: storeLat,
           storeLng: storeLng,
           storeName: storeOpt.text,
-          fenceRadius: radius
+          fenceRadius: radius,
+          checkInAt: audit.created_at
         });
       } catch(e){ console.warn('Geofence monitor start failed:', e); }
     }
@@ -15125,31 +15152,139 @@ async function submitPhotoAudit(){
         }
       } catch(_){}
     }
-    msg.innerHTML = '<span style="color:#00FF88;font-size:14px;">✓ ' + (auditType === 'check_in' ? 'Checked in' : 'Checked out') + ' successfully.</span>' + extras + `
+    // Clear the upload spinner and HIDE the submit button so there is exactly
+    // ONE clear outcome on screen — no confusion about whether it took.
+    status.innerHTML = '';
+    if(_submitBtn) _submitBtn.style.display = 'none';
+    const inAt = new Date(audit.created_at).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
+    const bigLine = (auditType === 'check_in')
+      ? '<div style="font-size:22px;font-weight:800;letter-spacing:0.5px;">✓ YOU\'RE CHECKED IN</div><div style="font-size:13px;color:rgba(255,255,255,0.7);margin-top:4px;">On the clock at <strong>' + escapeHtml(storeOpt.text) + '</strong> since ' + inAt + '. Your clock is now running.</div>'
+      : '<div style="font-size:22px;font-weight:800;letter-spacing:0.5px;">✓ YOU\'RE CHECKED OUT</div><div style="font-size:13px;color:rgba(255,255,255,0.7);margin-top:4px;">Clocked out at <strong>' + escapeHtml(storeOpt.text) + '</strong> at ' + inAt + '. Your hours have been logged.</div>';
+    msg.innerHTML = '<div style="background:rgba(0,255,136,0.1);border:1px solid rgba(0,255,136,0.45);border-radius:12px;padding:18px;color:#00FF88;text-align:center;">' + bigLine + '</div>' + extras + `
       <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;justify-content:center;">
-        <button class="bo-btn bo-btn-primary" onclick="boShowAdmin('photo-audit-checkin')" style="padding:10px 20px;font-size:13px;">📸 Submit Another</button>
-        <button class="bo-btn bo-btn-ghost" onclick="checkinGoHome()" style="padding:10px 20px;font-size:13px;">✓ Done</button>
+        <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('photo-audit-checkin')" style="padding:10px 20px;font-size:13px;">📸 New Check-In / Out</button>
+        <button class="bo-btn bo-btn-primary" onclick="checkinGoHome()" style="padding:10px 20px;font-size:13px;">✓ Done — Go to Dashboard</button>
       </div>`;
+    try { _refreshOnClockBanner(); } catch(_){}
   } else {
-    msg.innerHTML = '<div style="background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.4);border-radius:8px;padding:14px;color:#F87171;font-size:13px;line-height:1.5;text-align:left;">⛔ <strong>FRAUD ALERT TRIGGERED</strong><br><br>You were ' + feetLabel(distance) + ' from the store (allowed: ' + feetLabel(radius) + '). The submission has been logged and your manager + the owner have been notified immediately.</div>' + `
+    // Failed geofence — clear spinner, keep the button available to retry.
+    status.innerHTML = '';
+    msg.innerHTML = '<div style="background:rgba(248,113,113,0.1);border:1px solid rgba(248,113,113,0.5);border-radius:12px;padding:18px;color:#F87171;text-align:left;"><div style="font-size:20px;font-weight:800;text-align:center;">✕ NOT CHECKED IN</div><div style="font-size:13px;line-height:1.5;margin-top:8px;">You were ' + feetLabel(distance) + ' from the store (you must be within ' + feetLabel(radius) + ' — inside the store). This attempt was logged and your manager + the owner were notified. Walk inside and try again.</div></div>' + `
       <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;justify-content:center;">
         <button class="bo-btn bo-btn-ghost" onclick="checkinGoHome()" style="padding:10px 20px;font-size:13px;">← Back to Dashboard</button>
       </div>`;
   }
   // No auto-redirect — agent stays on this screen and uses the buttons above.
-  // (Previously a setTimeout auto-rendered after 3.5s, which could cause a session
-  //  refresh race during long uploads and bounce them to login.)
+  } finally {
+    // Always release the submit guard. On success the button is hidden; on any
+    // failure/early-return path it's re-enabled so they can retry cleanly.
+    window._paSubmitting = false;
+    if(_submitBtn && _submitBtn.style.display !== 'none'){
+      _submitBtn.disabled = false; _submitBtn.style.opacity = '1'; _submitBtn.style.cursor = 'pointer'; _submitBtn.innerHTML = _origBtnLabel;
+    }
+  }
 }
 
-// Helper to return to backoffice home (clears active view + program)
+// Return to the user's real dashboard (NOT the bare welcome screen).
+// Mirrors the role-based landing logic used right after login.
 function checkinGoHome(){
-  activeAdminView = null;
-  activeProgramId = null;
+  try {
+    const p = currentProfile || {};
+    const isAdminRole = p.role === 'owner' || p.role === 'admin';
+    const userPrograms = isAdminRole ? (allPrograms || []).map(x => x.id) : (p.programs || []);
+    if(p.role === 'owner'){
+      activeAdminView = 'owner-panel';
+      activeProgramId = null; activeCampaignId = null;
+    } else if(userPrograms.length > 0){
+      activeProgramId = userPrograms[0];
+      activeSubView = 'dashboard';
+      activeAdminView = null;
+      const accessible = getAccessibleCampaignsForProgram(activeProgramId);
+      activeCampaignId = (accessible.length === 1 && p.role !== 'admin') ? accessible[0].id : null;
+    } else if(p.role === 'admin' || p.role === 'manager'){
+      activeProgramId = null; activeCampaignId = null;
+      activeAdminView = 'agents';
+    } else {
+      activeProgramId = null; activeCampaignId = null; activeAdminView = null;
+    }
+  } catch(_){
+    activeAdminView = null; activeProgramId = null;
+  }
   renderSidebar();
   renderMainContent();
   scrollMainToTop();
+  try { _refreshOnClockBanner(); } catch(_){}
 }
 window.checkinGoHome = checkinGoHome;
+
+// ═══════════════════════════════════════════════════════════════
+// ON-THE-CLOCK PILL — always-visible "you're clocked in" indicator
+// ═══════════════════════════════════════════════════════════════
+// A fixed pill that appears whenever this session has an OPEN shift,
+// showing the store and a LIVE running timer. It survives navigation
+// (fixed to the body, not inside the re-rendered content) so the agent
+// or manager always knows they're on the clock and the time is logging.
+// Note: the live timer is a reassurance display; payroll hours are still
+// computed precisely from the check-in/out audit timestamps in the back
+// office. Tapping it jumps to check-out.
+let _onClockTickerId = null;
+
+function _fmtClock(ms){
+  if(!(ms >= 0)) ms = 0;
+  let s = Math.floor(ms / 1000);
+  const h = Math.floor(s / 3600); s -= h * 3600;
+  const m = Math.floor(s / 60);   s -= m * 60;
+  return h + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+}
+
+function _refreshOnClockBanner(){
+  const existing = document.getElementById('on-clock-pill');
+  // Only in the back office, for a logged-in user, with an OPEN shift.
+  const loggedIn = !!(typeof currentProfile !== 'undefined' && currentProfile);
+  const onCheckinScreen = (typeof activeAdminView !== 'undefined' && activeAdminView === 'photo-audit-checkin');
+  let state = null;
+  try { state = _gmReadState(); } catch(_){ state = null; }
+  const open = loggedIn && state && !state.triggered && !onCheckinScreen;
+
+  if(!open){
+    if(existing) existing.remove();
+    return;
+  }
+
+  let pill = existing;
+  if(!pill){
+    pill = document.createElement('div');
+    pill.id = 'on-clock-pill';
+    pill.style.cssText = 'position:fixed;left:50%;transform:translateX(-50%);bottom:max(16px,env(safe-area-inset-bottom));z-index:5000;display:flex;align-items:center;gap:12px;background:linear-gradient(135deg,#00C853,#00FF88);color:#06210f;padding:10px 16px;border-radius:50px;box-shadow:0 8px 28px rgba(0,255,136,0.4);font-family:-apple-system,system-ui,sans-serif;cursor:pointer;max-width:92vw;';
+    pill.onclick = () => { try { boShowAdmin('photo-audit-checkin'); } catch(_){} };
+    document.body.appendChild(pill);
+  }
+
+  const ref = state.checkInAt ? new Date(state.checkInAt).getTime() : (state.startedAt || Date.now());
+  const elapsed = Date.now() - ref;
+  pill.innerHTML =
+    '<span style="width:9px;height:9px;border-radius:50%;background:#06210f;box-shadow:0 0 0 4px rgba(6,33,15,0.18);flex-shrink:0;"></span>' +
+    '<span style="font-weight:800;font-size:13px;letter-spacing:0.5px;white-space:nowrap;">ON THE CLOCK</span>' +
+    '<span style="font-variant-numeric:tabular-nums;font-weight:800;font-size:15px;white-space:nowrap;">' + _fmtClock(elapsed) + '</span>' +
+    '<span style="font-size:11px;font-weight:700;opacity:0.8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:34vw;">' + escapeHtml(state.storeName || '') + '</span>' +
+    '<span style="font-size:11px;font-weight:800;background:rgba(6,33,15,0.18);padding:4px 10px;border-radius:50px;white-space:nowrap;">Check Out →</span>';
+}
+window._refreshOnClockBanner = _refreshOnClockBanner;
+
+// Run the reconciler every second for the whole back-office session, so the
+// pill stays correct across navigation, check-in, check-out, and auto-logout.
+function _startOnClockTicker(){
+  if(_onClockTickerId) return;
+  _onClockTickerId = setInterval(() => { try { _refreshOnClockBanner(); } catch(_){} }, 1000);
+  try { _refreshOnClockBanner(); } catch(_){}
+}
+function _stopOnClockTicker(){
+  if(_onClockTickerId){ clearInterval(_onClockTickerId); _onClockTickerId = null; }
+  const pill = document.getElementById('on-clock-pill');
+  if(pill) pill.remove();
+}
+window._startOnClockTicker = _startOnClockTicker;
+window._stopOnClockTicker = _stopOnClockTicker;
 
 // ═══════════════════════════════════════════════════════════════
 // LIVE GEOFENCE MONITOR  (whole-store fence, build 2026.06.26.1)
@@ -15221,6 +15356,7 @@ async function startGeofenceMonitor(opts){
     storeLng:       opts.storeLng,
     storeName:      opts.storeName || '',
     fenceRadius:    (opts.fenceRadius && opts.fenceRadius > 0) ? opts.fenceRadius : GEOFENCE_DEFAULT_FENCE_METERS,
+    checkInAt:      opts.checkInAt || new Date().toISOString(),  // for the live on-clock timer
     startedAt:      Date.now(),
     firstBreachAt:  null,           // ms timestamp of first off-site reading; null if currently on-site
     lastCheckedAt:  null,
@@ -15281,6 +15417,13 @@ async function _resumeGeofenceMonitorIfNeeded(){
       state.fenceRadius = (st && st.geofence_radius_meters > 0) ? st.geofence_radius_meters : GEOFENCE_DEFAULT_FENCE_METERS;
       _gmWriteState(state);
     } catch(_){ state.fenceRadius = GEOFENCE_DEFAULT_FENCE_METERS; }
+  }
+  // Backfill the check-in time for the live on-clock timer (cold reload).
+  if(!state.checkInAt && state.checkInAuditId){
+    try {
+      const { data: ci } = await sb.from('photo_audits').select('created_at').eq('id', state.checkInAuditId).maybeSingle();
+      if(ci && ci.created_at){ state.checkInAt = ci.created_at; _gmWriteState(state); }
+    } catch(_){}
   }
 
   if(_geofenceMonitorId) clearInterval(_geofenceMonitorId);
