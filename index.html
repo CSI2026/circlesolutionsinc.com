@@ -842,12 +842,14 @@ window.addEventListener("DOMContentLoaded",function(){
     var how = isIOS ? "tap the Share button, then \u201cAdd to Home Screen.\u201d" : "open your browser menu (\u22ee), then \u201cAdd to Home screen.\u201d";
     var bar=document.createElement("div");
     bar.id="cs-pwa-tip";
-    bar.style.cssText="position:fixed;left:8px;right:8px;bottom:max(10px,env(safe-area-inset-bottom));z-index:6000;background:#11151c;border:1px solid rgba(0,255,136,0.35);border-radius:12px;padding:12px 14px;display:flex;align-items:center;gap:12px;box-shadow:0 8px 28px rgba(0,0,0,0.5);font-family:-apple-system,system-ui,sans-serif;";
-    bar.innerHTML='<div style="font-size:22px;line-height:1;">\uD83D\uDCF2</div>'+
-      '<div style="flex:1;color:#fff;font-size:12.5px;line-height:1.45;">Add Circle Solutions to your home screen for one-tap access. To install: '+how+'</div>'+
-      '<button id="cs-pwa-x" style="background:rgba(255,255,255,0.08);border:none;color:#fff;border-radius:50px;width:28px;height:28px;font-size:15px;cursor:pointer;flex-shrink:0;">\u2715</button>';
+    bar.style.cssText="position:fixed;left:8px;right:8px;top:max(10px,env(safe-area-inset-top));z-index:6000;background:#11151c;border:1px solid rgba(0,255,136,0.35);border-radius:12px;padding:11px 13px;display:flex;align-items:center;gap:10px;box-shadow:0 8px 28px rgba(0,0,0,0.5);font-family:-apple-system,system-ui,sans-serif;";
+    bar.innerHTML='<div style="font-size:20px;line-height:1;">\uD83D\uDCF2</div>'+
+      '<div style="flex:1;color:#fff;font-size:12px;line-height:1.4;">Add Circle Solutions to your home screen: '+how+'</div>'+
+      '<button id="cs-pwa-x" style="background:rgba(255,255,255,0.08);border:none;color:#fff;border-radius:50px;width:30px;height:30px;font-size:15px;cursor:pointer;flex-shrink:0;">\u2715</button>';
     document.body.appendChild(bar);
-    document.getElementById("cs-pwa-x").onclick=function(){ try{ localStorage.setItem("cs_pwa_tip","off"); }catch(_){}; bar.remove(); };
+    var _close=function(){ try{ localStorage.setItem("cs_pwa_tip","off"); }catch(_){}; if(bar&&bar.parentNode) bar.remove(); };
+    document.getElementById("cs-pwa-x").onclick=_close;
+    setTimeout(function(){ if(bar&&bar.parentNode) bar.remove(); }, 11000); // auto-dismiss, don't block UI
   }catch(e){}
 });
 </script>
@@ -1554,6 +1556,52 @@ window.addEventListener("DOMContentLoaded",function(){
   /* Smaller signout button */
   .logout-btn{padding:5px 11px !important;font-size:11px !important;}
 }
+
+/* ════════════ MOBILE OVERHAUL (build 2026.06.26.6) ════════════ */
+@media (max-width: 700px){
+  /* Stop the whole page from scrolling sideways */
+  html, body, #portal-page, #backoffice { overflow-x: hidden; max-width: 100vw; }
+
+  /* iOS zooms the page when you focus an input smaller than 16px — this is the
+     #1 reason forms "feel broken" on iPhone. Force 16px so it never zooms. */
+  input, select, textarea, .form-input { font-size: 16px !important; }
+
+  /* Touch-friendly targets everywhere */
+  .bo-btn, button, .bo-nav-item { min-height: 44px; }
+
+  /* Leave room at the bottom so the on-clock pill / any fixed bar never covers
+     the last buttons on a screen. */
+  #bo-content { padding-bottom: 120px !important; }
+
+  /* Collapse two- and three-column inline grids to a single column on phones */
+  [style*="grid-template-columns:1fr 1fr"],
+  [style*="grid-template-columns: 1fr 1fr"],
+  [style*="grid-template-columns:1fr 1fr 1fr"],
+  [style*="grid-template-columns: 1fr 1fr 1fr"] { grid-template-columns: 1fr !important; }
+
+  /* Keep tables from blowing out the layout; wide ones scroll inside their card */
+  #bo-content table { max-width: 100%; }
+  .bo-card { max-width: 100%; }
+
+  /* Modals fit the screen and scroll instead of overflowing off-screen */
+  #modal-backdrop { padding: 12px !important; align-items: flex-start !important; }
+  #modal-backdrop > div, .bo-modal { max-width: 100% !important; width: 100% !important; max-height: 88vh !important; overflow-y: auto !important; }
+
+  /* On-clock pill: a touch smaller so it doesn't dominate a phone screen */
+  #on-clock-pill { gap: 8px !important; padding: 9px 13px !important; font-size: 12px !important; }
+
+  /* Notifications panel full-width on phones */
+  #bo-notifications-panel { top: 64px !important; right: 8px !important; left: 8px !important; width: auto !important; }
+
+  /* Section headers / big numbers shouldn't overflow */
+  h1, h2, .bo-card { word-wrap: break-word; overflow-wrap: break-word; }
+}
+
+@media (max-width: 420px){
+  .portal-header { padding: 8px 10px !important; }
+  #bo-build-badge { font-size: 9px !important; padding: 2px 6px !important; letter-spacing: 0.5px !important; }
+  .bo-card { padding: 12px !important; }
+}
 </style>
 
 
@@ -2180,15 +2228,17 @@ window.addEventListener("DOMContentLoaded",function(){
 // latest build. Scheme: YYYY.MM.DD.N  (N = the Nth build that day).
 // ───────────────────────────────────────────────────────────────
 // BUILD LOG (newest first)
-//   2026.06.26.5 — Installable (PWA). The back office can now be added to an
-//                  agent's home screen as a full-screen icon — no download, no
-//                  app store, no accounts. Self-contained (manifest + icons
-//                  built in, no extra files). A one-time tip shows how to add
-//                  it. NOTE: this is convenience/polish only — it does NOT add
-//                  background tracking; a locked iPhone still pauses pings.
-//   2026.06.26.4 — HEARTBEAT CLOCK. Pay built from GPS pings every 2 min;
-//                  no ping, no pay. Live ON CLOCK / CLOCK STOPPED status.
-//                  Needs shift_pings_migration.sql.
+//   2026.06.26.6 — Full audit + PWA fixes. ROOT CAUSE of "buttons not working
+//                  in the app": native alert()/confirm()/prompt() are blocked
+//                  in an installed PWA. Replaced all of them with on-brand
+//                  in-app modals that work everywhere (44 confirms, 10 prompts,
+//                  161 alerts). Mobile overhaul: no input-zoom on iOS, touch
+//                  targets, single-column grids, modals fit screen, no
+//                  sideways scroll, content padded so fixed bars never cover
+//                  buttons. Install tip moved to a top auto-dismissing toast.
+//                  Lock-alert flyer is now dismissable.
+//   2026.06.26.5 — Installable (PWA): add-to-home-screen, self-contained.
+//   2026.06.26.4 — HEARTBEAT CLOCK: pay from GPS pings, no ping no pay.
 //   2026.06.26.3 — Schedule gate (not scheduled today = no check-in), hard
 //                  40h ceiling for everyone, Payroll Log Sheets panel, shift
 //                  resumes on tab return (visibility/focus/pageshow).
@@ -2197,8 +2247,76 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.06.26.5';
+const BUILD_VERSION = '2026.06.26.6';
 window.BUILD_VERSION = BUILD_VERSION;
+
+// ═══════════════════════════════════════════════════════════════
+// PWA-SAFE DIALOGS (build 2026.06.26.6)
+// ───────────────────────────────────────────────────────────────
+// Native alert()/await csiConfirm()/await csiPrompt() are unreliable or silently blocked
+// inside an installed PWA (standalone mode), which made buttons that rely
+// on them appear "dead." These on-brand modal replacements work everywhere
+// — browser and installed app — and look like the rest of the site.
+//   await csiConfirm(msg)        -> Promise<boolean>
+//   await csiPrompt(msg, def)    -> Promise<string|null>
+//   csiAlert(msg)                -> shows a dismissable notice (non-blocking)
+// window.alert is overridden to use csiAlert (safe: alert returns nothing).
+function _csiDialog(opts){
+  return new Promise(function(resolve){
+    var prior = document.activeElement;
+    var back = document.createElement('div');
+    back.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.72);z-index:100050;display:flex;align-items:center;justify-content:center;padding:20px;backdrop-filter:blur(2px);font-family:Outfit,-apple-system,system-ui,sans-serif;';
+    var card = document.createElement('div');
+    card.style.cssText = 'background:#0d0f14;border:1px solid rgba(255,255,255,0.12);border-radius:16px;max-width:420px;width:100%;padding:22px;box-shadow:0 20px 60px rgba(0,0,0,0.6);';
+    var msg = document.createElement('div');
+    msg.style.cssText = 'color:#fff;font-size:14.5px;line-height:1.5;white-space:pre-wrap;margin-bottom:16px;';
+    msg.textContent = opts.message != null ? String(opts.message) : '';
+    card.appendChild(msg);
+
+    var input = null;
+    if(opts.kind === 'prompt'){
+      input = document.createElement(opts.message && String(opts.message).length > 60 ? 'textarea' : 'input');
+      input.value = opts.defaultValue || '';
+      input.style.cssText = 'width:100%;box-sizing:border-box;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.15);border-radius:10px;color:#fff;font-size:16px;padding:11px 13px;margin-bottom:16px;font-family:inherit;';
+      if(input.tagName === 'TEXTAREA') input.rows = 3;
+      card.appendChild(input);
+    }
+
+    var row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;';
+    function close(val){ try{ document.body.removeChild(back); }catch(_){}; try{ if(prior&&prior.focus) prior.focus(); }catch(_){}; resolve(val); }
+
+    if(opts.kind !== 'alert'){
+      var cancel = document.createElement('button');
+      cancel.textContent = opts.cancelText || 'Cancel';
+      cancel.style.cssText = 'background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.14);color:#fff;border-radius:10px;padding:11px 18px;font-size:14px;font-weight:600;cursor:pointer;min-height:44px;font-family:inherit;';
+      cancel.onclick = function(){ close(opts.kind === 'prompt' ? null : false); };
+      row.appendChild(cancel);
+    }
+    var ok = document.createElement('button');
+    ok.textContent = opts.okText || 'OK';
+    var danger = !!opts.danger;
+    ok.style.cssText = 'border:none;border-radius:10px;padding:11px 20px;font-size:14px;font-weight:800;cursor:pointer;min-height:44px;font-family:inherit;color:#06210f;background:linear-gradient(135deg,#00C853,#00FF88);' + (danger ? 'color:#fff;background:linear-gradient(135deg,#e0354b,#F87171);' : '');
+    ok.onclick = function(){ close(opts.kind === 'prompt' ? (input ? input.value : '') : (opts.kind === 'alert' ? undefined : true)); };
+    row.appendChild(ok);
+    card.appendChild(row);
+    back.appendChild(card);
+    back.addEventListener('click', function(e){ if(e.target === back && opts.kind !== 'alert') close(opts.kind === 'prompt' ? null : false); });
+    document.body.appendChild(back);
+    setTimeout(function(){ try{ (input || ok).focus(); }catch(_){} }, 30);
+    if(input){ input.addEventListener('keydown', function(e){ if(e.key === 'Enter' && input.tagName !== 'TEXTAREA'){ e.preventDefault(); ok.click(); } }); }
+  });
+}
+function csiConfirm(message, opts){ opts = opts || {}; return _csiDialog({ kind:'confirm', message:message, okText:opts.okText, cancelText:opts.cancelText, danger:opts.danger }); }
+function csiPrompt(message, defaultValue){ return _csiDialog({ kind:'prompt', message:message, defaultValue:defaultValue }); }
+function csiAlert(message){ return _csiDialog({ kind:'alert', message:message, okText:'OK' }); }
+window.csiConfirm = csiConfirm;
+window.csiPrompt = csiPrompt;
+window.csiAlert = csiAlert;
+// Override native alert globally (safe — alert returns nothing). This instantly
+// fixes every alert() call across the app, in browser and installed PWA.
+try { window.alert = function(m){ csiAlert(m); }; } catch(_){}
+
 
 // ─── Supabase client ───
 const sb = window.supabase.createClient(
@@ -3575,7 +3693,7 @@ async function saveTraining(programId){
 }
 
 async function deleteTraining(id){
-  if(!confirm('Delete this training material?')) return;
+  if(!await csiConfirm('Delete this training material?')) return;
   await sb.from('training_docs').delete().eq('id', id);
   renderMainContent();
 }
@@ -3660,7 +3778,7 @@ async function toggleContractStatus(id, current){
 }
 
 async function deleteContract(id){
-  if(!confirm('Delete this contract?')) return;
+  if(!await csiConfirm('Delete this contract?')) return;
   await sb.from('contracts').delete().eq('id', id);
   renderMainContent();
 }
@@ -3735,7 +3853,7 @@ async function saveCode(programId){
 }
 
 async function deleteCode(id){
-  if(!confirm('Delete this credential?')) return;
+  if(!await csiConfirm('Delete this credential?')) return;
   await sb.from('agent_codes').delete().eq('id', id);
   renderMainContent();
 }
@@ -4384,7 +4502,7 @@ async function saveTool(existingId, programId){
 }
 
 async function deleteTool(toolId, name){
-  if(!confirm('Delete tool "' + name + '"? This cannot be undone.')) return;
+  if(!await csiConfirm('Delete tool "' + name + '"? This cannot be undone.')) return;
   const { error } = await sb.from('tools').delete().eq('id', toolId);
   if(error){ alert('Error: ' + error.message); return; }
   renderMainContent();
@@ -4588,7 +4706,7 @@ async function saveAnn(programId){
 }
 
 async function deleteAnn(id){
-  if(!confirm('Delete this announcement?')) return;
+  if(!await csiConfirm('Delete this announcement?')) return;
   await sb.from('announcements').delete().eq('id', id);
   renderMainContent();
 }
@@ -5397,7 +5515,7 @@ async function saveProgramCred(userId, programId, existingId){
 
 async function deleteProgramCred(credId, programName){
   if(!_canManageCreds()){ alert('Access denied'); return; }
-  if(!confirm('Delete the ' + programName + ' credentials for this contractor?\n\nThis cannot be undone. The agent will no longer see these credentials in their My Credentials tab.')) return;
+  if(!await csiConfirm('Delete the ' + programName + ' credentials for this contractor?\n\nThis cannot be undone. The agent will no longer see these credentials in their My Credentials tab.')) return;
   const { error } = await sb.from('program_credentials').delete().eq('id', credId);
   if(error){ alert('Delete failed: ' + error.message); return; }
   // Refresh the page to update the block
@@ -6385,7 +6503,7 @@ async function markContractorCoded(userId, programId){
   const prog = (allPrograms || []).find(p => p.id === programId);
   if(!prog){ alert('Program not found'); return; }
 
-  if(!confirm('Mark this contractor as CODED for ' + prog.name + '?\n\nThis will:\n  • Set their ' + prog.name + ' status to coded\n  • Notify the contractor\n  • Notify their manager\n  • Notify the office\n\nMake sure their credentials are entered and all required contracts are signed before confirming.')) return;
+  if(!await csiConfirm('Mark this contractor as CODED for ' + prog.name + '?\n\nThis will:\n  • Set their ' + prog.name + ' status to coded\n  • Notify the contractor\n  • Notify their manager\n  • Notify the office\n\nMake sure their credentials are entered and all required contracts are signed before confirming.')) return;
 
   // Update the right column based on program
   let updatePayload = {};
@@ -6481,7 +6599,7 @@ async function cancelPendingContractsFor(userId, agentName){
   }
   const titles = pending.map(p => '  • ' + (p.template_snapshot?.title || 'Untitled')).join('\n');
   const confirmMsg = 'Cancel ' + pending.length + ' PENDING contract' + (pending.length === 1 ? '' : 's') + ' for ' + agentName + '?\n\n' + titles + '\n\nThis CANNOT be undone. The contracts will disappear from the agent\'s My Contracts list.\n\nSigned contracts are NEVER deleted by this action.';
-  if(!confirm(confirmMsg)) return;
+  if(!await csiConfirm(confirmMsg)) return;
 
   const ids = pending.map(p => p.id);
   const { error: delErr } = await sb.from('contract_assignments').delete().in('id', ids);
@@ -6699,7 +6817,7 @@ async function sendUrgentMessage(){
   if(!message){ msg.innerHTML='<span style="color:#F87171;">Message body required.</span>'; return; }
   if(recipientIds.length === 0){ msg.innerHTML='<span style="color:#F87171;">Select at least one recipient.</span>'; return; }
 
-  if(!confirm('Send urgent message to ' + recipientIds.length + ' recipient' + (recipientIds.length === 1 ? '' : 's') + '?')) return;
+  if(!await csiConfirm('Send urgent message to ' + recipientIds.length + ' recipient' + (recipientIds.length === 1 ? '' : 's') + '?')) return;
 
   msg.innerHTML='<span style="color:rgba(255,255,255,0.6);">Sending…</span>';
 
@@ -7284,7 +7402,7 @@ async function sendOnboardingPackage(userId, packageId){
   const { data: agent } = await sb.from('profiles').select('full_name, email').eq('id', userId).maybeSingle();
 
   const list = pkgContracts.map((pc, i) => '  ' + (i+1) + '. ' + (pc.contract_templates_v2?.title || 'Untitled')).join('\n');
-  if(!confirm('Send the "' + pkg.name + '" package to ' + (agent?.full_name || agent?.email) + '?\n\n' + list + '\n\nThis assigns ' + pkgContracts.length + ' contract' + (pkgContracts.length === 1 ? '' : 's') + ' to them at once.')){
+  if(!await csiConfirm('Send the "' + pkg.name + '" package to ' + (agent?.full_name || agent?.email) + '?\n\n' + list + '\n\nThis assigns ' + pkgContracts.length + ' contract' + (pkgContracts.length === 1 ? '' : 's') + ' to them at once.')){
     return;
   }
 
@@ -7392,7 +7510,7 @@ async function toggleAgentActive(id, currentlyActive){
   const goingInactive = currentlyActive === true;
   let reason = '';
   if(goingInactive){
-    reason = prompt('Deactivate this agent?\n\nOptionally, give a short reason (will be included in the email to them). Leave blank to skip the reason.', '') || '';
+    reason = await csiPrompt('Deactivate this agent?\n\nOptionally, give a short reason (will be included in the email to them). Leave blank to skip the reason.', '') || '';
     if(reason === null) return; // cancelled
   }
 
@@ -7427,7 +7545,7 @@ async function toggleAgentActive(id, currentlyActive){
 async function deleteAgent(id, name){
   if(currentProfile.role !== 'owner'){ alert('Only the owner can delete accounts.'); return; }
   if(id === currentProfile.id){ alert('You cannot delete your own account.'); return; }
-  const typed = prompt('⚠️ This permanently deletes ' + name + '\'s profile and ALL their enrollments, contracts, and codes.\n\nType DELETE (all caps) to confirm:');
+  const typed = await csiPrompt('⚠️ This permanently deletes ' + name + '\'s profile and ALL their enrollments, contracts, and codes.\n\nType DELETE (all caps) to confirm:');
   if(typed !== 'DELETE') return;
   // Note: Supabase Auth user is NOT deleted by this — only the profile row. The auth user
   // becomes an orphan that can't log in successfully (no profile = fails loadCurrentProfile).
@@ -7928,7 +8046,7 @@ async function saveMarket(programId, editId){
 }
 
 async function deleteMarket(id, name){
-  if(!confirm('Delete market "' + name + '"? Any team members currently assigned to it will be unassigned (not deleted).')) return;
+  if(!await csiConfirm('Delete market "' + name + '"? Any team members currently assigned to it will be unassigned (not deleted).')) return;
   const { error } = await sb.from('markets').delete().eq('id', id);
   if(error){ alert('Error: ' + error.message); return; }
   const { data } = await sb.from('markets').select('*').order('name');
@@ -7987,7 +8105,7 @@ function createAgentFromApp(appId, dataStr){
 }
 
 async function deleteApplication(id){
-  if(!confirm('Delete this application?')) return;
+  if(!await csiConfirm('Delete this application?')) return;
   await sb.from('applications').delete().eq('id', id);
   renderMainContent();
 }
@@ -8299,7 +8417,7 @@ async function lockAgentAccount(userId, reason){
 }
 
 async function unlockAgentAccount(userId){
-  if(!confirm('Unlock this agent and allow them to resume work? They will be able to check in immediately.')) return;
+  if(!await csiConfirm('Unlock this agent and allow them to resume work? They will be able to check in immediately.')) return;
   const { error } = await sb.from('profiles').update({
     account_locked: false,
     lock_reason: null,
@@ -9507,7 +9625,7 @@ async function wsSaveAssignments(storeId, weekMonday){
 }
 
 async function wsRemoveAssignment(assignmentId){
-  if(!confirm('Remove this agent from this store this week?')) return;
+  if(!await csiConfirm('Remove this agent from this store this week?')) return;
   const { error } = await sb.from('weekly_store_assignments').delete().eq('id', assignmentId);
   if(error){ alert('Error: ' + error.message); return; }
   renderMainContent();
@@ -11114,7 +11232,7 @@ async function _renderIntakeLockedView(el, intake){
 }
 
 async function requestIntakeEdit(intakeId){
-  const reason = prompt('What would you like to change? (This message goes to Onboarding):');
+  const reason = await csiPrompt('What would you like to change? (This message goes to Onboarding):');
   if(!reason || !reason.trim()) return;
 
   // Notify owner + onboarding department
@@ -12516,7 +12634,7 @@ async function confirmSendToReliant(intakeId){
     alert('Reliant email is not configured. Owner: go to Reliant Email settings to set it.');
     return;
   }
-  if(!confirm('Send ' + candidateName + "'s onboarding intake to:\n\n" + email + "\n\nThis will email a PDF cover sheet + 3 photo attachments. Make sure you've reviewed everything first.")) return;
+  if(!await csiConfirm('Send ' + candidateName + "'s onboarding intake to:\n\n" + email + "\n\nThis will email a PDF cover sheet + 3 photo attachments. Make sure you've reviewed everything first.")) return;
 
   try {
     const { data, error } = await sb.functions.invoke('send-onboarding-to-reliant', { body: { intakeId } });
@@ -12530,7 +12648,7 @@ async function confirmSendToReliant(intakeId){
 }
 
 async function rejectIntake(intakeId, agentId){
-  const reason = prompt('Reason for rejection (will be shown to the agent):');
+  const reason = await csiPrompt('Reason for rejection (will be shown to the agent):');
   if(!reason) return;
   await sb.from('onboarding_intake').update({ status: 'rejected', reject_reason: reason, reviewed_at: new Date().toISOString(), reviewed_by: currentProfile.id }).eq('id', intakeId);
   await sb.from('onboarding_form_status').upsert({
@@ -12915,7 +13033,7 @@ async function _setCandidateStage(userId, newStage, notes){
 }
 
 async function markCandidateBgPassed(userId){
-  if(!confirm('Mark this candidate as PASSED background check?\n\nThis will:\n• Move them to "BG Passed" stage\n• Email them with drug-test heads-up\n• Unlock Contract + ACH banking forms in their packet')) return;
+  if(!await csiConfirm('Mark this candidate as PASSED background check?\n\nThis will:\n• Move them to "BG Passed" stage\n• Email them with drug-test heads-up\n• Unlock Contract + ACH banking forms in their packet')) return;
   try {
     const prev = await _setCandidateStage(userId, 'bg_passed', 'Background check passed');
     await sendEmailViaFunction('candidate_bg_passed', prev?.email, {
@@ -12930,7 +13048,7 @@ async function markCandidateBgPassed(userId){
 }
 
 async function markCandidateBgFailed(userId){
-  if(!confirm('Mark this candidate as FAILED background check?\n\nThis will:\n• Move them to "BG Failed" stage (terminal)\n• Email them the rejection notice\n• Their packet will be locked\n\nProceed?')) return;
+  if(!await csiConfirm('Mark this candidate as FAILED background check?\n\nThis will:\n• Move them to "BG Failed" stage (terminal)\n• Email them the rejection notice\n• Their packet will be locked\n\nProceed?')) return;
   try {
     const prev = await _setCandidateStage(userId, 'bg_failed', 'Background check failed — rejected');
     await sendEmailViaFunction('candidate_bg_failed', prev?.email, {
@@ -12946,7 +13064,7 @@ async function markCandidateBgFailed(userId){
 }
 
 async function markCandidateDtPassed(userId){
-  if(!confirm('Mark this candidate as PASSED drug test?\n\nThis will:\n• Move them to "DT Passed · Awaiting Coding"\n• They are now ready to be submitted to Reliant for Trakstar coding\n\nUse the "Send to Reliant" button on their profile to dispatch the package.')) return;
+  if(!await csiConfirm('Mark this candidate as PASSED drug test?\n\nThis will:\n• Move them to "DT Passed · Awaiting Coding"\n• They are now ready to be submitted to Reliant for Trakstar coding\n\nUse the "Send to Reliant" button on their profile to dispatch the package.')) return;
   try {
     await _setCandidateStage(userId, 'dt_passed', 'Drug test passed');
     try { await notifyUser(userId, { type:'generic', title:'✅ Drug test cleared!', body:'You are cleared for Reliant submission. Watch for emails from trainer@learn.trakstar.com next.' }); } catch(_){}
@@ -12956,7 +13074,7 @@ async function markCandidateDtPassed(userId){
 }
 
 async function markCandidateDtFailed(userId){
-  if(!confirm('Mark this candidate as FAILED drug test?\n\nThis will:\n• Move them to "DT Failed" stage (terminal)\n• Email them the rejection notice\n• Their account will be deactivated\n\nProceed?')) return;
+  if(!await csiConfirm('Mark this candidate as FAILED drug test?\n\nThis will:\n• Move them to "DT Failed" stage (terminal)\n• Email them the rejection notice\n• Their account will be deactivated\n\nProceed?')) return;
   try {
     const prev = await _setCandidateStage(userId, 'dt_failed', 'Drug test failed — rejected');
     await sendEmailViaFunction('candidate_dt_failed', prev?.email, {
@@ -12971,7 +13089,7 @@ async function markCandidateDtFailed(userId){
 }
 
 async function markCandidateCoded(userId){
-  if(!confirm('Mark this candidate as CODED in Trakstar?\n\nThis will:\n• Move them to fully-active retail agent status\n• Send them the official welcome-to-the-team email\n• They will appear in Team admin (no longer in the pipeline)\n• They can be assigned to stores and start working\n\nMake sure Reliant has confirmed they are coded in Trakstar before clicking this.')) return;
+  if(!await csiConfirm('Mark this candidate as CODED in Trakstar?\n\nThis will:\n• Move them to fully-active retail agent status\n• Send them the official welcome-to-the-team email\n• They will appear in Team admin (no longer in the pipeline)\n• They can be assigned to stores and start working\n\nMake sure Reliant has confirmed they are coded in Trakstar before clicking this.')) return;
   try {
     const prev = await _setCandidateStage(userId, 'coded', 'Coded in Trakstar — fully active');
     await sendEmailViaFunction('candidate_coded', prev?.email, {
@@ -12988,7 +13106,7 @@ async function markCandidateCoded(userId){
 async function resendCandidateInvite(userId){
   const { data: c } = await sb.from('profiles').select('full_name, email').eq('id', userId).maybeSingle();
   if(!c){ alert('Candidate not found'); return; }
-  const newPassword = prompt('Enter a NEW temporary password to send (min 8 chars). They will use this to log in:');
+  const newPassword = await csiPrompt('Enter a NEW temporary password to send (min 8 chars). They will use this to log in:');
   if(!newPassword || newPassword.length < 8){ alert('Cancelled — password too short.'); return; }
   // Update their password via admin-set-password
   try {
@@ -13203,7 +13321,7 @@ async function toggleAutoHire(){
   const msg = next === 'auto'
     ? 'Switch to AUTO mode?\n\nWhen an MM clicks Hire on a response form, the system will:\n  • Create the candidate account immediately\n  • Send them the welcome email\n  • Move them into the Reliant Pipeline at INVITED stage\n\nNo human approval needed.'
     : 'Switch to MANUAL mode?\n\nWhen an MM clicks Hire on a response form, onboarding will be notified to manually invite the candidate from the response.\n\nThis is the safer default.';
-  if(!confirm(msg)) return;
+  if(!await csiConfirm(msg)) return;
   try {
     await _setAutoHireSetting(next);
     alert('✓ Mode switched to ' + next.toUpperCase());
@@ -13960,7 +14078,7 @@ async function saveStore(existingId){
     void sized;
   }
   if(payload.latitude === null || payload.longitude === null){
-    if(!confirm('No GPS coordinates set — agents will not be able to check in at this store. Save anyway?')) return;
+    if(!await csiConfirm('No GPS coordinates set — agents will not be able to check in at this store. Save anyway?')) return;
   }
 
   // Collect selected MMs
@@ -14043,7 +14161,7 @@ function _seOnCampaignChange(){
 window._seOnCampaignChange = _seOnCampaignChange;
 
 async function deleteStore(storeId, storeName){
-  if(!confirm('Delete store "' + storeName + '"?\n\nAll agent assignments to this store will be removed. Past photo audits remain.')) return;
+  if(!await csiConfirm('Delete store "' + storeName + '"?\n\nAll agent assignments to this store will be removed. Past photo audits remain.')) return;
   const { error } = await sb.from('stores').delete().eq('id', storeId);
   if(error){ alert('Error: ' + error.message); return; }
   renderMainContent();
@@ -14424,10 +14542,10 @@ async function deleteInventoryItem(itemId, itemName){
         'Click OK to PERMANENTLY DELETE "' + itemName + '" (cannot be undone).\n' +
         'Click Cancel to retire the item instead (kept in DB but hidden).';
 
-    const wantsHard = confirm(msg);
+    const wantsHard = await csiConfirm(msg);
     if(wantsHard){
       // Final confirmation
-      const final = prompt('Type DELETE in all caps to confirm permanent deletion of "' + itemName + '":');
+      const final = await csiPrompt('Type DELETE in all caps to confirm permanent deletion of "' + itemName + '":');
       if(final !== 'DELETE'){ alert('Deletion cancelled.'); return; }
 
       // Hard delete: photos + variants + assignments cascade via FK rules.
@@ -14447,10 +14565,10 @@ async function deleteInventoryItem(itemId, itemName){
       return;
     }
     // User cancelled hard delete — fall through to soft delete option
-    if(!confirm('Retire "' + itemName + '" instead? It will be hidden from active inventory but kept in the database. You can un-retire it later if needed.')) return;
+    if(!await csiConfirm('Retire "' + itemName + '" instead? It will be hidden from active inventory but kept in the database. You can un-retire it later if needed.')) return;
   } else {
     // Admin — soft delete only
-    if(!confirm('Retire "' + itemName + '"?\n\nThis hides it from active inventory but keeps the row + history intact. (Only the Owner can permanently delete items.)')) return;
+    if(!await csiConfirm('Retire "' + itemName + '"?\n\nThis hides it from active inventory but keeps the row + history intact. (Only the Owner can permanently delete items.)')) return;
   }
 
   // Soft delete: flip is_active=false, stamp who/when. The row stays.
@@ -14662,7 +14780,7 @@ async function confirmAssignInventory(itemId){
 }
 
 async function returnInventoryItem(itemId){
-  const condition = prompt('Return this item — what condition is it in?\n\nOptions: new, good, fair, damaged, lost\n\n(Type one)');
+  const condition = await csiPrompt('Return this item — what condition is it in?\n\nOptions: new, good, fair, damaged, lost\n\n(Type one)');
   if(!condition) return;
   const valid = ['new','good','fair','damaged','lost'];
   if(!valid.includes(condition)){ alert('Invalid. Use: ' + valid.join(', ')); return; }
@@ -14744,7 +14862,7 @@ async function addCategory(){
 }
 
 async function deleteCategory(catId, name){
-  if(!confirm('Delete category "' + name + '"? Items in this category will block the delete.')) return;
+  if(!await csiConfirm('Delete category "' + name + '"? Items in this category will block the delete.')) return;
   const { error } = await sb.from('inventory_categories').delete().eq('id', catId);
   if(error){ alert('Could not delete: ' + error.message + '\n\nLikely items still use this category.'); return; }
   openCategoriesEditor();
@@ -15439,7 +15557,7 @@ async function submitPhotoAudit(){
       // Approaching cap: friendly nudge
       if(hoursThisWeek >= cap - 2){
         const remaining = (cap - hoursThisWeek).toFixed(1);
-        if(!confirm('⚠️ You have only ' + remaining + ' hours left this week before hitting the ' + cap + 'hr cap. Continue check-in?')) return;
+        if(!await csiConfirm('⚠️ You have only ' + remaining + ' hours left this week before hitting the ' + cap + 'hr cap. Continue check-in?')) return;
       }
     } catch(e){ console.warn('Cap check failed (allowing check-in):', e); }
   }
@@ -16248,6 +16366,10 @@ async function renderUrgentFlyer(){
   const isPayroll = !!currentProfile.is_payroll_manager;
   if(!isAdmin && !isPayroll) return;
 
+  // Dismissable for the session so it doesn't dominate the screen (especially
+  // on mobile). It comes back next login or after an unlock action.
+  try { if(sessionStorage.getItem('cs_flyer_off') === '1'){ const h = document.getElementById('bo-flyer-host'); if(h) h.remove(); return; } } catch(_){}
+
   // Find a stable container at the top of the main content area
   let host = document.getElementById('bo-flyer-host');
   if(!host){
@@ -16384,7 +16506,17 @@ async function renderUrgentFlyer(){
     </div>` : '';
 
   host.innerHTML = reliantHtml + lockHtml + auditHtml;
+  // Floating dismiss for the whole flyer (per session)
+  host.insertAdjacentHTML('afterbegin',
+    '<button onclick="dismissUrgentFlyer()" title="Hide for now" style="position:absolute;top:6px;right:6px;z-index:2;background:rgba(0,0,0,0.45);border:1px solid rgba(255,255,255,0.2);color:#fff;border-radius:50px;width:30px;height:30px;font-size:15px;cursor:pointer;line-height:1;">\u2715</button>');
+  host.style.position = 'sticky'; host.style.paddingTop = '0';
+  if(getComputedStyle(host).position === 'static') host.style.position = 'relative';
 }
+function dismissUrgentFlyer(){
+  try { sessionStorage.setItem('cs_flyer_off', '1'); } catch(_){}
+  const h = document.getElementById('bo-flyer-host'); if(h) h.remove();
+}
+window.dismissUrgentFlyer = dismissUrgentFlyer;
 window.renderUrgentFlyer = renderUrgentFlyer;
 
 
@@ -16479,7 +16611,7 @@ async function renderLockAlertsPanel(el){
 }
 
 async function unlockNoSalesAlert(alertId, agentName){
-  const notes = prompt('Unlock ' + agentName + '? Optional notes (e.g. reason or follow-up plan):');
+  const notes = await csiPrompt('Unlock ' + agentName + '? Optional notes (e.g. reason or follow-up plan):');
   if(notes === null) return; // cancelled
   const { error } = await sb.rpc('unlock_agent_from_no_sales', { p_alert_id: alertId, p_notes: notes || null });
   if(error){
@@ -17069,7 +17201,7 @@ window.renderReliantPendingApprovals = renderReliantPendingApprovals;
 
 
 async function approveReliant(pendingId, customerName){
-  if(!confirm('Approve the Reliant sale for ' + customerName + '?\n\nThis will add 1 to the agent\'s Retail count for the install date and update the leaderboard.')) return;
+  if(!await csiConfirm('Approve the Reliant sale for ' + customerName + '?\n\nThis will add 1 to the agent\'s Retail count for the install date and update the leaderboard.')) return;
   const { error } = await sb.rpc('approve_reliant_sale', { p_pending_id: pendingId });
   if(error){ alert('Approval failed: ' + error.message); return; }
 
@@ -17088,7 +17220,7 @@ async function approveReliant(pendingId, customerName){
 }
 
 async function rejectReliant(pendingId, customerName){
-  const reason = prompt('Reject the Reliant sale for ' + customerName + '?\n\nGive a reason the agent can read and act on (e.g. "Account # is wrong format — should be 10 digits"). They can fix and resubmit:');
+  const reason = await csiPrompt('Reject the Reliant sale for ' + customerName + '?\n\nGive a reason the agent can read and act on (e.g. "Account # is wrong format — should be 10 digits"). They can fix and resubmit:');
   if(reason === null) return; // cancelled
   if(!reason || !reason.trim()){
     alert('A reason is required so the agent knows what to fix.');
@@ -18385,7 +18517,7 @@ async function saveToolBoxResource(existingId){
 
 async function deleteToolBoxResource(resourceId, title){
   if(!['owner','admin'].includes(currentProfile?.role)){ alert('Access denied'); return; }
-  if(!confirm('Delete the resource "' + title + '"?\n\nIf it has an attached file, the file is also removed. This cannot be undone.\n\nNote: deleting only removes THIS resource. No agent profiles, contracts, or other data are touched.')) return;
+  if(!await csiConfirm('Delete the resource "' + title + '"?\n\nIf it has an attached file, the file is also removed. This cannot be undone.\n\nNote: deleting only removes THIS resource. No agent profiles, contracts, or other data are touched.')) return;
 
   // Best effort: delete the file too
   const { data: res } = await sb.from('tool_box_resources').select('payload_path').eq('id', resourceId).maybeSingle();
@@ -18817,7 +18949,7 @@ async function startImpersonation(targetUserId){
   const { data: target, error } = await sb.from('profiles').select('*').eq('id', targetUserId).maybeSingle();
   if(error || !target){ alert('Could not load target user: ' + (error?.message || 'not found')); return; }
 
-  if(!confirm('View as ' + (target.full_name || target.email) + '?\n\n' +
+  if(!await csiConfirm('View as ' + (target.full_name || target.email) + '?\n\n' +
               'You will see exactly what they see — same dashboard, same sidebar, same data scope.\n\n' +
               'Every action you take while impersonating is logged with a paper trail.\n\n' +
               'Click EXIT IMPERSONATION at the top of the page when done to return to your own account.')){
@@ -19374,7 +19506,7 @@ async function setCampaignActive(campaignId, makeActive){
   if(!c){ alert('Campaign not found.'); return; }
 
   if(!makeActive){
-    if(!confirm(`Retire "${c.name}"?\n\nNothing will be deleted — agents, sales, teams, and Tool Box items already tagged to this campaign stay tagged and visible. The campaign just won't appear in pickers for new records.\n\nYou can restore it any time.`)) return;
+    if(!await csiConfirm(`Retire "${c.name}"?\n\nNothing will be deleted — agents, sales, teams, and Tool Box items already tagged to this campaign stay tagged and visible. The campaign just won't appear in pickers for new records.\n\nYou can restore it any time.`)) return;
   }
 
   const { error } = await sb.from('campaigns')
@@ -19404,7 +19536,7 @@ function toggleShowArchived(){
 async function setProgramStatus(programId, newStatus){
   const verbMap = { active: 'restore', paused: 'pause', archived: 'archive' };
   const verb = verbMap[newStatus] || 'change';
-  if(!confirm(verb.charAt(0).toUpperCase() + verb.slice(1) + ' this program?\n\n' +
+  if(!await csiConfirm(verb.charAt(0).toUpperCase() + verb.slice(1) + ' this program?\n\n' +
     (newStatus === 'paused' ? 'Agents will see it as paused. Their data is preserved.' :
      newStatus === 'archived' ? 'It will be hidden from everyone. Owner can restore it later.' :
      'Will be visible to agents again.'))) return;
@@ -19429,7 +19561,7 @@ async function deleteProgramPermanent(programId){
     warning += '\n\n⛔ DATA WILL BE AFFECTED:\n  • ' + (agents || 0) + ' agents are assigned to this program\n  • ' + (enrolls || 0) + ' enrollment records exist\n\nDeleting will cascade-remove all enrollments and detach the program from agents (their other programs are unaffected).';
   }
   warning += '\n\nType DELETE to confirm:';
-  const typed = prompt(warning);
+  const typed = await csiPrompt(warning);
   if(typed !== 'DELETE') return;
 
   const { error } = await sb.from('programs').delete().eq('id', programId);
@@ -20493,7 +20625,7 @@ async function emailLoginToAgent(userId){
   // welcome email pointing to that link. The agent sets their own password.
   // (The previous version generated a fake temp password it never actually
   // used — confused both us and the agent.)
-  const ok = confirm(
+  const ok = await csiConfirm(
     'Send a fresh welcome email to ' + (profile.full_name || profile.email) + '?\n\n' +
     'They will receive:\n' +
     '  • A password-reset link they can click to set their own password\n' +
@@ -20724,7 +20856,7 @@ async function saveFolder(programId){
 }
 
 async function deleteFolder(id, name){
-  if(!confirm('Delete folder "' + name + '" and ALL files inside? This cannot be undone.')) return;
+  if(!await csiConfirm('Delete folder "' + name + '" and ALL files inside? This cannot be undone.')) return;
   // Delete all documents in the folder (also deletes from storage)
   const { data: docs } = await sb.from('documents').select('id,file_path').eq('folder_id', id);
   if(docs && docs.length > 0){
@@ -20804,7 +20936,7 @@ async function downloadDoc(filePath, displayName){
 }
 
 async function deleteDoc(docId, filePath){
-  if(!confirm('Delete this file? This cannot be undone.')) return;
+  if(!await csiConfirm('Delete this file? This cannot be undone.')) return;
   await sb.storage.from('documents').remove([filePath]);
   await sb.from('documents').delete().eq('id', docId);
   renderMainContent();
@@ -21031,7 +21163,7 @@ async function saveMeeting(programId){
 }
 
 async function deleteMeeting(id){
-  if(!confirm('Delete this training call?')) return;
+  if(!await csiConfirm('Delete this training call?')) return;
   await sb.from('meetings').delete().eq('id', id);
   renderMainContent();
 }
@@ -21329,7 +21461,7 @@ function respondRecordRequest(participantId, approved){
 }
 
 async function endMeetingAsHost(meetingId){
-  if(!confirm('End the meeting for everyone?')) return;
+  if(!await csiConfirm('End the meeting for everyone?')) return;
   const { data: m } = await sb.from('meetings').select('jitsi_room').eq('id', meetingId).single();
   await sb.from('meetings').update({ status: 'ended', ended_at: new Date().toISOString() }).eq('id', meetingId);
   if(window._dailyCallFrame){ try { window._dailyCallFrame.destroy(); } catch(e){} window._dailyCallFrame = null; }
@@ -21574,7 +21706,7 @@ async function saveForm(editId){
 }
 
 async function deleteForm(id){
-  if(!confirm('Delete this form and all its submissions?')) return;
+  if(!await csiConfirm('Delete this form and all its submissions?')) return;
   await sb.from('forms').delete().eq('id', id);
   renderMainContent();
 }
@@ -22589,7 +22721,7 @@ async function generateStarterPacket(programId, starterType){
   const tpl = STARTER_PACKET_TEMPLATES[starterType];
   if(!tpl){ alert('Unknown starter type: ' + starterType); return; }
 
-  if(!confirm('Generate the starter "' + tpl.name + '" packet?\n\nIt includes ' + tpl.steps.length + ' pre-built steps. You can edit, add, or remove steps after creation.')) return;
+  if(!await csiConfirm('Generate the starter "' + tpl.name + '" packet?\n\nIt includes ' + tpl.steps.length + ' pre-built steps. You can edit, add, or remove steps after creation.')) return;
 
   try {
     // Create the packet (no created_by column in this schema)
@@ -22832,7 +22964,7 @@ async function togglePacketActive(packetId, currentlyActive){
 }
 
 async function deletePacket(packetId){
-  if(!confirm('Delete this packet? Agents already assigned this packet keep their snapshot. New agents won\'t see it.')) return;
+  if(!await csiConfirm('Delete this packet? Agents already assigned this packet keep their snapshot. New agents won\'t see it.')) return;
   await sb.from('onboarding_packets').delete().eq('id', packetId);
   renderMainContent();
 }
@@ -22871,7 +23003,7 @@ async function grantMasterAccess(){
   renderMainContent();
 }
 async function revokeMasterAccess(userId){
-  if(!confirm('Revoke this user\'s master center access?')) return;
+  if(!await csiConfirm('Revoke this user\'s master center access?')) return;
   await sb.from('master_center_access').delete().eq('user_id', userId);
   renderMainContent();
 }
@@ -23133,7 +23265,7 @@ async function viewAgentOnboardingDetail(userId){
 }
 
 async function unlockCodesForAgent(userId){
-  if(!confirm('Mark this agent as ready for codes? This unlocks their full back office.')) return;
+  if(!await csiConfirm('Mark this agent as ready for codes? This unlocks their full back office.')) return;
   const { error } = await sb.from('profiles').update({ codes_unlocked: true }).eq('id', userId);
   if(error){ alert('Error: ' + error.message); return; }
 
@@ -23970,7 +24102,7 @@ async function toggleTemplateActive(id, currently){
 }
 
 async function deleteTemplate(id){
-  if(!confirm('Delete this contract template? Already-sent assignments are preserved.')) return;
+  if(!await csiConfirm('Delete this contract template? Already-sent assignments are preserved.')) return;
   await sb.from('contract_templates_v2').delete().eq('id', id);
   renderMainContent();
 }
