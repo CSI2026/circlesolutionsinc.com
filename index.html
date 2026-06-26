@@ -2127,24 +2127,26 @@ footer{
 // latest build. Scheme: YYYY.MM.DD.N  (N = the Nth build that day).
 // ───────────────────────────────────────────────────────────────
 // BUILD LOG (newest first)
-//   2026.06.26.3 — Schedule + payroll. Block check-in when the agent isn't
-//                  scheduled to work that day (store/program weekly pattern).
-//                  Hard 40-hour weekly ceiling for everyone — clamps any
-//                  program cap and caps paid hours at 40 in the log sheets.
-//                  New PAYROLL LOG SHEETS panel: week list → roster (Mon–Sun
-//                  daily hours + week total) → printable per-agent sheet.
-//                  Shift now survives tab sleep — resumes the server-side
-//                  open shift on return (visibility/focus/pageshow).
-//   2026.06.26.2 — Field-test fixes. Cleaned up check-in status (one clear
-//                  outcome, no stacked "Uploading…" lines), guarded against
-//                  double-submit, distinct green SUBMIT button, "Done"
-//                  returns to the real dashboard, always-visible ON-THE-CLOCK
-//                  pill with live timer + quick Check Out.
-//   2026.06.26.1 — Geofence rebuild. Whole-store fence auto-sized from the
-//                  OpenStreetMap footprint. Walk-off 3→15min. Two-walk-off
-//                  daily lockout. H:M:S time. Build-number badge.
+//   2026.06.26.4 — HEARTBEAT CLOCK. Pay is no longer assumed from check-in to
+//                  check-out — it's built from GPS heartbeat pings written
+//                  every 2 min while on the clock. A stretch of time is paid
+//                  ONLY when bracketed by pings proving presence INSIDE the
+//                  store (single dropped ping bridged up to 5 min; real
+//                  absence never bridged). Close the tab / lock the phone /
+//                  walk off → pings stop → clock stops at the last ping. No
+//                  ping, no pay. Payroll Log Sheets now compute from pings
+//                  (legacy check-in/out fallback for pre-ping shifts) and show
+//                  live ON CLOCK / CLOCK STOPPED status per agent. Requires
+//                  the shift_pings table (see shift_pings_migration.sql).
+//   2026.06.26.3 — Schedule gate (not scheduled today = no check-in), hard
+//                  40h ceiling for everyone, Payroll Log Sheets panel, shift
+//                  resumes on tab return (visibility/focus/pageshow).
+//   2026.06.26.2 — Field-test fixes: clean check-in status, double-submit
+//                  guard, distinct green SUBMIT, Done→dashboard, on-clock pill.
+//   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
+//                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.06.26.3';
+const BUILD_VERSION = '2026.06.26.4';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ─── Supabase client ───
@@ -8285,6 +8287,7 @@ function canAccessPayroll(){
 // record), capped at the hard 40-hour ceiling for pay.
 let _plsSelectedWeek = null;   // ISO date of the Monday of the selected week
 let _plsSelectedAgent = null;  // user_id of the selected agent
+let _plsLiveTimer = null;      // auto-refresh handle for the in-progress week roster
 
 const _PLS_DAYS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 
@@ -8330,6 +8333,84 @@ function _computeWeekGrid(audits, weekStartMs, nowMs){
 // Monday=0 … Sunday=6
 function _weekdayIndex(ms){ return (new Date(ms).getDay() + 6) % 7; }
 
+// Heartbeat cadence is every 2 minutes. We bridge a single dropped ping
+// (up to 5 min) so a brief GPS hiccup inside the store doesn't cost the
+// agent pay — but a real absence (tab closed / walked off → no pings) is
+// NEVER bridged, so the clock stops at the last proven ping. No ping, no pay.
+const PING_BRIDGE_MS = 5 * 60_000;
+
+// PURE: given ordered presence points [{ts, on}], sum the time between
+// consecutive points where BOTH are on-site (inside the store) and the gap
+// is short enough to be a continuous, proven presence. Attribute each
+// interval to the weekday it started on. Returns days[7] in ms.
+function _provenMsByDay(points, bridgeMs){
+  const days = [0,0,0,0,0,0,0];
+  for(let i = 0; i < points.length - 1; i++){
+    const a = points[i], b = points[i+1];
+    if(!a.on || !b.on) continue;                 // must be proven at the store at both ends
+    const gap = b.ts - a.ts;
+    if(gap <= 0 || gap > bridgeMs) continue;      // real absence / too-long gap → not proven, not paid
+    days[_weekdayIndex(a.ts)] += gap;
+  }
+  return days;
+}
+
+// HYBRID week grid (build 2026.06.26.4). For each user:
+//   • Pair check_in→check_out shifts from the audit log.
+//   • If a shift HAS heartbeat pings, pay = proven on-site ping time (bridged).
+//     This is the bulletproof path — only GPS-proven minutes at the store.
+//   • If a shift has NO pings (historical shifts from before pinging existed),
+//     fall back to the legacy check-in→check-out span (capped at 12h/shift).
+// Also returns live status: lastPingTs, lastPingOnSite, openShift.
+function _computeWeekGridHybrid(audits, pings, weekStartMs, nowMs, bridgeMs){
+  bridgeMs = bridgeMs || PING_BRIDGE_MS;
+  const WEEK_END = weekStartMs + 7 * 86400000;
+  const MAX_SHIFT_MS = 12 * 3600 * 1000;
+  const aByU = {}, pByU = {};
+  for(const a of (audits || [])){ if(a.geofence_passed) (aByU[a.user_id] = aByU[a.user_id] || []).push(a); }
+  for(const p of (pings || [])){ (pByU[p.user_id] = pByU[p.user_id] || []).push(p); }
+  const users = new Set([...Object.keys(aByU), ...Object.keys(pByU)]);
+  const out = {};
+  for(const uid of users){
+    const al = (aByU[uid] || []).slice().sort((x,y) => new Date(x.created_at) - new Date(y.created_at));
+    const pl = (pByU[uid] || []).map(p => ({ ts: new Date(p.created_at).getTime(), on: !!p.on_site })).sort((x,y) => x.ts - y.ts);
+    const days = [0,0,0,0,0,0,0];
+    // Build shifts
+    let pendIn = null;
+    const shifts = [];
+    for(const a of al){
+      if(a.audit_type === 'check_in'){ pendIn = new Date(a.created_at).getTime(); }
+      else if(a.audit_type === 'check_out' && pendIn != null){ shifts.push({ inTs: pendIn, outTs: new Date(a.created_at).getTime(), outOn: !!a.geofence_passed }); pendIn = null; }
+    }
+    const openShift = pendIn != null;
+    if(openShift){ shifts.push({ inTs: pendIn, outTs: null, outOn: false }); }
+    for(const sh of shifts){
+      const end = sh.outTs != null ? sh.outTs : Math.min(nowMs, WEEK_END);
+      const inWin = pl.filter(p => p.ts >= sh.inTs - 1000 && p.ts <= end + 1000);
+      if(inWin.length > 0){
+        const points = [{ ts: sh.inTs, on: true }, ...inWin];
+        if(sh.outTs != null) points.push({ ts: sh.outTs, on: sh.outOn });
+        points.sort((x,y) => x.ts - y.ts);
+        const d = _provenMsByDay(points, bridgeMs);
+        for(let i = 0; i < 7; i++) days[i] += d[i];
+      } else {
+        let span = end - sh.inTs; if(span > MAX_SHIFT_MS) span = MAX_SHIFT_MS;
+        if(span > 0) days[_weekdayIndex(sh.inTs)] += span;
+      }
+    }
+    const hrs = days.map(ms => ms / 3600000);
+    const total = hrs.reduce((s,h) => s + h, 0);
+    const lastPing = pl.length ? pl[pl.length-1] : null;
+    out[uid] = {
+      days: hrs, total, paid: Math.min(total, HARD_WEEKLY_HOUR_CAP), capped: total > HARD_WEEKLY_HOUR_CAP,
+      openShift, hasPings: pl.length > 0,
+      lastPingTs: lastPing ? lastPing.ts : null,
+      lastPingOnSite: lastPing ? lastPing.on : null
+    };
+  }
+  return out;
+}
+
 // List the last N week-start Mondays (most recent first), based on getWeekStart.
 function _plsRecentWeeks(n){
   const weeks = [];
@@ -8350,6 +8431,7 @@ async function renderPayrollLogSheets(el){
 
 async function _plsRenderInto(root){
   if(!root) return;
+  if(_plsLiveTimer){ clearTimeout(_plsLiveTimer); _plsLiveTimer = null; }
   if(_plsSelectedWeek && _plsSelectedAgent){ return _plsRenderAgentSheet(root); }
   if(_plsSelectedWeek){ return _plsRenderWeekRoster(root); }
   return _plsRenderWeekList(root);
@@ -8382,19 +8464,19 @@ async function _plsRenderWeekRoster(root){
   root.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Building week sheet…</div>';
   const ws = new Date(_plsSelectedWeek);
   const we = new Date(ws); we.setDate(we.getDate() + 7);
-  const { data: audits } = await sb.from('photo_audits')
-    .select('user_id,audit_type,created_at,geofence_passed')
-    .gte('created_at', ws.toISOString())
-    .lt('created_at', we.toISOString())
-    .order('created_at', { ascending: true });
-  const grid = _computeWeekGrid(audits || [], ws.getTime(), Date.now());
+  const [{ data: audits }, { data: pings }] = await Promise.all([
+    sb.from('photo_audits').select('user_id,audit_type,created_at,geofence_passed')
+      .gte('created_at', ws.toISOString()).lt('created_at', we.toISOString())
+      .order('created_at', { ascending: true }),
+    _plsFetchPings(ws, we)
+  ]);
+  const grid = _computeWeekGridHybrid(audits || [], pings || [], ws.getTime(), Date.now());
   const ids = Object.keys(grid);
   let profiles = [];
   if(ids.length){
     const { data: profs } = await sb.from('profiles').select('id,full_name,email,role').in('id', ids);
     profiles = profs || [];
   }
-  // Sort by name
   profiles.sort((a,b) => (a.full_name||a.email||'').localeCompare(b.full_name||b.email||''));
   const finalized = we <= new Date();
   const roleLabel = r => ({owner:'Owner',admin:'Admin',manager:'Manager',team_lead:'Team Lead',agent:'Agent'}[r] || r || '');
@@ -8403,8 +8485,9 @@ async function _plsRenderWeekRoster(root){
     const g = grid[p.id];
     const dayCells = g.days.map(h => `<td style="text-align:center;padding:7px 6px;font-size:12px;color:${h>0?'rgba(255,255,255,0.85)':'rgba(255,255,255,0.25)'};white-space:nowrap;">${h>0?_fmtHM(h):'—'}</td>`).join('');
     const capNote = g.capped ? '<div style="font-size:9px;color:#FFC800;">capped from '+_fmtHM(g.total)+'</div>' : '';
+    const status = _plsLiveStatus(g, finalized);
     return `<tr style="border-top:1px solid rgba(255,255,255,0.05);cursor:pointer;" onclick="plsOpenAgent('${p.id}')">
-      <td style="padding:9px 10px;"><div style="font-size:13px;color:#fff;font-weight:600;">${escapeHtml(p.full_name||p.email)}</div><div style="font-size:10.5px;color:rgba(255,255,255,0.4);">${roleLabel(p.role)}</div></td>
+      <td style="padding:9px 10px;"><div style="font-size:13px;color:#fff;font-weight:600;">${escapeHtml(p.full_name||p.email)}</div><div style="font-size:10.5px;color:rgba(255,255,255,0.4);">${roleLabel(p.role)} ${status}</div></td>
       ${dayCells}
       <td style="text-align:right;padding:9px 10px;font-family:'Bebas Neue',sans-serif;font-size:17px;color:#00FF88;white-space:nowrap;">${_fmtHMS(g.paid)}${capNote}</td>
     </tr>`;
@@ -8417,7 +8500,7 @@ async function _plsRenderWeekRoster(root){
       <div style="font-family:'Bebas Neue',sans-serif;font-size:24px;letter-spacing:1px;color:#fff;">WEEK OF ${ws.toLocaleDateString(undefined,{month:'long',day:'numeric',year:'numeric'}).toUpperCase()}</div>
       <span style="background:${finalized?'rgba(0,255,136,0.14)':'rgba(0,198,255,0.14)'};color:${finalized?'#00FF88':'#00C6FF'};padding:3px 10px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">${finalized?'✓ FINALIZED':'● IN PROGRESS'}</span>
     </div>
-    <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-bottom:14px;">${profiles.length} ${profiles.length===1?'person':'people'} logged hours · tap a name for their breakdown · pay capped at ${HARD_WEEKLY_HOUR_CAP}h</div>
+    <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-bottom:14px;">${profiles.length} ${profiles.length===1?'person':'people'} logged hours · pay = GPS-proven minutes at the store · tap a name for the breakdown · capped at ${HARD_WEEKLY_HOUR_CAP}h</div>
     ${profiles.length===0 ? '<div class="bo-card" style="color:rgba(255,255,255,0.5);">No hours logged this week.</div>' : `
     <div class="bo-card" style="overflow-x:auto;padding:0;">
       <table style="width:100%;border-collapse:collapse;min-width:640px;">
@@ -8429,21 +8512,88 @@ async function _plsRenderWeekRoster(root){
         <tbody>${bodyRows}</tbody>
       </table>
     </div>`}`;
+
+  // Auto-refresh the live status every 30s while viewing the in-progress week.
+  if(!finalized){
+    _plsLiveTimer = setTimeout(() => {
+      if(_plsSelectedWeek && !_plsSelectedAgent && document.body.contains(root)){
+        _plsRenderInto(root);
+      }
+    }, 30_000);
+  }
+}
+
+// Fetch all pings in [ws,we), paginating past Supabase's 1000-row default so
+// long weeks aren't silently truncated.
+async function _plsFetchPings(ws, we){
+  let all = [], from = 0; const PAGE = 1000;
+  for(let i = 0; i < 40; i++){   // hard stop at 40k pings/week
+    let resp;
+    try {
+      resp = await sb.from('shift_pings').select('user_id,created_at,on_site')
+        .gte('created_at', ws.toISOString()).lt('created_at', we.toISOString())
+        .order('created_at', { ascending: true }).range(from, from + PAGE - 1);
+    } catch(_){ return { data: all }; }   // table missing → empty, legacy pay kicks in
+    const rows = (resp && resp.data) || [];
+    all = all.concat(rows);
+    if(rows.length < PAGE) break;
+    from += PAGE;
+  }
+  return { data: all };
+}
+
+// Per-agent ping fetch (paginated, table-missing safe).
+async function _plsFetchAgentPings(userId, ws, we){
+  let all = [], from = 0; const PAGE = 1000;
+  for(let i = 0; i < 40; i++){
+    let resp;
+    try {
+      resp = await sb.from('shift_pings').select('user_id,created_at,on_site')
+        .eq('user_id', userId)
+        .gte('created_at', ws.toISOString()).lt('created_at', we.toISOString())
+        .order('created_at', { ascending: true }).range(from, from + PAGE - 1);
+    } catch(_){ return { data: all }; }
+    const rows = (resp && resp.data) || [];
+    all = all.concat(rows);
+    if(rows.length < PAGE) break;
+    from += PAGE;
+  }
+  return { data: all };
+}
+
+// Live "on the clock" status from the latest ping. RUNNING if a recent ping
+// landed; STOPPED if an open shift hasn't pinged within the bridge window
+// (tab closed / phone locked / walked off) — so you KNOW, never assume.
+function _plsLiveStatus(g, finalized){
+  if(finalized || !g.openShift) return '';
+  const now = Date.now();
+  if(g.lastPingTs && (now - g.lastPingTs) <= PING_BRIDGE_MS){
+    const secs = Math.round((now - g.lastPingTs)/1000);
+    const where = g.lastPingOnSite ? 'inside store' : 'OFF-SITE';
+    const color = g.lastPingOnSite ? '#00FF88' : '#FFC800';
+    return `· <span style="color:${color};font-weight:700;">● ON CLOCK</span> <span style="color:rgba(255,255,255,0.4);">(ping ${secs<60?secs+'s':Math.round(secs/60)+'m'} ago · ${where})</span>`;
+  }
+  const mins = g.lastPingTs ? Math.round((now - g.lastPingTs)/60000) : null;
+  return `· <span style="color:#F87171;font-weight:700;">■ CLOCK STOPPED</span> <span style="color:rgba(255,255,255,0.4);">(${mins!=null?'no ping '+mins+'m':'never pinged'})</span>`;
 }
 
 async function _plsRenderAgentSheet(root){
   root.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Building sheet…</div>';
   const ws = new Date(_plsSelectedWeek);
   const we = new Date(ws); we.setDate(we.getDate() + 7);
-  const [{ data: audits }, { data: prof }] = await Promise.all([
+  const [{ data: audits }, { data: prof }, pingsResp] = await Promise.all([
     sb.from('photo_audits').select('user_id,audit_type,created_at,geofence_passed')
       .eq('user_id', _plsSelectedAgent).gte('created_at', ws.toISOString()).lt('created_at', we.toISOString())
       .order('created_at', { ascending: true }),
-    sb.from('profiles').select('id,full_name,email,role').eq('id', _plsSelectedAgent).maybeSingle()
+    sb.from('profiles').select('id,full_name,email,role').eq('id', _plsSelectedAgent).maybeSingle(),
+    _plsFetchAgentPings(_plsSelectedAgent, ws, we)
   ]);
-  const grid = _computeWeekGrid(audits || [], ws.getTime(), Date.now());
-  const g = grid[_plsSelectedAgent] || { days:[0,0,0,0,0,0,0], total:0, paid:0, capped:false };
+  const grid = _computeWeekGridHybrid(audits || [], (pingsResp && pingsResp.data) || [], ws.getTime(), Date.now());
+  const g = grid[_plsSelectedAgent] || { days:[0,0,0,0,0,0,0], total:0, paid:0, capped:false, hasPings:false };
   const name = prof ? (prof.full_name || prof.email) : 'Agent';
+  const proofNote = g.hasPings
+    ? 'Pay below is GPS-proven presence at the store (heartbeat verified).'
+    : 'No heartbeat data for this week — hours shown from check-in/out times.';
 
   const dayRows = _PLS_DAYS.map((d, i) => {
     const dt = new Date(ws); dt.setDate(dt.getDate() + i);
@@ -8462,6 +8612,7 @@ async function _plsRenderAgentSheet(root){
           <div style="font-family:'Bebas Neue',sans-serif;font-size:26px;letter-spacing:1px;color:#fff;line-height:1;">${escapeHtml(name)}</div>
           <div style="font-size:12px;color:rgba(255,255,255,0.55);margin-top:4px;">Weekly Payroll Log Sheet · Circle Solutions</div>
           <div style="font-size:12px;color:rgba(255,255,255,0.55);">Week of ${ws.toLocaleDateString(undefined,{month:'long',day:'numeric',year:'numeric'})}</div>
+          <div style="font-size:10.5px;color:${g.hasPings?'#00FF88':'#FFC800'};margin-top:6px;max-width:340px;line-height:1.4;">${proofNote}</div>
         </div>
         <div style="text-align:right;">
           <div style="font-size:10.5px;color:rgba(255,255,255,0.4);letter-spacing:1px;">WEEK PAID</div>
@@ -15372,6 +15523,12 @@ async function submitPhotoAudit(){
           fenceRadius: radius,
           checkInAt: audit.created_at
         });
+        // Immediate first heartbeat ping using the check-in GPS, so the very
+        // first proven point is the check-in moment itself.
+        void _writeShiftPing(
+          { checkInAuditId: audit.id, storeId: audit.store_id },
+          myLat, myLng, accuracy, distance, true
+        );
       } catch(e){ console.warn('Geofence monitor start failed:', e); }
     }
     // Phase 3.33 — stop the monitor on check-out (manual or auto)
@@ -15638,10 +15795,10 @@ async function startGeofenceMonitor(opts){
   };
   _gmWriteState(state);
 
-  // Poll once immediately so the first reading lands fast, then on interval
+  // Poll once shortly after check-in so the first heartbeat lands fast, then
+  // on the 2-minute interval. (Was 30s; tightened for proven-time payroll.)
   _geofenceMonitorId = setInterval(_geofenceTick, GEOFENCE_POLL_INTERVAL_MS);
-  // Defer the first tick by 30s so the agent has a moment to settle in.
-  setTimeout(() => { try { _geofenceTick(); } catch(_){} }, 30_000);
+  setTimeout(() => { try { _geofenceTick(); } catch(_){} }, 12_000);
 }
 window.startGeofenceMonitor = startGeofenceMonitor;
 
@@ -15715,6 +15872,27 @@ window.addEventListener('DOMContentLoaded', () => {
   setTimeout(() => { try { _resumeGeofenceMonitorIfNeeded(); } catch(_){} }, 2_500);
 });
 
+// ─── HEARTBEAT PING (build 2026.06.26.4) ───
+// Every poll while on the clock, we record a GPS ping to shift_pings. Pay is
+// computed ONLY from these pings (see _computeWeekGridHybrid) — proven minutes
+// at the store. No ping = no pay. If the shift_pings table doesn't exist yet
+// (migration not run), this fails silently and the monitor keeps working;
+// pay then falls back to check-in/out pairing for those shifts.
+async function _writeShiftPing(state, lat, lng, accuracy, distance, onSite){
+  try {
+    await sb.from('shift_pings').insert({
+      user_id: currentProfile.id,
+      check_in_audit_id: state.checkInAuditId,
+      store_id: state.storeId,
+      latitude: lat,
+      longitude: lng,
+      accuracy_meters: accuracy,
+      distance_from_store_meters: distance,
+      on_site: onSite
+    });
+  } catch(_){ /* table missing or offline — never break the monitor */ }
+}
+
 async function _geofenceTick(){
   const state = _gmReadState();
   if(!state || state.triggered) return;
@@ -15778,6 +15956,11 @@ async function _geofenceTick(){
   const now = Date.now();
   state.lastCheckedAt = now;
   state.lastDistance  = distance;
+
+  // HEARTBEAT: record this GPS reading as proof of presence (every poll, on
+  // or off site). Pay is built from these. Fire-and-forget so the geofence
+  // logic below isn't blocked.
+  void _writeShiftPing(state, lat, lng, accuracy, distance, onSite);
 
   if(onSite){
     // Back on site (or never left) — reset the breach timer
