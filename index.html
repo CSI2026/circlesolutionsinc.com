@@ -1172,6 +1172,7 @@ footer{
         <div id="bo-bell-badge" style="display:none;position:absolute;top:-3px;right:-3px;background:#FF0080;color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:50px;min-width:18px;text-align:center;border:2px solid #000;">0</div>
       </div>
       <div id="bo-user-avatar-wrap" style="display:flex;align-items:center;gap:10px;"></div>
+      <div id="bo-build-badge" title="Current back-office build — confirm everyone is on the latest" style="display:none;font-family:'Bebas Neue',sans-serif;letter-spacing:1px;font-size:11px;color:rgba(255,255,255,0.6);background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.12);padding:3px 9px;border-radius:50px;white-space:nowrap;flex-shrink:0;"></div>
       <button class="logout-btn" onclick="doLogout()">Sign Out</button>
     </div>
   </div>
@@ -1466,6 +1467,12 @@ footer{
   .bo-brand-text{font-size:16px !important;letter-spacing:1.5px !important;}
   /* Tighten topbar padding */
   .portal-header{padding:10px 14px !important;gap:6px;}
+  /* Build badge must ALWAYS stay visible top-right (Calvin's spec). On narrow
+     screens, free up room by collapsing the agent name text and role badge —
+     the avatar icon, build badge, and Sign Out remain. */
+  #bo-user-avatar-wrap .agent-badge{display:none !important;}
+  #bo-role-badge{display:none !important;}
+  #bo-build-badge{font-size:10px !important;padding:2px 7px !important;}
   /* Sidebar becomes off-canvas drawer */
   #bo-sidebar{
     position:fixed !important;
@@ -2113,6 +2120,23 @@ footer{
 // CIRCLE SOLUTIONS — SUPABASE-POWERED BACK OFFICE
 // ═══════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════
+// BUILD VERSION  — single source of truth. BUMP ON EVERY DEPLOY.
+// Shown top-right in the back office (desktop + mobile, always) so
+// agents, managers, and office staff can confirm they're on the
+// latest build. Scheme: YYYY.MM.DD.N  (N = the Nth build that day).
+// ───────────────────────────────────────────────────────────────
+// BUILD LOG (newest first)
+//   2026.06.26.1 — Geofence rebuild. Replaced the dual tight-circle
+//                  fence with ONE whole-store fence auto-sized from
+//                  the store's OpenStreetMap building footprint.
+//                  Walk-off grace 3min → 15min. Added two-walk-off
+//                  daily check-in lockout. Time sheets now show
+//                  precise H:M:S. Added this build-number badge.
+// ═══════════════════════════════════════════════════════════════
+const BUILD_VERSION = '2026.06.26.1';
+window.BUILD_VERSION = BUILD_VERSION;
+
 // ─── Supabase client ───
 const sb = window.supabase.createClient(
   window.CSI_SUPABASE_URL,
@@ -2500,6 +2524,13 @@ function enterBackOffice(){
     ? `<img src="${p.avatar_url}" style="width:30px;height:30px;border-radius:50%;object-fit:cover;border:1px solid rgba(255,255,255,0.15);"/>`
     : `<div style="width:30px;height:30px;border-radius:50%;background:${roleBadgeBg(p.role)};color:${roleBadgeColor(p.role)};display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;">${(p.full_name || p.email || '?').substring(0,1).toUpperCase()}</div>`;
   avatarWrap.innerHTML = `${avatarImg}<div class="agent-badge" style="background:none;border:none;padding:0;">${p.full_name || p.email}</div>`;
+
+  // Build-version badge — always visible top-right once logged in (desktop + mobile)
+  const buildBadge = document.getElementById('bo-build-badge');
+  if(buildBadge){
+    buildBadge.textContent = 'BUILD ' + BUILD_VERSION;
+    buildBadge.style.display = 'inline-flex';
+  }
 
   const roleBadge = document.getElementById('bo-role-badge');
   roleBadge.textContent = roleLabel(p.role);
@@ -13136,7 +13167,7 @@ async function renderStoresAdmin(el){
 async function openStoreEditor(storeId){
   const isEdit = !!storeId;
   let s = { id:'', name:'', store_number:'', street_address:'', city:'', state:'', zip:'',
-    latitude:null, longitude:null, geofence_radius_meters:50,
+    latitude:null, longitude:null, geofence_radius_meters:GEOFENCE_DEFAULT_FENCE_METERS,
     market_id:null, program_id:null, active:true, notes:'' };
   let assignedMMs = [];
   if(isEdit){
@@ -13235,20 +13266,21 @@ async function openStoreEditor(storeId){
     <hr style="border:none;border-top:1px solid rgba(255,255,255,0.08);margin:18px 0;"/>
     <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:#FF6B00;letter-spacing:1.5px;margin-bottom:10px;">📍 GPS &amp; Geofence</div>
     <div style="background:rgba(0,255,136,0.06);border:1px solid rgba(0,255,136,0.25);border-radius:8px;padding:12px 14px;margin-bottom:12px;font-size:12px;color:rgba(255,255,255,0.75);line-height:1.55;">
-      <strong style="color:#00FF88;">⚡ Auto-fill GPS:</strong> Fill in the address fields above, then click <strong>📍 Get GPS from Address</strong>. The system looks up the coordinates from OpenStreetMap (free service, ~20m accuracy). Or click <strong>Use My Current Location</strong> if you're standing at the store.
+      <strong style="color:#00FF88;">⚡ Auto-size the store fence:</strong> Fill in the address above, then click <strong>🏢 Auto-Pull Store Footprint</strong>. The system pulls the store's actual building outline from OpenStreetMap, recenters the fence on the building, and sizes it to cover the whole store — but not the deep parking lot. This is the recommended path. (Or set GPS manually below.)
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
       <div class="form-group"><label class="form-label">Latitude</label><input id="se-lat" class="form-input" type="number" step="0.0000001" value="${s.latitude ?? ''}" placeholder="32.7767"/></div>
       <div class="form-group"><label class="form-label">Longitude</label><input id="se-lng" class="form-input" type="number" step="0.0000001" value="${s.longitude ?? ''}" placeholder="-96.7970"/></div>
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">
-      <button class="bo-btn bo-btn-primary" style="padding:8px 14px;font-size:12px;" onclick="seGeocodeAddress()">📍 Get GPS from Address</button>
+      <button class="bo-btn bo-btn-primary" style="padding:8px 14px;font-size:12px;" onclick="seGeocodeAndSizeFence()">🏢 Auto-Pull Store Footprint + Size Fence</button>
+      <button class="bo-btn bo-btn-ghost" style="padding:8px 14px;font-size:12px;" onclick="seGeocodeAddress()">📍 GPS from Address only</button>
       <button class="bo-btn bo-btn-ghost" style="padding:8px 14px;font-size:12px;" onclick="seUseMyLocation()">📡 Use My Current Location</button>
     </div>
     <div class="form-group">
-      <label class="form-label">Check-in Geofence Radius (meters)</label>
-      <input id="se-radius" class="form-input" type="number" min="10" max="2000" value="${s.geofence_radius_meters || 50}"/>
-      <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">50m (~165 ft) is the standard. Tight enough to keep agents from clocking in from the parking lot, generous enough to handle indoor GPS scatter. Once checked in, a separate 100m walk-off limit applies so agents can move freely inside.</div>
+      <label class="form-label">Whole-Store Fence Radius (meters)</label>
+      <input id="se-radius" class="form-input" type="number" min="50" max="2000" value="${s.geofence_radius_meters || GEOFENCE_DEFAULT_FENCE_METERS}"/>
+      <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">This is the ONE fence for the store. Agents check in inside it and can move anywhere within it (the whole store floor) while on the clock. Auto-Pull sizes this from the building footprint. Leaving it for 15+ straight minutes (e.g. sitting in the parking lot) auto-stops the clock. Default ${GEOFENCE_DEFAULT_FENCE_METERS}m covers a typical big-box store.</div>
     </div>
 
     <hr style="border:none;border-top:1px solid rgba(255,255,255,0.08);margin:18px 0;"/>
@@ -13334,6 +13366,123 @@ async function seGeocodeAddress(silent){
   }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// WHOLE-STORE FENCE — auto-pull the building footprint (build 2026.06.26.1)
+// ───────────────────────────────────────────────────────────────
+// Calvin's spec: the geofence must cover the ENTIRE store (so agents can
+// walk the floor while working without being flagged), but not the deep
+// parking lot. A single tight circle on the street-address point doesn't do
+// that — the old system's #1 failure. Instead we pull the store's actual
+// building footprint from OpenStreetMap, recenter the fence on the building,
+// and size the radius to cover the whole building plus its immediate apron.
+//
+// Sizing constants (tunable):
+const FENCE_BUFFER_METERS = 40;   // apron added beyond the building's bounding circle
+const FENCE_MIN_METERS    = 120;  // never smaller than this (covers a small store)
+const FENCE_MAX_METERS    = 300;  // never larger than this (keeps the deep lot out)
+
+// PURE helper (unit-tested): given Overpass "elements" (ways with .geometry),
+// pick the largest footprint near (anchorLat, anchorLng) and return
+// { lat, lng, radius } recentred on it — or null if nothing usable.
+function _computeFenceFromFootprint(elements, anchorLat, anchorLng){
+  if(!Array.isArray(elements) || elements.length === 0) return null;
+  let best = null, bestScore = -Infinity;
+  for(const el of elements){
+    const geom = el && el.geometry;
+    if(!Array.isArray(geom) || geom.length < 3) continue;
+    let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+    for(const pt of geom){
+      if(typeof pt.lat !== 'number' || typeof pt.lon !== 'number') continue;
+      if(pt.lat < minLat) minLat = pt.lat;
+      if(pt.lat > maxLat) maxLat = pt.lat;
+      if(pt.lon < minLon) minLon = pt.lon;
+      if(pt.lon > maxLon) maxLon = pt.lon;
+    }
+    if(!isFinite(minLat) || !isFinite(minLon)) continue;
+    const cLat = (minLat + maxLat) / 2;
+    const cLon = (minLon + maxLon) / 2;
+    // Score = bbox area, but penalize footprints whose centre is far from the
+    // geocoded anchor (avoid grabbing a neighbouring big-box by mistake).
+    const area = (maxLat - minLat) * (maxLon - minLon);
+    const distFromAnchor = haversineDistance(cLat, cLon, anchorLat, anchorLng);
+    if(distFromAnchor > 400) continue;  // more than ~400m off — not this store
+    const score = area / (1 + distFromAnchor / 100);
+    if(score > bestScore){
+      bestScore = score;
+      // Half-diagonal of the bounding box = distance centre→corner
+      const halfDiag = haversineDistance(cLat, cLon, maxLat, maxLon);
+      let radius = Math.round(halfDiag + FENCE_BUFFER_METERS);
+      if(radius < FENCE_MIN_METERS) radius = FENCE_MIN_METERS;
+      if(radius > FENCE_MAX_METERS) radius = FENCE_MAX_METERS;
+      best = { lat: +cLat.toFixed(7), lng: +cLon.toFixed(7), radius };
+    }
+  }
+  return best;
+}
+
+// Query Overpass for building/retail footprints around a point.
+async function _fetchFootprintElements(lat, lng){
+  const q = `[out:json][timeout:25];(` +
+    `way["building"](around:150,${lat},${lng});` +
+    `way["shop"="supermarket"](around:150,${lat},${lng});` +
+    `way["shop"="department_store"](around:150,${lat},${lng});` +
+    `way["shop"="wholesale"](around:150,${lat},${lng});` +
+    `);out geom;`;
+  const endpoints = [
+    'https://overpass-api.de/api/interpreter',
+    'https://overpass.kumi.systems/api/interpreter'
+  ];
+  for(const ep of endpoints){
+    try {
+      const resp = await fetch(ep, { method:'POST', body: 'data=' + encodeURIComponent(q) });
+      if(!resp.ok) continue;
+      const json = await resp.json();
+      if(json && Array.isArray(json.elements) && json.elements.length) return json.elements;
+    } catch(_){ /* try next endpoint */ }
+  }
+  return [];
+}
+
+// Button handler: geocode (if needed) → pull footprint → size fence → fill form.
+async function seGeocodeAndSizeFence(){
+  const msg = document.getElementById('se-msg');
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">📍 Step 1/2 — finding the address…</span>';
+
+  // Resolve an anchor point: use the form's GPS if already set, else geocode.
+  let anchorLat = parseFloat(document.getElementById('se-lat').value);
+  let anchorLng = parseFloat(document.getElementById('se-lng').value);
+  if(isNaN(anchorLat) || isNaN(anchorLng)){
+    const ok = await seGeocodeAddress(true);
+    if(ok){
+      anchorLat = parseFloat(document.getElementById('se-lat').value);
+      anchorLng = parseFloat(document.getElementById('se-lng').value);
+    }
+  }
+  if(isNaN(anchorLat) || isNaN(anchorLng)){
+    msg.innerHTML = '<span style="color:#F87171;">Couldn\'t find this address. Fill in street/city/state/zip, or use "My Current Location," then try again.</span>';
+    return false;
+  }
+
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">🏢 Step 2/2 — pulling the store\'s building footprint from OpenStreetMap…</span>';
+  const elements = await _fetchFootprintElements(anchorLat, anchorLng);
+  const fence = _computeFenceFromFootprint(elements, anchorLat, anchorLng);
+
+  if(fence){
+    document.getElementById('se-lat').value = fence.lat;
+    document.getElementById('se-lng').value = fence.lng;
+    document.getElementById('se-radius').value = fence.radius;
+    msg.innerHTML = '<span style="color:#00FF88;">✓ Footprint found. Fence recentred on the building and sized to <strong>' + feetLabel(fence.radius) + '</strong> — covers the whole store, keeps the deep parking lot out. Verify on a map before saving.</span>';
+    return true;
+  } else {
+    // Fallback: keep the geocoded point, size a generous default fence so it's
+    // never too tight (the old failure mode).
+    document.getElementById('se-radius').value = GEOFENCE_DEFAULT_FENCE_METERS;
+    msg.innerHTML = '<span style="color:#FFD700;">⚠️ No building footprint found for this spot. Kept the address GPS and set a generous default fence of <strong>' + feetLabel(GEOFENCE_DEFAULT_FENCE_METERS) + '</strong>. If the store is unusually large, bump the radius manually.</span>';
+    return false;
+  }
+}
+window.seGeocodeAndSizeFence = seGeocodeAndSizeFence;
+
 async function saveStore(existingId){
   // Read hours override (null if toggle off)
   const overrideOn = document.getElementById('se-hours-override-toggle')?.checked;
@@ -13351,7 +13500,7 @@ async function saveStore(existingId){
     market_id: document.getElementById('se-market').value || null,
     latitude: parseFloat(document.getElementById('se-lat').value) || null,
     longitude: parseFloat(document.getElementById('se-lng').value) || null,
-    geofence_radius_meters: parseInt(document.getElementById('se-radius').value) || 50,
+    geofence_radius_meters: parseInt(document.getElementById('se-radius').value) || GEOFENCE_DEFAULT_FENCE_METERS,
     active: document.getElementById('se-active').checked,
     notes: document.getElementById('se-notes').value.trim() || null,
     hours_override: hoursOverride
@@ -13361,12 +13510,13 @@ async function saveStore(existingId){
 
   // Auto-geocode on save if address present but no GPS yet
   if((payload.latitude === null || payload.longitude === null) && _seBuildAddressString()){
-    msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">📍 Trying to auto-fill GPS from address…</span>';
-    const ok = await seGeocodeAddress(true);
-    if(ok){
-      payload.latitude = parseFloat(document.getElementById('se-lat').value);
-      payload.longitude = parseFloat(document.getElementById('se-lng').value);
-    }
+    msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">📍 Trying to auto-fill GPS + size the store fence…</span>';
+    // Prefer the footprint path so the fence is sized correctly, not just a point.
+    const sized = await seGeocodeAndSizeFence();
+    payload.latitude  = parseFloat(document.getElementById('se-lat').value) || null;
+    payload.longitude = parseFloat(document.getElementById('se-lng').value) || null;
+    payload.geofence_radius_meters = parseInt(document.getElementById('se-radius').value) || GEOFENCE_DEFAULT_FENCE_METERS;
+    void sized;
   }
   if(payload.latitude === null || payload.longitude === null){
     if(!confirm('No GPS coordinates set — agents will not be able to check in at this store. Save anyway?')) return;
@@ -14224,6 +14374,27 @@ function feetLabel(m){
   return (ft === null) ? '—' : (ft + ' ft');
 }
 
+// ─── Precise worked-time formatting (build 2026.06.26.1) ───
+// Internally hours are millisecond-precise (check-out − check-in). We only
+// rounded them at display before. Calvin wants to pay to the second:
+//   _fmtHMS(8.2508) -> "8h 15m 03s"   (payroll precision)
+//   _fmtHM(8.2508)  -> "8h 15m"        (at-a-glance lists)
+function _fmtHMS(hours){
+  if(hours === null || hours === undefined || isNaN(hours) || hours < 0) return '0h 00m 00s';
+  let totalSec = Math.round(hours * 3600);
+  const h = Math.floor(totalSec / 3600); totalSec -= h * 3600;
+  const m = Math.floor(totalSec / 60);   const s = totalSec - m * 60;
+  return h + 'h ' + String(m).padStart(2,'0') + 'm ' + String(s).padStart(2,'0') + 's';
+}
+function _fmtHM(hours){
+  if(hours === null || hours === undefined || isNaN(hours) || hours < 0) return '0h 00m';
+  let totalMin = Math.round(hours * 60);
+  const h = Math.floor(totalMin / 60); const m = totalMin - h * 60;
+  return h + 'h ' + String(m).padStart(2,'0') + 'm';
+}
+window._fmtHMS = _fmtHMS;
+window._fmtHM = _fmtHM;
+
 let _paPhotoBlob = null;   // kiosk photo (existing)
 let _paSelfieBlob = null;  // selfie photo (new — check-in only)
 
@@ -14755,6 +14926,32 @@ async function submitPhotoAudit(){
   }
   if(isNaN(storeLat) || isNaN(storeLng)){ msg.innerHTML = '<span style="color:#F87171;">This store has no GPS set. Ask your manager.</span>'; return; }
 
+  // ─── Two-walk-off daily lockout (build 2026.06.26.1) ───
+  // If the agent has been AUTO-clocked-out twice today for leaving the store,
+  // they cannot check in again until tomorrow. Calvin's spec: stop paying for
+  // people who keep walking off. We count today's auto-logout check-outs.
+  //
+  // How we identify an auto-logout vs. a manual check-out, with NO schema
+  // change and NO guessing: a manual check-out ALWAYS carries a kiosk photo
+  // (this function blocks submit above without _paPhotoBlob, then uploads it),
+  // whereas an auto-logout is written by the auto_clock_out_for_breach RPC
+  // with no photo. So: check_out today with an empty photo_path == auto-logout.
+  if(auditType === 'check_in'){
+    try {
+      const _dayStart = new Date(); _dayStart.setHours(0,0,0,0);
+      const { data: _coToday } = await sb.from('photo_audits')
+        .select('audit_type,photo_path,created_at')
+        .eq('user_id', currentProfile.id)
+        .eq('audit_type', 'check_out')
+        .gte('created_at', _dayStart.toISOString());
+      const autoLogoutsToday = (_coToday || []).filter(a => !a.photo_path).length;
+      if(autoLogoutsToday >= 2){
+        msg.innerHTML = '<div style="background:rgba(248,113,113,0.08);border:1px solid rgba(248,113,113,0.4);border-radius:8px;padding:14px;color:#F87171;font-size:13px;line-height:1.5;text-align:left;">🔒 <strong>LOCKED OUT FOR TODAY</strong><br><br>You\'ve been auto-clocked-out <strong>twice today</strong> for leaving your store. Per company policy, you can\'t check in again until tomorrow.<br><br>Your manager and the owner can see this. If you believe it\'s an error, contact your manager.</div>';
+        return;
+      }
+    } catch(e){ console.warn('Two-walk-off lockout check failed (allowing check-in):', e); }
+  }
+
   // ─── 40hr weekly cap enforcement ───
   // Block check-ins (not check-outs) if agent has hit the cap this week
   if(auditType === 'check_in'){
@@ -14888,10 +15085,10 @@ async function submitPhotoAudit(){
         }
       } catch(_){}
     }
-    // Phase 3.33 — start the live geofence monitor immediately after a
-    // SUCCESSFUL geofence-passed check-in. If the agent leaves the
-    // 150-yard radius for 3+ consecutive minutes, the monitor auto-clocks
-    // them out and notifies everyone.
+    // Start the live geofence monitor immediately after a SUCCESSFUL
+    // geofence-passed check-in. If the agent leaves the whole-store fence
+    // for 15+ consecutive minutes, the monitor auto-clocks them out and
+    // notifies everyone.
     if(auditType === 'check_in' && passed){
       try {
         await startGeofenceMonitor({
@@ -14899,7 +15096,8 @@ async function submitPhotoAudit(){
           storeId: audit.store_id,
           storeLat: storeLat,
           storeLng: storeLng,
-          storeName: storeOpt.text
+          storeName: storeOpt.text,
+          fenceRadius: radius
         });
       } catch(e){ console.warn('Geofence monitor start failed:', e); }
     }
@@ -14954,24 +15152,26 @@ function checkinGoHome(){
 window.checkinGoHome = checkinGoHome;
 
 // ═══════════════════════════════════════════════════════════════
-// PHASE 3.33 — LIVE GEOFENCE MONITOR  (radius updated Phase 3.34)
+// LIVE GEOFENCE MONITOR  (whole-store fence, build 2026.06.26.1)
 // ═══════════════════════════════════════════════════════════════
 // After a successful check-in, the monitor polls GPS every 2 minutes.
-// If the agent is more than 100 m (~330 ft) from the store for
-// 3+ consecutive minutes, they're auto-clocked-out and notifications
-// fire to owner + agent + agent's MM + every MM at the store + payroll.
+// If the agent is outside the store's whole-store fence (per-store radius,
+// auto-sized from the building footprint) for 15+ CONSECUTIVE minutes,
+// they're auto-clocked-out and notifications fire to owner + agent +
+// agent's MM + every MM at the store + payroll.
 //
 // State persists in sessionStorage so a page reload mid-shift restarts
 // the monitor from the same anchor.
 //
-// Calvin's spec (Phase 3.34):
-//   • Check-in fence: ~10 m (~30 ft) — tight, keeps agents at the kiosk
-//   • Walk-off fence: 100 m (~330 ft) — generous, lets them move in-store
+// Calvin's spec (build 2026.06.26.1):
+//   • ONE fence = the whole store. Check in inside it; move anywhere
+//     within it (the store floor) with no flag. Radius is per-store
+//     (state.fenceRadius), defaulting to GEOFENCE_DEFAULT_FENCE_METERS.
 //   • 2-minute polling
-//   • 3-minute consecutive off-site before triggering (handles bathroom
-//     trips and GPS jumps)
+//   • 15-minute consecutive off-site before triggering (covers bathroom
+//     trips, stockroom GPS blackouts, and brief walks to the car)
 //   • GPS permission revoked / location services off → auto-logout
-//     immediately (per Q3 answer)
+//     immediately
 //   • Recipient list: owner + agent + agent's MM + ANY MM at the store
 //     + payroll managers
 //
@@ -14981,9 +15181,15 @@ window.checkinGoHome = checkinGoHome;
 // separate hardening project — flagged in roadmap.
 // ═══════════════════════════════════════════════════════════════
 
-const GEOFENCE_BREACH_RADIUS_METERS = 100;        // 100 m (~330 ft) — walk-off limit after check-in
+// One fence = the WHOLE store. The fence radius is per-store (auto-sized from
+// the store's building footprint at store-creation; see seGeocodeAndSizeFence).
+// Agents may move anywhere inside the fence — the store floor — without being
+// flagged. Stepping into the parking lot is fine too; only sitting outside the
+// fence for 15+ CONSECUTIVE minutes stops the clock. This default is the
+// fallback used when a store has no radius set on its record.
+const GEOFENCE_DEFAULT_FENCE_METERS = 150;        // ~490 ft — covers a big-box store + apron, not the deep lot
 const GEOFENCE_POLL_INTERVAL_MS     = 2 * 60_000; // 2 minutes
-const GEOFENCE_TRIGGER_AFTER_MS     = 3 * 60_000; // 3 minutes off-site = trigger
+const GEOFENCE_TRIGGER_AFTER_MS     = 15 * 60_000;// 15 minutes off-site = trigger (Calvin's spec)
 
 let _geofenceMonitorId = null;          // setInterval handle
 let _geofenceState     = null;          // current monitor state (mirrors sessionStorage)
@@ -15005,7 +15211,7 @@ function _gmWriteState(state){
 
 // Public: called by submitPhotoAudit after a successful check-in
 async function startGeofenceMonitor(opts){
-  // opts: { checkInAuditId, storeId, storeLat, storeLng, storeName }
+  // opts: { checkInAuditId, storeId, storeLat, storeLng, storeName, fenceRadius }
   stopGeofenceMonitor();  // tear down any prior monitor cleanly
 
   const state = {
@@ -15014,6 +15220,7 @@ async function startGeofenceMonitor(opts){
     storeLat:       opts.storeLat,
     storeLng:       opts.storeLng,
     storeName:      opts.storeName || '',
+    fenceRadius:    (opts.fenceRadius && opts.fenceRadius > 0) ? opts.fenceRadius : GEOFENCE_DEFAULT_FENCE_METERS,
     startedAt:      Date.now(),
     firstBreachAt:  null,           // ms timestamp of first off-site reading; null if currently on-site
     lastCheckedAt:  null,
@@ -15063,6 +15270,17 @@ async function _resumeGeofenceMonitorIfNeeded(){
     // quietly — no monitor on legacy DBs. Once the migration runs, this
     // will start working.
     return;
+  }
+
+  // Backfill the per-store fence radius if this state predates the
+  // whole-store fence (build 2026.06.26.1). Without it the tick would
+  // fall back to the default, which is fine but less precise.
+  if(!state.fenceRadius || state.fenceRadius <= 0){
+    try {
+      const { data: st } = await sb.from('stores').select('geofence_radius_meters').eq('id', state.storeId).maybeSingle();
+      state.fenceRadius = (st && st.geofence_radius_meters > 0) ? st.geofence_radius_meters : GEOFENCE_DEFAULT_FENCE_METERS;
+      _gmWriteState(state);
+    } catch(_){ state.fenceRadius = GEOFENCE_DEFAULT_FENCE_METERS; }
   }
 
   if(_geofenceMonitorId) clearInterval(_geofenceMonitorId);
@@ -15120,11 +15338,11 @@ async function _geofenceTick(){
   const accuracy = pos.coords.accuracy;       // GPS-reported uncertainty in meters
   const distance = haversineDistance(lat, lng, state.storeLat, state.storeLng);
 
-  // Phase 3.35 — same accuracy compensation as check-in. The 100 m walk-off
-  // fence is generous, but indoor GPS scatter on a long shift inside a
-  // Walmart can still drift the reading past 100 m even when the agent
-  // hasn't moved. Without this compensation we'd auto-clock-out agents
-  // who are still on the floor. We trust the GPS's own uncertainty:
+  // Same accuracy compensation as check-in. The whole-store fence is
+  // generous, but indoor GPS scatter on a long shift inside a Walmart can
+  // still drift the reading past the fence even when the agent hasn't
+  // moved. Without this compensation we'd auto-clock-out agents who are
+  // still on the floor. We trust the GPS's own uncertainty:
   //   effective_distance = max(0, distance − accuracy)
   //   onSite             = effective_distance ≤ fence
   // Junk readings (accuracy > 1000m) are treated as "no usable signal" —
@@ -15138,7 +15356,8 @@ async function _geofenceTick(){
     return;
   }
   const effectiveDistance = Math.max(0, distance - accuracy);
-  const onSite = effectiveDistance <= GEOFENCE_BREACH_RADIUS_METERS;
+  const fenceRadius = (state.fenceRadius && state.fenceRadius > 0) ? state.fenceRadius : GEOFENCE_DEFAULT_FENCE_METERS;
+  const onSite = effectiveDistance <= fenceRadius;
 
   const now = Date.now();
   state.lastCheckedAt = now;
@@ -15165,9 +15384,9 @@ async function _geofenceTick(){
     return;
   }
 
-  // 3+ minutes off-site → fire
-  _geofenceFire(state, 'off_site_3min', lat, lng, distance,
-    'Agent has been more than ' + feetLabel(GEOFENCE_BREACH_RADIUS_METERS) + ' from the store for ' + Math.round(offSiteFor / 60_000) + ' consecutive minutes.');
+  // 15+ minutes off-site → fire
+  _geofenceFire(state, 'off_site_15min', lat, lng, distance,
+    'Agent has been more than ' + feetLabel(fenceRadius) + ' from the store for ' + Math.round(offSiteFor / 60_000) + ' consecutive minutes.');
 }
 
 async function _geofenceFire(state, reason, lat, lng, distance, note){
@@ -15227,6 +15446,7 @@ async function _geofenceFire(state, reason, lat, lng, distance, note){
         storeName:     state.storeName,
         reason:        reason,
         distance:      useDist,
+        fenceRadius:   state.fenceRadius,
         note:          note
       });
     } catch(e){ console.warn('Breach notify failed:', e); }
@@ -15250,11 +15470,12 @@ function _showGeofenceLogoutBanner(state, reason, distance){
     host.style.cssText = 'position:sticky;top:0;z-index:6000;';
     main.insertBefore(host, main.firstChild);
   }
+  const fenceR = (state && state.fenceRadius > 0) ? state.fenceRadius : GEOFENCE_DEFAULT_FENCE_METERS;
   const distLine = (distance !== null && distance !== undefined)
-    ? ('You were ' + feetLabel(distance) + ' from the store (limit: ' + feetLabel(GEOFENCE_BREACH_RADIUS_METERS) + ').')
+    ? ('You were ' + feetLabel(distance) + ' from the store (you must stay within ' + feetLabel(fenceR) + ').')
     : 'Your phone\'s GPS was unavailable while you were on the clock.';
   const reasonText = ({
-    'off_site_3min':         'You walked more than ' + feetLabel(GEOFENCE_BREACH_RADIUS_METERS) + ' from your store for 3+ minutes.',
+    'off_site_15min':        'You were more than ' + feetLabel(fenceR) + ' from your store — outside the store — for 15+ minutes.',
     'gps_permission_revoked':'You turned off GPS permission while clocked in.',
     'gps_unavailable':       'Your phone\'s location services stopped reporting.'
   })[reason] || reason;
@@ -15306,8 +15527,9 @@ async function notifyGeofenceBreach(payload){
     } catch(_){}
   }
 
+  const _fenceR = (payload.fenceRadius && payload.fenceRadius > 0) ? payload.fenceRadius : GEOFENCE_DEFAULT_FENCE_METERS;
   const reasonText = ({
-    'off_site_3min':         agentName + ' walked more than ' + feetLabel(GEOFENCE_BREACH_RADIUS_METERS) + ' from ' + (payload.storeName || 'their store') + ' for 3+ minutes and was auto-clocked-out.',
+    'off_site_15min':        agentName + ' was more than ' + feetLabel(_fenceR) + ' from ' + (payload.storeName || 'their store') + ' — outside the store — for 15+ minutes and was auto-clocked-out.',
     'gps_permission_revoked':agentName + ' turned off GPS permission while clocked in at ' + (payload.storeName || 'their store') + ' — auto-clocked-out.',
     'gps_unavailable':       agentName + '\'s phone GPS became unavailable while clocked in at ' + (payload.storeName || 'their store') + ' — auto-clocked-out.'
   })[payload.reason] || (agentName + ' was auto-clocked-out from ' + (payload.storeName || 'their store') + '.');
@@ -16707,7 +16929,7 @@ async function renderPhotoAuditsReview(el){
     // Fetch all audits for these agents in the range in ONE query (efficient)
     const ids = retailAgents.map(a => a.id);
     const { data: tsAudits } = await sb.from('photo_audits')
-      .select('user_id, audit_type, created_at, geofence_passed')
+      .select('user_id, audit_type, created_at, geofence_passed, photo_path')
       .in('user_id', ids)
       .gte('created_at', tsRange.start.toISOString())
       .lt('created_at', tsRange.end.toISOString())
@@ -16758,6 +16980,12 @@ async function renderPhotoAuditsReview(el){
           openShift = { in: pendingCheckIn, hours: span / 3600000 };
         }
       }
+      // Today's auto-logouts (check_out with no photo == auto-clock-out for walk-off).
+      // 2+ today = the agent is locked out of further check-ins for the day.
+      const _todayStart = new Date(); _todayStart.setHours(0,0,0,0);
+      const autoLogoutsToday = (byUser[agent.id] || []).filter(a =>
+        a.audit_type === 'check_out' && !a.photo_path && new Date(a.created_at) >= _todayStart
+      ).length;
       return {
         agent,
         hours: totalMs / 3600000,
@@ -16765,6 +16993,7 @@ async function renderPhotoAuditsReview(el){
         validCount: valid.length,
         shifts,
         openShift,
+        autoLogoutsToday,
         latest: valid[valid.length - 1] || null
       };
     });
@@ -16835,7 +17064,7 @@ async function renderPhotoAuditsReview(el){
             <tr style="border-bottom:1px solid rgba(255,255,255,0.1);">
               <th style="text-align:left;padding:8px 10px;font-size:10.5px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;">AGENT</th>
               <th style="text-align:left;padding:8px 10px;font-size:10.5px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;">ROLE</th>
-              <th style="text-align:right;padding:8px 10px;font-size:10.5px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;width:90px;">HOURS</th>
+              <th style="text-align:right;padding:8px 10px;font-size:10.5px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;width:130px;">TIME WORKED</th>
               <th style="text-align:center;padding:8px 10px;font-size:10.5px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;width:80px;">AUDITS</th>
               <th style="text-align:center;padding:8px 10px;font-size:10.5px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;width:90px;">STATUS</th>
               <th style="text-align:center;padding:8px 10px;font-size:10.5px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;width:80px;">DETAIL</th>
@@ -16850,13 +17079,15 @@ async function renderPhotoAuditsReview(el){
                 <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
                   <td style="padding:9px 10px;color:#fff;font-weight:600;cursor:pointer;" onclick="openAgentProfile('${ts.agent.id}')">${escapeHtml(ts.agent.full_name || ts.agent.email)}</td>
                   <td style="padding:9px 10px;color:rgba(255,255,255,0.65);font-size:11.5px;">${escapeHtml(roleLabel(ts.agent.role))}</td>
-                  <td style="padding:9px 10px;text-align:right;font-family:'Bebas Neue',sans-serif;font-size:20px;color:${hrsColor};line-height:1;">${hrs.toFixed(1)}</td>
+                  <td style="padding:9px 10px;text-align:right;font-family:'Bebas Neue',sans-serif;font-size:18px;color:${hrsColor};line-height:1;white-space:nowrap;">${_fmtHMS(hrs)}</td>
                   <td style="padding:9px 10px;text-align:center;font-size:12px;color:rgba(255,255,255,0.7);">${ts.validCount}/${ts.auditCount}</td>
                   <td style="padding:9px 10px;text-align:center;">
-                    ${isOpen
+                    ${ts.autoLogoutsToday >= 2
+                      ? '<span title="Auto-clocked-out twice today for leaving — blocked from checking in again until tomorrow" style="background:rgba(248,113,113,0.18);color:#F87171;padding:3px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">🔒 LOCKED · 2 WALK-OFFS</span>'
+                      : isOpen
                       ? '<span style="background:rgba(0,255,136,0.15);color:#00FF88;padding:3px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">🟢 ON CLOCK</span>'
                       : ts.latest
-                        ? '<span style="background:rgba(255,255,255,0.05);color:rgba(255,255,255,0.55);padding:3px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">OFF</span>'
+                        ? ('<span style="background:rgba(255,255,255,0.05);color:rgba(255,255,255,0.55);padding:3px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">OFF</span>' + (ts.autoLogoutsToday === 1 ? '<div style="margin-top:3px;"><span title="One walk-off auto-logout today. One more locks them out for the day." style="background:rgba(255,200,0,0.14);color:#FFC800;padding:2px 7px;border-radius:50px;font-size:9px;font-weight:700;letter-spacing:0.5px;">⚠️ 1 WALK-OFF</span></div>' : ''))
                         : '<span style="background:rgba(255,255,255,0.04);color:rgba(255,255,255,0.35);padding:3px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">NO PUNCH</span>'}
                   </td>
                   <td style="padding:9px 10px;text-align:center;">
@@ -16963,7 +17194,7 @@ async function openTimesheetDetail(userId, startIso, endIso, agentName, rangeLab
 
     <div style="background:linear-gradient(135deg,rgba(255,107,0,0.06),rgba(255,107,0,0));border:1px solid rgba(255,107,0,0.3);border-radius:10px;padding:16px;margin-bottom:14px;text-align:center;">
       <div style="font-size:11px;color:rgba(255,255,255,0.6);letter-spacing:2px;font-weight:700;">TOTAL HOURS WORKED</div>
-      <div style="font-family:'Bebas Neue',sans-serif;font-size:54px;color:#FF6B00;line-height:1;letter-spacing:1px;margin:4px 0;">${totalHours.toFixed(2)}</div>
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:44px;color:#FF6B00;line-height:1;letter-spacing:1px;margin:4px 0;">${_fmtHMS(totalHours)}</div>
       <div style="font-size:11px;color:rgba(255,255,255,0.5);">${shifts.length} completed shift${shifts.length === 1 ? '' : 's'}${openShift ? ' + 1 open' : ''} · ${valid.length} valid punch${valid.length === 1 ? '' : 'es'}${(audits||[]).length !== valid.length ? ' · ' + ((audits||[]).length - valid.length) + ' invalid (geofence fail)' : ''}</div>
     </div>
 
@@ -16978,7 +17209,7 @@ async function openTimesheetDetail(userId, startIso, endIso, agentName, rangeLab
               <span style="background:rgba(0,255,136,0.18);color:#00FF88;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">🟢 ON CLOCK</span>
               <span style="font-size:12.5px;color:#fff;font-weight:600;">In: ${new Date(openShift.in.created_at).toLocaleString()}</span>
             </div>
-            <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#00FF88;line-height:1;">${openShift.hours.toFixed(2)} hr</div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#00FF88;line-height:1;">${_fmtHMS(openShift.hours)}</div>
           </div>
           ${openShift.store ? `<div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:4px;">📍 ${escapeHtml(openShift.store.name)}${openShift.store.city ? ' — ' + escapeHtml(openShift.store.city) : ''}</div>` : ''}
         </div>
@@ -16987,7 +17218,7 @@ async function openTimesheetDetail(userId, startIso, endIso, agentName, rangeLab
         <div style="background:rgba(255,255,255,0.025);border:1px solid rgba(255,255,255,0.06);border-radius:8px;padding:10px 12px;margin-bottom:6px;">
           <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:4px;">
             <div style="font-size:11px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1px;">SHIFT ${i + 1}</div>
-            <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#FF6B00;line-height:1;">${sh.hours.toFixed(2)} hr ${sh.capped ? '<span style=\"color:#FFC800;font-size:10px;\">(capped)</span>' : ''}</div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#FF6B00;line-height:1;">${_fmtHMS(sh.hours)} ${sh.capped ? '<span style=\"color:#FFC800;font-size:10px;\">(capped)</span>' : ''}</div>
           </div>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;color:rgba(255,255,255,0.7);">
             <div>
