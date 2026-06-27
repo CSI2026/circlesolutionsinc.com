@@ -1584,6 +1584,30 @@ window.addEventListener("DOMContentLoaded",function(){
   #bo-content table { max-width: 100%; }
   .bo-card { max-width: 100%; }
 
+  /* Responsive tables: stack each row into a labelled card on phones so wide
+     tables (e.g. Time Sheets) never clip or need sideways swiping. */
+  table.bo-responsive-table thead { display: none; }
+  table.bo-responsive-table, table.bo-responsive-table tbody { display: block; width: 100%; }
+  table.bo-responsive-table tr {
+    display: block; border: 1px solid rgba(255,255,255,0.1) !important;
+    border-radius: 12px; margin-bottom: 10px; padding: 2px 2px;
+    background: rgba(255,255,255,0.02);
+  }
+  table.bo-responsive-table td {
+    display: flex !important; justify-content: space-between; align-items: center;
+    gap: 12px; text-align: right !important; width: auto !important;
+    padding: 9px 12px !important; border: none !important; white-space: normal !important;
+  }
+  table.bo-responsive-table td::before {
+    content: attr(data-label); color: rgba(255,255,255,0.45); font-size: 10px;
+    font-weight: 700; letter-spacing: 1px; text-align: left; flex-shrink: 0;
+  }
+  table.bo-responsive-table td[data-label="AGENT"] {
+    font-size: 16px; color: #fff; font-weight: 700;
+    border-bottom: 1px solid rgba(255,255,255,0.08) !important; padding-bottom: 11px !important;
+  }
+  table.bo-responsive-table td[data-label="AGENT"]::before { display: none; }
+
   /* Modals fit the screen and scroll instead of overflowing off-screen */
   #modal-backdrop { padding: 12px !important; align-items: flex-start !important; }
   #modal-backdrop > div, .bo-modal { max-width: 100% !important; width: 100% !important; max-height: 88vh !important; overflow-y: auto !important; }
@@ -2231,6 +2255,10 @@ window.addEventListener("DOMContentLoaded",function(){
 // latest build. Scheme: YYYY.MM.DD.N  (N = the Nth build that day).
 // ───────────────────────────────────────────────────────────────
 // BUILD LOG (newest first)
+//   2026.06.26.9 — Mobile table fix. Wide tables (Time Sheets, team roster)
+//                  now stack into clean labelled cards on phones instead of
+//                  clipping off the right edge — every column is readable with
+//                  no sideways scrolling. Desktop layout unchanged.
 //   2026.06.26.8 — Live time clock. New 'On the Clock' board (owner/admin/
 //                  payroll) shows everyone currently checked in, live, auto-
 //                  refreshing every 20s — works from the audit log so people
@@ -2266,7 +2294,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.06.26.8';
+const BUILD_VERSION = '2026.06.26.9';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -18116,7 +18144,7 @@ async function renderPhotoAuditsReview(el){
           </div>
           <div style="font-size:11px;color:rgba(255,255,255,0.45);">${timesheets.length} agent${timesheets.length === 1 ? '' : 's'}</div>
         </div>
-        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+        <table class="bo-responsive-table" style="width:100%;border-collapse:collapse;font-size:13px;">
           <thead>
             <tr style="border-bottom:1px solid rgba(255,255,255,0.1);">
               <th style="text-align:left;padding:8px 10px;font-size:10.5px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;">AGENT</th>
@@ -18134,11 +18162,11 @@ async function renderPhotoAuditsReview(el){
               const hrsColor = hrs >= 30 ? '#00FF88' : hrs >= 10 ? '#FFC800' : hrs > 0 ? '#FF6B00' : 'rgba(255,255,255,0.4)';
               return `
                 <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
-                  <td style="padding:9px 10px;color:#fff;font-weight:600;cursor:pointer;" onclick="openAgentProfile('${ts.agent.id}')">${escapeHtml(ts.agent.full_name || ts.agent.email)}</td>
-                  <td style="padding:9px 10px;color:rgba(255,255,255,0.65);font-size:11.5px;">${escapeHtml(roleLabel(ts.agent.role))}</td>
-                  <td style="padding:9px 10px;text-align:right;font-family:'Bebas Neue',sans-serif;font-size:18px;color:${hrsColor};line-height:1;white-space:nowrap;">${_fmtHMS(hrs)}</td>
-                  <td style="padding:9px 10px;text-align:center;font-size:12px;color:rgba(255,255,255,0.7);">${ts.validCount}/${ts.auditCount}</td>
-                  <td style="padding:9px 10px;text-align:center;">
+                  <td data-label="AGENT" style="padding:9px 10px;color:#fff;font-weight:600;cursor:pointer;" onclick="openAgentProfile('${ts.agent.id}')">${escapeHtml(ts.agent.full_name || ts.agent.email)}</td>
+                  <td data-label="ROLE" style="padding:9px 10px;color:rgba(255,255,255,0.65);font-size:11.5px;">${escapeHtml(roleLabel(ts.agent.role))}</td>
+                  <td data-label="TIME WORKED" style="padding:9px 10px;text-align:right;font-family:'Bebas Neue',sans-serif;font-size:18px;color:${hrsColor};line-height:1;white-space:nowrap;">${_fmtHMS(hrs)}</td>
+                  <td data-label="AUDITS" style="padding:9px 10px;text-align:center;font-size:12px;color:rgba(255,255,255,0.7);">${ts.validCount}/${ts.auditCount}</td>
+                  <td data-label="STATUS" style="padding:9px 10px;text-align:center;">
                     ${ts.autoLogoutsToday >= 2
                       ? '<span title="Auto-clocked-out twice today for leaving — blocked from checking in again until tomorrow" style="background:rgba(248,113,113,0.18);color:#F87171;padding:3px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">🔒 LOCKED · 2 WALK-OFFS</span>'
                       : isOpen
@@ -18147,7 +18175,7 @@ async function renderPhotoAuditsReview(el){
                         ? ('<span style="background:rgba(255,255,255,0.05);color:rgba(255,255,255,0.55);padding:3px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">OFF</span>' + (ts.autoLogoutsToday === 1 ? '<div style="margin-top:3px;"><span title="One walk-off auto-logout today. One more locks them out for the day." style="background:rgba(255,200,0,0.14);color:#FFC800;padding:2px 7px;border-radius:50px;font-size:9px;font-weight:700;letter-spacing:0.5px;">⚠️ 1 WALK-OFF</span></div>' : ''))
                         : '<span style="background:rgba(255,255,255,0.04);color:rgba(255,255,255,0.35);padding:3px 8px;border-radius:50px;font-size:10px;font-weight:700;letter-spacing:1px;">NO PUNCH</span>'}
                   </td>
-                  <td style="padding:9px 10px;text-align:center;">
+                  <td data-label="DETAIL" style="padding:9px 10px;text-align:center;">
                     <button class="bo-btn bo-btn-ghost" style="padding:3px 9px;font-size:10.5px;" onclick="openTimesheetDetail('${ts.agent.id}','${tsRange.start.toISOString()}','${tsRange.end.toISOString()}','${escapeHtml((ts.agent.full_name||ts.agent.email).replace(/'/g,'&#39;'))}','${tsRange.label.replace(/'/g,'&#39;')}')">📋 View</button>
                   </td>
                 </tr>`;
@@ -18432,7 +18460,7 @@ async function renderMyTeamReadOnly(el){
       </div>
     ` : `
       <div class="bo-card">
-        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+        <table class="bo-responsive-table" style="width:100%;border-collapse:collapse;font-size:13px;">
           <thead>
             <tr style="border-bottom:1px solid rgba(255,255,255,0.1);">
               <th style="text-align:left;padding:10px 12px;font-size:10.5px;color:rgba(255,255,255,0.5);font-weight:700;letter-spacing:1.5px;">AGENT</th>
@@ -18451,11 +18479,11 @@ async function renderMyTeamReadOnly(el){
               const isRetail = (p.programs || []).includes('retail');
               return `
                 <tr style="border-bottom:1px solid rgba(255,255,255,0.05);">
-                  <td style="padding:10px 12px;color:#fff;font-weight:600;">${escapeHtml(p.full_name || p.email)}</td>
-                  <td style="padding:10px 12px;">${programNames}</td>
-                  <td style="padding:10px 12px;"><span style="color:${stage.color};font-size:11px;font-weight:700;letter-spacing:1px;">${stage.label}</span></td>
-                  <td style="padding:10px 12px;text-align:right;font-family:'Bebas Neue',sans-serif;font-size:18px;color:${salesTotal > 0 ? '#FF6B00' : 'rgba(255,255,255,0.35)'};line-height:1;">${salesTotal}</td>
-                  <td style="padding:10px 12px;text-align:right;font-family:'Bebas Neue',sans-serif;font-size:18px;color:${isRetail && hours ? (hours >= 30 ? '#00FF88' : hours >= 10 ? '#FFC800' : '#FF6B00') : 'rgba(255,255,255,0.35)'};line-height:1;">${isRetail ? (hours ? hours.toFixed(1) : '0.0') : '—'}</td>
+                  <td data-label="AGENT" style="padding:10px 12px;color:#fff;font-weight:600;">${escapeHtml(p.full_name || p.email)}</td>
+                  <td data-label="PROGRAM" style="padding:10px 12px;">${programNames}</td>
+                  <td data-label="STATUS" style="padding:10px 12px;"><span style="color:${stage.color};font-size:11px;font-weight:700;letter-spacing:1px;">${stage.label}</span></td>
+                  <td data-label="SALES (WK)" style="padding:10px 12px;text-align:right;font-family:'Bebas Neue',sans-serif;font-size:18px;color:${salesTotal > 0 ? '#FF6B00' : 'rgba(255,255,255,0.35)'};line-height:1;">${salesTotal}</td>
+                  <td data-label="HOURS (WK)" style="padding:10px 12px;text-align:right;font-family:'Bebas Neue',sans-serif;font-size:18px;color:${isRetail && hours ? (hours >= 30 ? '#00FF88' : hours >= 10 ? '#FFC800' : '#FF6B00') : 'rgba(255,255,255,0.35)'};line-height:1;">${isRetail ? (hours ? hours.toFixed(1) : '0.0') : '—'}</td>
                 </tr>`;
             }).join('')}
           </tbody>
