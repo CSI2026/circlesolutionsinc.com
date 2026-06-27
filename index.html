@@ -2255,6 +2255,14 @@ window.addEventListener("DOMContentLoaded",function(){
 // latest build. Scheme: YYYY.MM.DD.N  (N = the Nth build that day).
 // ───────────────────────────────────────────────────────────────
 // BUILD LOG (newest first)
+//   2026.06.26.10 — Auto clock-out at 8 hours (no matter what — fires even if
+//                  GPS is off or the tab was asleep across the 8h mark). All
+//                  shift caps lowered 12h->8h. Timesheet 'View' now shows the
+//                  ACTUAL audit photos inline (uniform selfie + kiosk, in & out)
+//                  so you can verify uniform and setup at a glance. Camera now
+//                  tells the agent exactly what each shot must show: Photo 1
+//                  front = company shirt + badge; Photo 2 back = full kiosk and
+//                  its surroundings (center-aisle TV displays).
 //   2026.06.26.9 — Mobile table fix. Wide tables (Time Sheets, team roster)
 //                  now stack into clean labelled cards on phones instead of
 //                  clipping off the right edge — every column is readable with
@@ -2294,7 +2302,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.06.26.9';
+const BUILD_VERSION = '2026.06.26.10';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -8400,7 +8408,7 @@ async function calculateAgentHoursInRange(userId, startDate, endDate){
   const valid = audits.filter(a => a.geofence_passed);
   let totalMs = 0;
   let pendingCheckIn = null;
-  const MAX_SHIFT_MS = 12 * 3600 * 1000;
+  const MAX_SHIFT_MS = 8 * 3600 * 1000;  // 8h hard daily cap (auto clock-out at 8h)
   for(const a of valid){
     if(a.audit_type === 'check_in'){
       pendingCheckIn = new Date(a.created_at);
@@ -8701,7 +8709,7 @@ const _PLS_DAYS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 // Returns: { userId: { days:[7 numbers], total, paid, capped } }
 function _computeWeekGrid(audits, weekStartMs, nowMs){
   const WEEK_END = weekStartMs + 7 * 86400000;
-  const MAX_SHIFT_MS = 12 * 3600 * 1000;
+  const MAX_SHIFT_MS = 8 * 3600 * 1000;  // 8h hard daily cap (auto clock-out at 8h)
   const byUser = {};
   for(const a of (audits || [])){
     if(!a.geofence_passed) continue;
@@ -8769,7 +8777,7 @@ function _provenMsByDay(points, bridgeMs){
 function _computeWeekGridHybrid(audits, pings, weekStartMs, nowMs, bridgeMs){
   bridgeMs = bridgeMs || PING_BRIDGE_MS;
   const WEEK_END = weekStartMs + 7 * 86400000;
-  const MAX_SHIFT_MS = 12 * 3600 * 1000;
+  const MAX_SHIFT_MS = 8 * 3600 * 1000;  // 8h hard daily cap (auto clock-out at 8h)
   const aByU = {}, pByU = {};
   for(const a of (audits || [])){ if(a.geofence_passed) (aByU[a.user_id] = aByU[a.user_id] || []).push(a); }
   for(const p of (pings || [])){ (pByU[p.user_id] = pByU[p.user_id] || []).push(p); }
@@ -15413,23 +15421,19 @@ async function renderPhotoAuditCheckin(el){
         <strong style="color:#FFD700;">⚠️ Live camera only.</strong> Tap "📸 Take Photo" — the camera will open. Older photos from your gallery will be rejected.
       </div>
 
-      <!-- SELFIE — check-in only, front camera, head-to-waist with badge -->
+      <!-- SELFIE — check-in only, front camera, uniform + badge -->
       <div id="pa-selfie-block" class="form-group" style="display:${suggested === 'check_in' ? 'block' : 'none'};">
-        <label class="form-label" style="display:flex;align-items:center;gap:8px;">
-          <span>🤳 Your Selfie *</span>
-          <span style="font-size:10.5px;color:rgba(255,255,255,0.4);font-weight:400;letter-spacing:0;">— show your badge, head to waist visible · LIVE CAMERA ONLY</span>
-        </label>
-        <button type="button" class="bo-btn bo-btn-primary" style="width:100%;padding:14px;font-size:14px;background:linear-gradient(135deg,#FF6B00,#FF0080);" onclick="paLaunchCamera('selfie')">📸 Open Camera</button>
+        <label class="form-label" style="display:block;">👕 Photo 1 — You in uniform *</label>
+        <div style="font-size:11.5px;color:rgba(255,255,255,0.55);line-height:1.5;margin:2px 0 8px;">Front camera. Show your <strong style="color:#fff;">company shirt and badge</strong>, head to waist. Confirms you're in uniform. Live camera only.</div>
+        <button type="button" class="bo-btn bo-btn-primary" style="width:100%;padding:14px;font-size:14px;background:linear-gradient(135deg,#FF6B00,#FF0080);" onclick="paLaunchCamera('selfie')">📸 Open Front Camera</button>
         <div id="pa-selfie-preview" style="margin-top:8px;"></div>
       </div>
 
       <!-- KIOSK PHOTO — both check-in and check-out, back camera -->
       <div class="form-group">
-        <label class="form-label" style="display:flex;align-items:center;gap:8px;">
-          <span>🖥️ Kiosk Display *</span>
-          <span style="font-size:10.5px;color:rgba(255,255,255,0.4);font-weight:400;letter-spacing:0;">— photo of your station / kiosk · LIVE CAMERA ONLY</span>
-        </label>
-        <button type="button" class="bo-btn bo-btn-primary" style="width:100%;padding:14px;font-size:14px;background:linear-gradient(135deg,#FF6B00,#FF0080);" onclick="paLaunchCamera('kiosk')">📸 Open Camera</button>
+        <label class="form-label" style="display:block;">🖥️ Photo 2 — Kiosk & its setup *</label>
+        <div style="font-size:11.5px;color:rgba(255,255,255,0.55);line-height:1.5;margin:2px 0 8px;">Back camera. Take the <strong style="color:#fff;">full kiosk and what it's set up next to</strong> — step back so the surroundings show in the background (ideally the center-aisle TV displays). We need to see the kiosk <em>and</em> where it's located, not just a close-up. Live camera only.</div>
+        <button type="button" class="bo-btn bo-btn-primary" style="width:100%;padding:14px;font-size:14px;background:linear-gradient(135deg,#FF6B00,#FF0080);" onclick="paLaunchCamera('kiosk')">📸 Open Back Camera</button>
         <div id="pa-photo-preview" style="margin-top:8px;"></div>
       </div>
 
@@ -15503,7 +15507,10 @@ async function paLaunchCamera(target){
   // target = 'kiosk' (back camera) or 'selfie' (front camera)
   _paCameraTarget = target;
   const facingMode = target === 'selfie' ? 'user' : 'environment';
-  const label      = target === 'selfie' ? 'Selfie' : 'Kiosk Photo';
+  const label      = target === 'selfie' ? 'You — Uniform & Badge' : 'Kiosk & Setup';
+  const instruction = target === 'selfie'
+    ? '👕 FRONT camera. Stand back so we can see your <strong>company shirt and your badge</strong> — head to waist in frame. This confirms you\'re in uniform.'
+    : '🖥️ BACK camera. Take the <strong>FULL kiosk AND what it\'s set up next to</strong> — step back so we see the kiosk and its surroundings in the background (ideally the center-aisle TV displays). Show the whole setup and where it is, not just a close-up.';
 
   paStopCameraStream();  // tear down any prior stream
 
@@ -15516,6 +15523,7 @@ async function paLaunchCamera(target){
       <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#fff;letter-spacing:1.5px;">📸 ${label} — LIVE</div>
       <button type="button" onclick="paCloseCamera(event)" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.2);color:#fff;padding:6px 14px;border-radius:50px;cursor:pointer;font-size:12px;font-weight:600;">✕ Cancel</button>
     </div>
+    <div style="padding:11px 16px;background:rgba(0,200,83,0.1);border-bottom:1px solid rgba(0,255,136,0.25);color:#fff;font-size:12.5px;line-height:1.5;flex-shrink:0;">${instruction}</div>
     <div id="pa-cam-stage" style="flex:1;display:flex;align-items:center;justify-content:center;background:#000;position:relative;overflow:hidden;">
       <video id="pa-cam-video" autoplay playsinline muted style="max-width:100%;max-height:100%;display:block;"></video>
       <canvas id="pa-cam-canvas" style="display:none;max-width:100%;max-height:100%;"></canvas>
@@ -16227,6 +16235,7 @@ window.addEventListener('pageshow', _resumeShiftOnReturn);
 const GEOFENCE_DEFAULT_FENCE_METERS = 150;        // ~490 ft — covers a big-box store + apron, not the deep lot
 const GEOFENCE_POLL_INTERVAL_MS     = 2 * 60_000; // 2 minutes
 const GEOFENCE_TRIGGER_AFTER_MS     = 15 * 60_000;// 15 minutes off-site = trigger (Calvin's spec)
+const HARD_DAILY_SHIFT_MS           = 8 * 3600 * 1000; // auto clock-out at 8 hours on the clock, no matter what
 
 let _geofenceMonitorId = null;          // setInterval handle
 let _geofenceState     = null;          // current monitor state (mirrors sessionStorage)
@@ -16369,6 +16378,15 @@ async function _geofenceTick(){
   const state = _gmReadState();
   if(!state || state.triggered) return;
   if(!currentProfile) return;
+
+  // ── HARD 8-HOUR DAILY CAP (checked first, before GPS) ──
+  // Once they've been on the clock 8 hours we auto clock-out no matter what —
+  // even if GPS is unavailable. Also catches a tab that was asleep across the
+  // 8-hour mark the moment it wakes and ticks.
+  if(state.checkInAt && (Date.now() - new Date(state.checkInAt).getTime()) >= HARD_DAILY_SHIFT_MS){
+    return _geofenceFire(state, 'daily_8h_cap', null, null, null,
+      'Reached the 8-hour daily limit — automatically clocked out at 8:00:00.');
+  }
 
   // Pull current GPS. If permission is revoked OR location unavailable,
   // auto-clock-out per Calvin's Q3 answer.
@@ -16548,7 +16566,8 @@ function _showGeofenceLogoutBanner(state, reason, distance){
   const reasonText = ({
     'off_site_15min':        'You were more than ' + feetLabel(fenceR) + ' from your store — outside the store — for 15+ minutes.',
     'gps_permission_revoked':'You turned off GPS permission while clocked in.',
-    'gps_unavailable':       'Your phone\'s location services stopped reporting.'
+    'gps_unavailable':       'Your phone\'s location services stopped reporting.',
+    'daily_8h_cap':          'You reached the 8-hour daily limit, so you were automatically clocked out.'
   })[reason] || reason;
 
   host.innerHTML = `
@@ -16602,7 +16621,8 @@ async function notifyGeofenceBreach(payload){
   const reasonText = ({
     'off_site_15min':        agentName + ' was more than ' + feetLabel(_fenceR) + ' from ' + (payload.storeName || 'their store') + ' — outside the store — for 15+ minutes and was auto-clocked-out.',
     'gps_permission_revoked':agentName + ' turned off GPS permission while clocked in at ' + (payload.storeName || 'their store') + ' — auto-clocked-out.',
-    'gps_unavailable':       agentName + '\'s phone GPS became unavailable while clocked in at ' + (payload.storeName || 'their store') + ' — auto-clocked-out.'
+    'gps_unavailable':       agentName + '\'s phone GPS became unavailable while clocked in at ' + (payload.storeName || 'their store') + ' — auto-clocked-out.',
+    'daily_8h_cap':          agentName + ' reached the 8-hour daily limit at ' + (payload.storeName || 'their store') + ' and was automatically clocked out.'
   })[payload.reason] || (agentName + ' was auto-clocked-out from ' + (payload.storeName || 'their store') + '.');
   const distLine = (payload.distance !== null && payload.distance !== undefined)
     ? ' Distance from store: ' + feetLabel(payload.distance) + '.'
@@ -18033,7 +18053,7 @@ async function renderPhotoAuditsReview(el){
       const totalAudits = (byUser[agent.id] || []).length;
       let totalMs = 0;
       let pendingCheckIn = null;
-      const MAX_SHIFT_MS = 12 * 3600 * 1000;
+      const MAX_SHIFT_MS = 8 * 3600 * 1000;  // 8h hard daily cap (auto clock-out at 8h)
       const shifts = [];  // detailed pair list
       for(const a of valid){
         if(a.audit_type === 'check_in'){
@@ -18140,7 +18160,7 @@ async function renderPhotoAuditsReview(el){
         <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
           <div>
             <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#FF6B00;letter-spacing:1.5px;">🕒 TIME SHEETS · ${tsRange?.label.toUpperCase() || ''}</div>
-            <div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-top:3px;">Hours computed from check-in/check-out pairs (retail agents only). Open shifts count up to now. Single shifts capped at 12 hours.</div>
+            <div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-top:3px;">Hours computed from check-in/check-out pairs (retail agents only). Open shifts count up to now. The clock auto-stops at 8 hours — no shift exceeds 8h.</div>
           </div>
           <div style="font-size:11px;color:rgba(255,255,255,0.45);">${timesheets.length} agent${timesheets.length === 1 ? '' : 's'}</div>
         </div>
@@ -18223,7 +18243,7 @@ async function openTimesheetDetail(userId, startIso, endIso, agentName, rangeLab
   document.getElementById('modal-backdrop').style.display = 'flex';
 
   const { data: audits } = await sb.from('photo_audits')
-    .select('id, audit_type, created_at, geofence_passed, store_id, photo_path, distance_from_store_meters')
+    .select('id, audit_type, created_at, geofence_passed, store_id, photo_path, selfie_path, distance_from_store_meters')
     .eq('user_id', userId)
     .gte('created_at', start.toISOString())
     .lt('created_at', end.toISOString())
@@ -18240,7 +18260,7 @@ async function openTimesheetDetail(userId, startIso, endIso, agentName, rangeLab
   const valid = (audits || []).filter(a => a.geofence_passed);
   const shifts = [];
   let pendingIn = null;
-  const MAX_SHIFT_MS = 12 * 3600 * 1000;
+  const MAX_SHIFT_MS = 8 * 3600 * 1000;  // 8h hard daily cap (auto clock-out at 8h)
   for(const a of valid){
     if(a.audit_type === 'check_in'){
       pendingIn = a;
@@ -18272,6 +18292,23 @@ async function openTimesheetDetail(userId, startIso, endIso, agentName, rangeLab
   }
   const totalHours = shifts.reduce((s, x) => s + x.hours, 0) + (openShift ? openShift.hours : 0);
 
+  // Sign all shift photos so we can show them INLINE (uniform + kiosk) — the
+  // whole point of the audit is to verify uniform & setup, so show the actual
+  // pictures, not just buttons.
+  const allPaths = [];
+  shifts.forEach(sh => { [sh.in.photo_path, sh.in.selfie_path, sh.out.photo_path].forEach(p => { if(p) allPaths.push(p); }); });
+  if(openShift && openShift.in){ [openShift.in.photo_path, openShift.in.selfie_path].forEach(p => { if(p) allPaths.push(p); }); }
+  const urlMap = {};
+  if(allPaths.length){
+    try {
+      const { data: signed } = await sb.storage.from('photo-audits').createSignedUrls(allPaths, 600);
+      (signed || []).forEach(s => { if(s && s.path && s.signedUrl) urlMap[s.path] = s.signedUrl; });
+    } catch(_){}
+  }
+  const _thumb = (path, label, auditId) => (path && urlMap[path])
+    ? `<div style="text-align:center;"><div style="font-size:9px;color:rgba(255,255,255,0.45);letter-spacing:1px;font-weight:700;margin-bottom:3px;">${label}</div><img src="${urlMap[path]}" onclick="viewAuditPhoto('${auditId}','${path}')" style="width:100%;height:96px;object-fit:cover;border-radius:8px;border:1px solid rgba(255,255,255,0.12);cursor:pointer;" title="Tap to enlarge"/></div>`
+    : `<div style="text-align:center;"><div style="font-size:9px;color:rgba(255,255,255,0.45);letter-spacing:1px;font-weight:700;margin-bottom:3px;">${label}</div><div style="height:96px;border-radius:8px;border:1px dashed rgba(255,255,255,0.12);display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.3);font-size:10px;">no photo</div></div>`;
+
   // Render
   document.getElementById('modal-box').innerHTML = `
     <h2 style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:#fff;margin-bottom:4px;letter-spacing:1px;">🕒 Timesheet · ${escapeHtml(agentName)}</h2>
@@ -18297,6 +18334,10 @@ async function openTimesheetDetail(userId, startIso, endIso, agentName, rangeLab
             <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#00FF88;line-height:1;">${_fmtHMS(openShift.hours)}</div>
           </div>
           ${openShift.store ? `<div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:4px;">📍 ${escapeHtml(openShift.store.name)}${openShift.store.city ? ' — ' + escapeHtml(openShift.store.city) : ''}</div>` : ''}
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px;">
+            ${_thumb(openShift.in.selfie_path, '👕 UNIFORM (IN)', openShift.in.id)}
+            ${_thumb(openShift.in.photo_path, '🖥️ KIOSK (IN)', openShift.in.id)}
+          </div>
         </div>
       ` : ''}
       ${shifts.map((sh, i) => `
@@ -18316,9 +18357,10 @@ async function openTimesheetDetail(userId, startIso, endIso, agentName, rangeLab
             </div>
           </div>
           ${sh.store ? `<div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:4px;">📍 ${escapeHtml(sh.store.name)}${sh.store.city ? ' — ' + escapeHtml(sh.store.city) : ''}</div>` : ''}
-          <div style="display:flex;gap:6px;margin-top:6px;">
-            <button class="bo-btn bo-btn-ghost" style="padding:3px 9px;font-size:10.5px;" onclick="viewAuditPhoto('${sh.in.id}','${sh.in.photo_path}')">📸 In Photo</button>
-            <button class="bo-btn bo-btn-ghost" style="padding:3px 9px;font-size:10.5px;" onclick="viewAuditPhoto('${sh.out.id}','${sh.out.photo_path}')">📸 Out Photo</button>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:8px;">
+            ${_thumb(sh.in.selfie_path, '👕 UNIFORM (IN)', sh.in.id)}
+            ${_thumb(sh.in.photo_path, '🖥️ KIOSK (IN)', sh.in.id)}
+            ${_thumb(sh.out.photo_path, '🖥️ KIOSK (OUT)', sh.out.id)}
           </div>
         </div>
       `).join('')}
@@ -18398,7 +18440,7 @@ async function renderMyTeamReadOnly(el){
         if(!byUser[a.user_id]) byUser[a.user_id] = [];
         byUser[a.user_id].push(a);
       });
-      const MAX_SHIFT_MS = 12 * 3600 * 1000;
+      const MAX_SHIFT_MS = 8 * 3600 * 1000;  // 8h hard daily cap (auto clock-out at 8h)
       for(const uid of Object.keys(byUser)){
         let totalMs = 0; let pendingIn = null;
         for(const a of byUser[uid]){
