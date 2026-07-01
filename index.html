@@ -2255,6 +2255,22 @@ window.addEventListener("DOMContentLoaded",function(){
 // latest build. Scheme: YYYY.MM.DD.N  (N = the Nth build that day).
 // ───────────────────────────────────────────────────────────────
 // BUILD LOG (newest first)
+//   2026.06.26.12 — Reliant check-in/out now captures sales. Check-IN asks the
+//                  agent's daily GOAL (numbers only, e.g. 3 -> they put 2).
+//                  Check-OUT asks SOLD applications; entering a number pops an
+//                  anti-falsification warning they must check "I read & understand"
+//                  before it submits. On submit the sold count writes to the SAME
+//                  payroll_sales_log the manual Sales Entry form uses, so it flows
+//                  to the dashboard + weekly total identically (MAX(manual,enrollments)).
+//                  Needs reliant_goal_and_sold_migration.sql (daily_goal column +
+//                  agent self-write policy).
+//   2026.06.26.11 — Runaway-clock fix. The 8-hour auto clock-out now also runs
+//                  SERVER-SIDE (auto_checkout_8h_migration.sql) so a shift is
+//                  closed at 8h even if the agent's phone is off — the in-app
+//                  cutoff alone couldn't (a closed phone runs nothing). The
+//                  On-the-Clock board now self-heals overdue shifts the moment
+//                  you open it (closes your own directly; others via the server
+//                  function) and never displays past 8h.
 //   2026.06.26.10 — Auto clock-out at 8 hours (no matter what — fires even if
 //                  GPS is off or the tab was asleep across the 8h mark). All
 //                  shift caps lowered 12h->8h. Timesheet 'View' now shows the
@@ -2302,7 +2318,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.06.26.10';
+const BUILD_VERSION = '2026.06.26.12';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -3481,6 +3497,40 @@ async function renderOnTheClockInto(host, refreshFnName){
     audits = data || [];
   } catch(_){}
   const open = _computeOpenShifts(audits);
+
+  // SELF-HEAL: if anyone's open shift is past 8 hours, close it now — so the
+  // clock never runs away (you saw a 25-hour shift). Two layers:
+  //   1) Best-effort server function (closes ANYONE's overdue shift) — needs
+  //      auto_checkout_8h_migration.sql to be run once.
+  //   2) Always: close the CURRENT viewer's OWN overdue shift directly (works
+  //      with no migration, since you can write your own check-out).
+  const overdue = open.filter(o => (Date.now() - o.checkInTs) >= HARD_DAILY_SHIFT_MS);
+  if(overdue.length){
+    let healed = false;
+    try { const { error } = await sb.rpc('close_overdue_shifts'); if(!error) healed = true; } catch(_){}
+    const mine = overdue.find(o => o.user_id === (currentProfile && currentProfile.id));
+    if(mine){
+      try {
+        await sb.from('photo_audits').insert({
+          user_id: currentProfile.id, audit_type: 'check_out', store_id: mine.store_id,
+          geofence_passed: true, notes: 'Auto clock-out: reached 8-hour daily limit.'
+        });
+        try { stopGeofenceMonitor(); } catch(_){}
+        healed = true;
+      } catch(_){}
+    }
+    if(healed){
+      // Re-pull so the closed shifts drop off immediately.
+      try {
+        const { data: fresh } = await sb.from('photo_audits')
+          .select('user_id,audit_type,store_id,created_at,geofence_passed')
+          .gte('created_at', since).order('created_at', { ascending: true });
+        const reopen = _computeOpenShifts(fresh || []);
+        open.length = 0; reopen.forEach(o => open.push(o));
+      } catch(_){}
+    }
+  }
+
   const uids = open.map(o => o.user_id);
   const sids = [...new Set(open.map(o => o.store_id).filter(Boolean))];
   const nameMap = {}, roleMap = {}, storeMap = {}, pingMap = {};
@@ -3500,10 +3550,14 @@ async function renderOnTheClockInto(host, refreshFnName){
   const now = Date.now();
   const roleLabel = r => ({owner:'Owner',admin:'Admin',manager:'Manager',team_lead:'Team Lead',agent:'Agent'}[r] || '');
   const rows = open.sort((a,b) => a.checkInTs - b.checkInTs).map(o => {
-    const elapsed = _fmtHMS((now - o.checkInTs) / 3600000);
+    const rawMs = now - o.checkInTs;
+    const overEight = rawMs >= HARD_DAILY_SHIFT_MS;
+    const elapsed = _fmtHMS(Math.min(rawMs, HARD_DAILY_SHIFT_MS) / 3600000);  // never display past 8h
     const ping = pingMap[o.user_id];
     let live;
-    if(ping && (now - ping.ts) <= PING_BRIDGE_MS){
+    if(overEight){
+      live = '<span style="color:#FFC800;font-weight:700;">⏱ Hit 8h — auto clock-out (clears on next refresh)</span>';
+    } else if(ping && (now - ping.ts) <= PING_BRIDGE_MS){
       const s = Math.round((now - ping.ts) / 1000);
       live = '<span style="color:' + (ping.on ? '#00FF88' : '#FFC800') + ';font-weight:700;">● ' + (ping.on ? 'inside store' : 'OFF-SITE') + '</span> <span style="color:rgba(255,255,255,0.4);">ping ' + (s < 60 ? s + 's' : Math.round(s/60) + 'm') + ' ago</span>';
     } else if(ping){
@@ -3511,13 +3565,14 @@ async function renderOnTheClockInto(host, refreshFnName){
     } else {
       live = '<span style="color:rgba(255,255,255,0.4);">checked in · turn on live GPS by running the ping migration</span>';
     }
+    const timeColor = overEight ? '#FFC800' : '#00FF88';
     return `<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 0;border-top:1px solid rgba(255,255,255,0.06);">
       <div style="min-width:0;">
         <div style="color:#fff;font-size:14px;font-weight:700;">${escapeHtml(nameMap[o.user_id] || 'Unknown')} <span style="font-size:10.5px;color:rgba(255,255,255,0.4);font-weight:500;">${roleLabel(roleMap[o.user_id])}</span></div>
         <div style="font-size:11.5px;color:rgba(255,255,255,0.5);">${escapeHtml(storeMap[o.store_id] || '—')} · since ${new Date(o.checkInTs).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'})}</div>
         <div style="font-size:11px;margin-top:2px;">${live}</div>
       </div>
-      <div style="text-align:right;flex-shrink:0;"><div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#00FF88;line-height:1;">${elapsed}</div><div style="font-size:10px;color:rgba(255,255,255,0.4);">on the clock</div></div>
+      <div style="text-align:right;flex-shrink:0;"><div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:${timeColor};line-height:1;">${elapsed}</div><div style="font-size:10px;color:rgba(255,255,255,0.4);">on the clock</div></div>
     </div>`;
   }).join('');
   host.innerHTML = `<div class="bo-card" style="text-align:left;">
@@ -15416,6 +15471,20 @@ async function renderPhotoAuditCheckin(el){
         <div style="font-size:11px;color:rgba(255,255,255,0.45);margin-top:6px;">Automatically set from your check-in — no need to choose.</div>
       </div>
 
+      <!-- DAILY GOAL — check-in only -->
+      <div class="form-group" id="pa-goal-group" style="display:${suggested === 'check_in' ? 'block' : 'none'};">
+        <label class="form-label">🎯 Your sales goal for today *</label>
+        <input id="pa-goal" class="form-input" type="number" inputmode="numeric" min="0" step="1" placeholder="e.g. 3"/>
+        <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-top:5px;line-height:1.5;">Numbers only. Put the goal you're setting for yourself today — for example, if your goal is 2 sales, type <strong style="color:#fff;">2</strong>.</div>
+      </div>
+
+      <!-- SOLD APPLICATIONS — check-out only -->
+      <div class="form-group" id="pa-sold-group" style="display:${suggested === 'check_out' ? 'block' : 'none'};">
+        <label class="form-label">✅ Sold applications today *</label>
+        <input id="pa-sold" class="form-input" type="number" inputmode="numeric" min="0" step="1" placeholder="e.g. 2"/>
+        <div style="font-size:11.5px;color:rgba(255,255,255,0.5);margin-top:5px;line-height:1.5;">Numbers only. How many applications you sold today — put <strong style="color:#fff;">0</strong> if none. This adds straight to your weekly sales total.</div>
+      </div>
+
       <!-- Photo capture block — selfie shown on check-in only, kiosk shown always -->
       <div style="background:rgba(255,193,7,0.06);border:1px solid rgba(255,193,7,0.25);border-radius:8px;padding:10px 14px;margin-bottom:12px;font-size:11.5px;color:rgba(255,255,255,0.7);line-height:1.55;">
         <strong style="color:#FFD700;">⚠️ Live camera only.</strong> Tap "📸 Take Photo" — the camera will open. Older photos from your gallery will be rejected.
@@ -15739,6 +15808,11 @@ function paOnTypeChange(){
   const coGroup = document.getElementById('pa-checkout-store-group');
   if(storeGroup) storeGroup.style.display = (auditType === 'check_in') ? 'block' : 'none';
   if(coGroup) coGroup.style.display = (auditType === 'check_out') ? 'block' : 'none';
+  // Goal on check-IN only; sold-applications on check-OUT only.
+  const goalGroup = document.getElementById('pa-goal-group');
+  const soldGroup = document.getElementById('pa-sold-group');
+  if(goalGroup) goalGroup.style.display = (auditType === 'check_in') ? 'block' : 'none';
+  if(soldGroup) soldGroup.style.display = (auditType === 'check_out') ? 'block' : 'none';
 }
 
 // Resolve the store of the agent's currently-open shift (latest audit is a
@@ -15759,6 +15833,52 @@ async function _resolveOpenShiftStore(){
   } catch(_){ return null; }
 }
 
+// Anti-falsification acknowledgment gate for the self-reported sold count.
+// Shows a warning the agent must actively check "I read and understand" on
+// before the check-out (and the sale) will go through. Resolves true only if
+// they acknowledge and confirm; false if they cancel.
+function _paConfirmSoldCount(count){
+  return new Promise((resolve) => {
+    const prior = document.getElementById('pa-sold-ack-modal');
+    if(prior) prior.remove();
+    const modal = document.createElement('div');
+    modal.id = 'pa-sold-ack-modal';
+    modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.82);z-index:100001;display:flex;align-items:center;justify-content:center;padding:18px;';
+    modal.innerHTML = `
+      <div style="background:#141414;border:1px solid rgba(248,113,113,0.4);border-radius:16px;max-width:460px;width:100%;padding:22px;box-shadow:0 20px 60px rgba(0,0,0,0.6);">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#fff;letter-spacing:1px;margin-bottom:4px;">⚠️ Confirm Your Sales</div>
+        <div style="font-size:13px;color:rgba(255,255,255,0.7);margin-bottom:16px;">You're reporting <strong style="color:#fff;font-size:16px;">${count}</strong> sold application${count === 1 ? '' : 's'} for today.</div>
+        <div style="background:rgba(248,113,113,0.1);border:1px solid rgba(248,113,113,0.45);border-radius:10px;padding:14px 16px;font-size:13px;color:#FCA5A5;line-height:1.55;margin-bottom:16px;">
+          <strong style="color:#F87171;">Falsifying your numbers is fraud.</strong> Reporting sales you did not actually make can result in your <strong style="color:#fff;">immediate removal from the program</strong>, forfeiture of commissions, and further action. Only submit numbers you can stand behind.
+        </div>
+        <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;font-size:13px;color:#fff;line-height:1.5;margin-bottom:18px;">
+          <input type="checkbox" id="pa-sold-ack-cb" style="width:20px;height:20px;flex-shrink:0;margin-top:1px;accent-color:#00FF88;"/>
+          <span>I have read and understand this. The number I entered is accurate and truthful.</span>
+        </label>
+        <div style="display:flex;gap:10px;">
+          <button id="pa-sold-ack-confirm" disabled style="flex:1;background:rgba(0,255,136,0.25);border:none;color:#fff;padding:13px;border-radius:50px;font-size:14px;font-weight:700;letter-spacing:0.5px;cursor:not-allowed;opacity:0.5;">Confirm & Check Out</button>
+          <button id="pa-sold-ack-cancel" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.2);color:#fff;padding:13px 20px;border-radius:50px;font-size:14px;font-weight:600;cursor:pointer;">Cancel</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    const cb = modal.querySelector('#pa-sold-ack-cb');
+    const confirmBtn = modal.querySelector('#pa-sold-ack-confirm');
+    const cancelBtn = modal.querySelector('#pa-sold-ack-cancel');
+    cb.addEventListener('change', () => {
+      if(cb.checked){
+        confirmBtn.disabled = false;
+        confirmBtn.style.cssText = 'flex:1;background:linear-gradient(135deg,#00FF88,#00C6FF);border:none;color:#0a0a0a;padding:13px;border-radius:50px;font-size:14px;font-weight:700;letter-spacing:0.5px;cursor:pointer;';
+      } else {
+        confirmBtn.disabled = true;
+        confirmBtn.style.cssText = 'flex:1;background:rgba(0,255,136,0.25);border:none;color:#fff;padding:13px;border-radius:50px;font-size:14px;font-weight:700;letter-spacing:0.5px;cursor:not-allowed;opacity:0.5;';
+      }
+    });
+    const done = (val) => { modal.remove(); resolve(val); };
+    confirmBtn.addEventListener('click', () => { if(!confirmBtn.disabled) done(true); });
+    cancelBtn.addEventListener('click', () => done(false));
+  });
+}
+
 async function submitPhotoAudit(){
   // Guard against double-tap / concurrent submits. This was the root cause of
   // the stacked "Uploading…" lines and risked duplicate check-in rows.
@@ -15773,6 +15893,27 @@ async function submitPhotoAudit(){
   try {
   const auditType = document.querySelector('input[name="pa-type"]:checked')?.value;
   if(!auditType){ msg.innerHTML = '<span style="color:#F87171;">Pick check-in or check-out.</span>'; return; }
+
+  // CHECK-OUT: capture the self-reported sold applications and require the
+  // anti-falsification acknowledgment BEFORE any location/upload work.
+  let _soldCount = null;
+  if(auditType === 'check_out'){
+    const soldRaw = (document.getElementById('pa-sold')?.value ?? '').trim();
+    if(soldRaw === ''){ msg.innerHTML = '<span style="color:#F87171;">Enter how many applications you sold today (put 0 if none).</span>'; return; }
+    _soldCount = parseInt(soldRaw, 10);
+    if(isNaN(_soldCount) || _soldCount < 0){ msg.innerHTML = '<span style="color:#F87171;">Sold applications must be a whole number (0 or more).</span>'; return; }
+    const acknowledged = await _paConfirmSoldCount(_soldCount);
+    if(!acknowledged){ msg.innerHTML = '<span style="color:rgba(255,255,255,0.55);">Check-out cancelled. Fix your number and submit again when ready.</span>'; return; }
+  }
+
+  // CHECK-IN: the daily goal is required (numbers only).
+  if(auditType === 'check_in'){
+    const goalRaw = (document.getElementById('pa-goal')?.value ?? '').trim();
+    const goalNum = parseInt(goalRaw, 10);
+    if(goalRaw === '' || isNaN(goalNum) || goalNum < 0){
+      msg.innerHTML = '<span style="color:#F87171;">Enter your sales goal for today — a whole number (for example, 3).</span>'; return;
+    }
+  }
 
   // Resolve the store. CHECK-IN: from the dropdown. CHECK-OUT: from the open
   // shift (monitor state, else the open check-in row) — we never ask, so a
@@ -15963,6 +16104,35 @@ async function submitPhotoAudit(){
     off_hours_check: offHoursCheck, off_hours_minutes: offHoursMinutes
   }).select().single();
   if(insertErr){ msg.innerHTML = '<span style="color:#F87171;">' + insertErr.message + '</span>'; return; }
+
+  // ─── Sales log: goal (check-in) / sold applications (check-out) ───
+  // Writes to the SAME payroll_sales_log the manual "Sales Entry" form uses,
+  // so the number flows into the dashboard + weekly total identically
+  // (system honors MAX(manual_sales_count, enrollments)). Best-effort — a
+  // failure here never undoes the check-in/out that already saved.
+  try {
+    const _logDate = new Date().toISOString().split('T')[0];
+    if(auditType === 'check_in'){
+      const goalRaw = (document.getElementById('pa-goal')?.value ?? '').trim();
+      if(goalRaw !== ''){
+        const goal = parseInt(goalRaw, 10);
+        if(!isNaN(goal) && goal >= 0){
+          const { error: gErr } = await sb.from('payroll_sales_log').upsert({
+            user_id: currentProfile.id, log_date: _logDate, daily_goal: goal
+          }, { onConflict: 'user_id,log_date' });
+          if(gErr) console.warn('Daily goal save failed (needs daily_goal column migration):', gErr.message);
+        }
+      }
+    } else if(auditType === 'check_out' && _soldCount != null){
+      const { error: sErr } = await sb.from('payroll_sales_log').upsert({
+        user_id: currentProfile.id, log_date: _logDate,
+        manual_sales_count: _soldCount,
+        entered_by: currentProfile.id, entered_at: new Date().toISOString(),
+        notes: 'Self-reported at check-out (agent acknowledged anti-falsification policy).'
+      }, { onConflict: 'user_id,log_date' });
+      if(sErr) console.warn('Sold-count save failed (check agent RLS on payroll_sales_log):', sErr.message);
+    }
+  } catch(e){ console.warn('Sales-log write failed (audit still saved):', e); }
 
   // Phase 3.26: Render success FIRST, then fire notifications in the
   // background. Previously we awaited up to 20+ network calls (one per
