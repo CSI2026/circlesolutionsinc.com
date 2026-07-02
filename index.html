@@ -2268,6 +2268,18 @@ window.addEventListener("DOMContentLoaded",function(){
 // latest build. Scheme: YYYY.MM.DD.N  (N = the Nth build that day).
 // ───────────────────────────────────────────────────────────────
 // BUILD LOG (newest first)
+//   2026.06.26.16 — Dashboard sales math fixed to spec. (1) Team totals now
+//                  count the FULL downline (agent under TL under MM all roll
+//                  up), week + month. (2) Manager scoreboard shows TEAM
+//                  WEEKLY/MONTHLY as the big numbers plus a TEAM BREAKDOWN
+//                  card: their own personal row ('me — personal') and every
+//                  member's week + month. (3) Check-out self-reported sales
+//                  now ALSO write daily_sales (the dashboard ledger), and all
+//                  dashboard readers blend MAX(daily_sales, payroll manual)
+//                  per user/day so the owner's per-agent Sales Entry modal,
+//                  the Sales Entry panel, and check-out reports all land on
+//                  the dashboard identically with zero double-counting.
+//                  Leaderboard uses the same blend so numbers cannot diverge.
 //   2026.06.26.15 — Owner back office reorganized. The owner sidebar was one
 //                  flat scattered list of 26 items; it's now grouped under
 //                  clear headers ordered by frequency of use: Owner Panel on
@@ -2352,7 +2364,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.06.26.15';
+const BUILD_VERSION = '2026.06.26.16';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -6027,84 +6039,141 @@ async function _getEffectiveSalesGoal(userId, programId, roleBucket){
   };
 }
 
+// Self-reported / payroll manual sales (payroll_sales_log) blended into the
+// dashboard numbers for the RETAIL program only (that log has no program
+// dimension — it's written by the retail check-out tool and the owner's
+// per-agent Sales Entry modal). Per user per day we take
+// MAX(daily_sales, payroll manual) so nothing ever double-counts, and both
+// entry paths land on the dashboard identically.
+async function _payrollManualMap(userIds, startStr, endStr){
+  try {
+    let q = sb.from('payroll_sales_log')
+      .select('user_id, log_date, manual_sales_count')
+      .gte('log_date', startStr).lte('log_date', endStr);
+    if(userIds && userIds.length) q = q.in('user_id', userIds);
+    const { data } = await q;
+    const map = {};
+    (data || []).forEach(r => {
+      if(!r.manual_sales_count) return;
+      (map[r.user_id] = map[r.user_id] || {})[r.log_date] = r.manual_sales_count;
+    });
+    return map;
+  } catch(_){ return {}; }
+}
+
 async function _getMySalesAggregates(userId, programId){
   const week  = _scoreboardWeekRange();
   const month = _scoreboardMonthRange();
   const today = new Date().toISOString().slice(0,10);
 
   // CRITICAL: weeks can straddle months (e.g. Mon Apr 27 → Sun May 3).
-  // If we only query the month range, sales from the prior month that
-  // belong to "this week" are excluded → personal weekly count reads 0
-  // even though the leaderboard correctly counts the same row.
-  // Fix: query the UNION of week + month ranges, then bucket each row
-  // into weekly/monthly/today client-side.
+  // Query the UNION of week + month ranges, then bucket client-side.
   const startStr = (week.mondayStr < month.firstStr) ? week.mondayStr : month.firstStr;
   const endStr   = (week.sundayStr > month.lastStr)  ? week.sundayStr : month.lastStr;
 
-  const { data, error } = await sb.from('daily_sales')
-    .select('sale_date, count, program_id, user_id')
-    .eq('user_id', userId)
-    .gte('sale_date', startStr)
-    .lte('sale_date', endStr);
-
-  if(error || !data) return { weekly: 0, monthly: 0, today: 0, week, month };
-
-  let weekly = 0, monthly = 0, todayCount = 0;
   const targetProg = (programId || '').trim().toLowerCase();
-  for(const row of data){
+  const [{ data, error }, manualMap] = await Promise.all([
+    sb.from('daily_sales')
+      .select('sale_date, count, program_id, user_id')
+      .eq('user_id', userId)
+      .gte('sale_date', startStr)
+      .lte('sale_date', endStr),
+    targetProg === 'retail' ? _payrollManualMap([userId], startStr, endStr) : Promise.resolve({})
+  ]);
+  if(error && !data) return { weekly: 0, monthly: 0, today: 0, week, month };
+
+  // Per-day totals from daily_sales, then blend MAX with payroll manual.
+  const byDay = {};
+  for(const row of (data || [])){
     if((row.program_id || '').trim().toLowerCase() !== targetProg) continue;
-    // Bucket each row independently — monthly bucket uses month bounds,
-    // weekly bucket uses week bounds, today bucket uses today.
-    if(row.sale_date >= month.firstStr && row.sale_date <= month.lastStr) monthly += row.count;
-    if(row.sale_date >= week.mondayStr  && row.sale_date <= week.sundayStr) weekly += row.count;
-    if(row.sale_date === today) todayCount += row.count;
+    byDay[row.sale_date] = (byDay[row.sale_date] || 0) + row.count;
+  }
+  const manualDays = (manualMap[userId]) || {};
+  const allDays = new Set([...Object.keys(byDay), ...Object.keys(manualDays)]);
+  let weekly = 0, monthly = 0, todayCount = 0;
+  for(const day of allDays){
+    const eff = Math.max(byDay[day] || 0, manualDays[day] || 0);
+    if(day >= month.firstStr && day <= month.lastStr) monthly += eff;
+    if(day >= week.mondayStr  && day <= week.sundayStr) weekly += eff;
+    if(day === today) todayCount += eff;
   }
   return { weekly, monthly, today: todayCount, week, month };
 }
 
-// Phase 3.32 — team aggregates for the manager scoreboard tile.
-// Managers usually have ZERO personal sales (they aren't on the floor
-// selling), so the personal-sales tile on their scoreboard always read 0
-// and never moved when their agents sold. This function returns the SUM
-// of (manager's own + direct reports') sales for the week, month, today —
-// drop-in compatible shape with _getMySalesAggregates.
-// Calvin: "the agents score board updates but the mangers dont".
+// Phase 3.32 (upgraded) — team aggregates for the manager scoreboard.
+// Calvin's spec: every sale under a manager counts toward their team total —
+// no matter who made it or how deep (agent → team lead → manager all roll up).
+// Returns team week/month/today totals PLUS a per-member breakdown with each
+// person's own weekly + monthly, so the manager (and the owner) can see
+// "I did 8 this week, and agent John has 5" at a glance.
 async function _getMyTeamAggregates(managerId, programId){
   const week  = _scoreboardWeekRange();
   const month = _scoreboardMonthRange();
   const today = new Date().toISOString().slice(0,10);
 
-  // Pull every user who reports to this manager + the manager themselves.
-  // We can't rely on _myDirectReportIds because it may not be prewarmed
-  // when this is first called; query fresh to be safe.
-  const { data: reports } = await sb.from('profiles')
-    .select('id, role')
-    .eq('reports_to', managerId);
-  const teamIds = [managerId].concat((reports || [])
-    .filter(r => r.role !== 'admin' && r.role !== 'owner')   // exclude CSI back-office
-    .map(r => r.id));
+  // FULL DOWNLINE walk: pull the reporting tree once and BFS from the
+  // manager, so agents under team leads under this manager are included.
+  let teamIds = [managerId];
+  const nameMap = {};
+  try {
+    const { data: allP } = await sb.from('profiles')
+      .select('id, reports_to, role, full_name, email, active');
+    const people = (allP || []).filter(p => p.active !== false && p.role !== 'admin' && p.role !== 'owner');
+    (allP || []).forEach(p => { nameMap[p.id] = p.full_name || p.email || 'Unknown'; });
+    const childrenOf = {};
+    people.forEach(p => { if(p.reports_to){ (childrenOf[p.reports_to] = childrenOf[p.reports_to] || []).push(p.id); } });
+    const seen = new Set([managerId]);
+    const queue = [managerId];
+    while(queue.length){
+      const cur = queue.shift();
+      for(const kid of (childrenOf[cur] || [])){
+        if(!seen.has(kid)){ seen.add(kid); queue.push(kid); }
+      }
+    }
+    teamIds = [...seen];
+  } catch(_){ /* fall back to just the manager */ }
 
   // Same straddle-month logic as _getMySalesAggregates
   const startStr = (week.mondayStr < month.firstStr) ? week.mondayStr : month.firstStr;
   const endStr   = (week.sundayStr > month.lastStr)  ? week.sundayStr : month.lastStr;
-
-  const { data, error } = await sb.from('daily_sales')
-    .select('sale_date, count, program_id, user_id')
-    .in('user_id', teamIds)
-    .gte('sale_date', startStr)
-    .lte('sale_date', endStr);
-
-  if(error || !data) return { weekly: 0, monthly: 0, today: 0, week, month, teamSize: teamIds.length };
-
-  let weekly = 0, monthly = 0, todayCount = 0;
   const targetProg = (programId || '').trim().toLowerCase();
-  for(const row of data){
+
+  const [{ data, error }, manualMap] = await Promise.all([
+    sb.from('daily_sales')
+      .select('sale_date, count, program_id, user_id')
+      .in('user_id', teamIds)
+      .gte('sale_date', startStr)
+      .lte('sale_date', endStr),
+    targetProg === 'retail' ? _payrollManualMap(teamIds, startStr, endStr) : Promise.resolve({})
+  ]);
+  if(error && !data) return { weekly: 0, monthly: 0, today: 0, week, month, teamSize: teamIds.length, members: [] };
+
+  // Per member, per day → MAX(daily_sales, payroll manual), then bucket.
+  const byUserDay = {};
+  for(const row of (data || [])){
     if((row.program_id || '').trim().toLowerCase() !== targetProg) continue;
-    if(row.sale_date >= month.firstStr && row.sale_date <= month.lastStr) monthly += row.count;
-    if(row.sale_date >= week.mondayStr  && row.sale_date <= week.sundayStr) weekly += row.count;
-    if(row.sale_date === today) todayCount += row.count;
+    const u = (byUserDay[row.user_id] = byUserDay[row.user_id] || {});
+    u[row.sale_date] = (u[row.sale_date] || 0) + row.count;
   }
-  return { weekly, monthly, today: todayCount, week, month, teamSize: teamIds.length };
+  let weekly = 0, monthly = 0, todayCount = 0;
+  const members = [];
+  for(const uid of teamIds){
+    const dsDays = byUserDay[uid] || {};
+    const mnDays = manualMap[uid] || {};
+    const allDays = new Set([...Object.keys(dsDays), ...Object.keys(mnDays)]);
+    let mW = 0, mM = 0, mT = 0;
+    for(const day of allDays){
+      const eff = Math.max(dsDays[day] || 0, mnDays[day] || 0);
+      if(day >= month.firstStr && day <= month.lastStr) mM += eff;
+      if(day >= week.mondayStr  && day <= week.sundayStr) mW += eff;
+      if(day === today) mT += eff;
+    }
+    weekly += mW; monthly += mM; todayCount += mT;
+    members.push({ id: uid, name: nameMap[uid] || 'Unknown', weekly: mW, monthly: mM, isSelf: uid === managerId });
+  }
+  // Manager first, then by weekly production
+  members.sort((a,b) => (b.isSelf?1:0)-(a.isSelf?1:0) || b.weekly - a.weekly || b.monthly - a.monthly);
+  return { weekly, monthly, today: todayCount, week, month, teamSize: teamIds.length, members };
 }
 
 async function _getProgramLeaderboard(programId){
@@ -6113,24 +6182,43 @@ async function _getProgramLeaderboard(programId){
   // Pull ALL sales rows for this week (no program filter server-side).
   // Filter program client-side using the same trimmed/lowercase comparison
   // as _getMySalesAggregates so the two CANNOT diverge.
-  const [{ data: rows, error: rowsErr }, { data: users }] = await Promise.all([
+  const [{ data: rows, error: rowsErr }, { data: users }, manualMapLB] = await Promise.all([
     sb.from('daily_sales').select('user_id, count, program_id, sale_date')
       .gte('sale_date', week.mondayStr)
       .lte('sale_date', week.sundayStr),
     sb.from('profiles').select('id, full_name, email, role, avatar_url, programs')
       .contains('programs', [programId])
       .eq('active', true)
-      .not('role', 'in', '(admin,owner)')
+      .not('role', 'in', '(admin,owner)'),
+    ((programId || '').trim().toLowerCase() === 'retail')
+      ? _payrollManualMap(null, week.mondayStr, week.sundayStr)
+      : Promise.resolve({})
   ]);
 
   if(rowsErr) console.warn('[leaderboard] error:', rowsErr);
 
   const targetProg = (programId || '').trim().toLowerCase();
-  const totals = {};
+  // Per user per day → MAX(daily_sales, payroll manual) so the leaderboard
+  // matches the scoreboard exactly (same blend, cannot diverge).
+  const byUserDayLB = {};
   (rows || []).forEach(r => {
     if((r.program_id || '').trim().toLowerCase() !== targetProg) return;
-    totals[r.user_id] = (totals[r.user_id] || 0) + r.count;
+    const u = (byUserDayLB[r.user_id] = byUserDayLB[r.user_id] || {});
+    u[r.sale_date] = (u[r.sale_date] || 0) + r.count;
   });
+  const totals = {};
+  const lbUserIds = new Set([...Object.keys(byUserDayLB), ...Object.keys(manualMapLB)]);
+  for(const uid of lbUserIds){
+    const ds = byUserDayLB[uid] || {};
+    const mn = manualMapLB[uid] || {};
+    const days = new Set([...Object.keys(ds), ...Object.keys(mn)]);
+    let t = 0;
+    for(const day of days){
+      if(day < week.mondayStr || day > week.sundayStr) continue;
+      t += Math.max(ds[day] || 0, mn[day] || 0);
+    }
+    if(t > 0) totals[uid] = t;
+  }
 
   const leaderboard = (users || []).map(u => ({
     user_id: u.id,
@@ -6248,7 +6336,7 @@ async function renderScoreboardWidget(programId){
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:0;">
         <!-- COL 1: Monthly Production -->
         <div style="padding:24px 22px;text-align:center;border-right:1px solid ${accentDim};">
-          <div style="font-size:10.5px;color:rgba(255,255,255,0.55);letter-spacing:3px;font-weight:700;margin-bottom:6px;">— MONTHLY PRODUCTION —</div>
+          <div style="font-size:10.5px;color:rgba(255,255,255,0.55);letter-spacing:3px;font-weight:700;margin-bottom:6px;">— ${isMgr ? 'TEAM MONTHLY' : 'MONTHLY PRODUCTION'} —</div>
           <div style="font-size:11px;color:rgba(255,255,255,0.45);letter-spacing:1.5px;font-weight:700;margin-bottom:6px;">${goals.monthlyGoal ? '(GOAL ' + goals.monthlyGoal + ')' : 'SO FAR'}</div>
           <div style="font-family:'Bebas Neue',sans-serif;font-size:74px;color:${accent};line-height:0.95;letter-spacing:1px;">${agg.monthly}</div>
           <div style="font-size:11px;color:rgba(255,255,255,0.4);letter-spacing:1.5px;font-weight:700;margin-top:4px;">SO FAR</div>
@@ -6272,7 +6360,7 @@ async function renderScoreboardWidget(programId){
 
         <!-- COL 3: Weekly Production -->
         <div style="padding:24px 22px;text-align:center;">
-          <div style="font-size:10.5px;color:rgba(255,255,255,0.55);letter-spacing:3px;font-weight:700;margin-bottom:6px;">— WEEKLY PRODUCTION —</div>
+          <div style="font-size:10.5px;color:rgba(255,255,255,0.55);letter-spacing:3px;font-weight:700;margin-bottom:6px;">— ${isMgr ? 'TEAM WEEKLY' : 'WEEKLY PRODUCTION'} —</div>
           <div style="font-size:11px;color:rgba(255,255,255,0.45);letter-spacing:1.5px;font-weight:700;margin-bottom:6px;">${goals.weeklyGoal ? '(GOAL ' + goals.weeklyGoal + ')' : 'SO FAR'}</div>
           <div style="font-family:'Bebas Neue',sans-serif;font-size:74px;color:${accent};line-height:0.95;letter-spacing:1px;">${agg.weekly}</div>
           <div style="font-size:11px;color:rgba(255,255,255,0.4);letter-spacing:1.5px;font-weight:700;margin-top:4px;">THIS WEEK</div>
@@ -6291,19 +6379,26 @@ async function renderScoreboardWidget(programId){
       </div>
     </div>
 
-    ${isMgr && myTeam.length > 0 ? `
+    ${isMgr && (agg.members || []).length > 0 ? `
       <div class="bo-card" style="margin-bottom:22px;border-left:3px solid ${accent};">
-        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
-          <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:${accent};letter-spacing:1.5px;">📌 MY TEAM THIS WEEK</div>
-          <div style="font-size:11px;color:rgba(255,255,255,0.55);">${myTeam.length} member${myTeam.length === 1 ? '' : 's'} · goal: ${goals.weeklyGoal} ea</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:4px;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:${accent};letter-spacing:1.5px;">📌 TEAM BREAKDOWN</div>
+          <div style="font-size:11px;color:rgba(255,255,255,0.55);">${agg.teamSize} member${agg.teamSize === 1 ? '' : 's'} · team: <strong style="color:${accent};">${agg.weekly}</strong> wk / <strong style="color:${accent};">${agg.monthly}</strong> mo</div>
         </div>
-        ${myTeam.map((m, idx) => `
-          <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:rgba(255,255,255,0.025);border-radius:8px;margin-bottom:5px;">
+        <div style="display:flex;justify-content:flex-end;gap:26px;padding:0 10px 6px;font-size:9.5px;color:rgba(255,255,255,0.4);letter-spacing:1.5px;font-weight:700;">
+          <span style="width:34px;text-align:right;">WEEK</span><span style="width:34px;text-align:right;">MONTH</span>
+        </div>
+        ${agg.members.map((m, idx) => `
+          <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:${m.isSelf ? 'rgba(255,107,0,0.08)' : 'rgba(255,255,255,0.025)'};border-radius:8px;margin-bottom:5px;${m.isSelf ? 'border:1px solid ' + accent + '55;' : ''}">
             <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:${accent};width:24px;text-align:center;flex-shrink:0;">${idx + 1}</div>
-            <div style="flex:1;min-width:0;font-size:13px;color:#fff;font-weight:600;">${escapeHtml(m.name)}${m.user_id === me.id ? ' <span style="font-size:10px;color:rgba(255,255,255,0.4);">(you)</span>' : ''}</div>
-            <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:${accent};line-height:1;">${m.weekly_count}</div>
+            <div style="flex:1;min-width:0;font-size:13px;color:#fff;font-weight:${m.isSelf ? '700' : '600'};">${escapeHtml(m.name)}${m.isSelf ? ' <span style="font-size:10px;color:' + accent + ';">(me — personal)</span>' : ''}</div>
+            <div style="display:flex;gap:26px;flex-shrink:0;">
+              <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:${accent};line-height:1;width:34px;text-align:right;">${m.weekly}</div>
+              <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:rgba(255,255,255,0.75);line-height:1;width:34px;text-align:right;">${m.monthly}</div>
+            </div>
           </div>
         `).join('')}
+        <div style="font-size:10.5px;color:rgba(255,255,255,0.4);margin-top:6px;line-height:1.5;">Team totals above count every sale by anyone on your team, however deep — your own sales are broken out on your row.</div>
       </div>
     ` : ''}
 
@@ -16243,6 +16338,17 @@ async function submitPhotoAudit(){
         notes: 'Self-reported at check-out (agent acknowledged anti-falsification policy).'
       }, { onConflict: 'user_id,log_date' });
       if(sErr) console.warn('Sold-count save failed (check agent RLS on payroll_sales_log):', sErr.message);
+      // ALSO write daily_sales (the dashboard/leaderboard ledger) — same
+      // mechanism as the Sales Entry panel — so the scoreboard, leaderboard,
+      // and the manager's team totals all move from a check-out report.
+      try {
+        const { error: dErr } = await sb.from('daily_sales').upsert({
+          user_id: currentProfile.id, program_id: 'retail', sale_date: _logDate,
+          count: _soldCount, entered_by: currentProfile.id,
+          notes: 'Self-reported at check-out'
+        }, { onConflict: 'user_id,program_id,sale_date' });
+        if(dErr) console.warn('daily_sales checkout write failed (check agent RLS on daily_sales):', dErr.message);
+      } catch(e){ console.warn('daily_sales checkout write failed:', e); }
     }
   } catch(e){ console.warn('Sales-log write failed (audit still saved):', e); }
 
