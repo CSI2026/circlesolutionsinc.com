@@ -2268,6 +2268,14 @@ window.addEventListener("DOMContentLoaded",function(){
 // latest build. Scheme: YYYY.MM.DD.N  (N = the Nth build that day).
 // ───────────────────────────────────────────────────────────────
 // BUILD LOG (newest first)
+//   2026.06.26.17 — Reporting-chain protection. (1) Team page (owner/admin)
+//                  now runs an automatic Team Structure Check: flags anyone
+//                  with no manager, reporting to a deactivated/deleted person,
+//                  reporting to a plain agent, or in a circular chain — each
+//                  with a one-tap Fix button; shows a green all-clear when
+//                  healthy. (2) Saving a team member now BLOCKS the bad chains
+//                  at the source: self-reporting, circular chains, and
+//                  reporting to a deactivated person.
 //   2026.06.26.16 — Dashboard sales math fixed to spec. (1) Team totals now
 //                  count the FULL downline (agent under TL under MM all roll
 //                  up), week + month. (2) Manager scoreboard shows TEAM
@@ -2364,7 +2372,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.06.26.16';
+const BUILD_VERSION = '2026.06.26.17';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -5210,6 +5218,7 @@ async function renderAgents(el){
       <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;margin-bottom:6px;">👥 Team</h1>
       <p style="font-size:14px;color:rgba(255,255,255,0.5);">${headerTitle} — ${(agents || []).length} total</p>
     </div>
+    ${(isOwner || isAdmin) ? '<div id="team-structure-check"></div>' : ''}
     <div class="bo-card">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:10px;">
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
@@ -5281,7 +5290,100 @@ async function renderAgents(el){
         </table>
         </div>`}
     </div>`;
+
+  // Reporting-chain health check — runs automatically for owner/admin so a
+  // wrong reports_to can never hide. Best-effort, never blocks the page.
+  if(isOwner || isAdmin){ try { void _runTeamStructureCheck(); } catch(_){} }
 }
+
+// ─── Team Structure Check ──────────────────────────────────────────────
+// Sales, team totals, schedules, and store inheritance all follow reports_to.
+// This scans the WHOLE company for the ways that chain silently breaks and
+// shows exactly who to fix, with a one-tap Fix button. Detects:
+//   • Field people (agent/team_lead/manager) with NO manager set — their
+//     sales roll up to nobody.
+//   • People reporting to a DEACTIVATED person — sales roll up to a ghost.
+//   • People reporting to an id that no longer exists (deleted).
+//   • People reporting to a plain AGENT (agents aren't uplines).
+//   • Circular chains (A→B→…→A) — corrupts team math.
+async function _runTeamStructureCheck(){
+  const mount = document.getElementById('team-structure-check');
+  if(!mount) return;
+  let people = [];
+  try {
+    const { data } = await sb.from('profiles')
+      .select('id, full_name, email, role, reports_to, active, candidate_stage');
+    people = data || [];
+  } catch(_){ return; }
+  const byId = {}; people.forEach(p => { byId[p.id] = p; });
+  const nameOf = p => escapeHtml(p.full_name || p.email || p.id);
+  const issues = [];
+
+  for(const p of people){
+    if(p.active === false) continue;                       // deactivated people aren't checked
+    if(p.role === 'owner' || p.role === 'admin') continue; // back office doesn't report up
+    if(p.candidate_stage && p.candidate_stage !== 'coded') continue; // pipeline candidates not placed yet
+
+    if(!p.reports_to){
+      // Managers may legitimately sit at the top of their org (they answer to
+      // the owner implicitly). Agents and team leads must have an upline.
+      if(p.role === 'agent' || p.role === 'team_lead'){
+        issues.push({ id: p.id, name: nameOf(p), problem: 'No manager set — their sales roll up to NOBODY', icon: '🚫' });
+      }
+      continue;
+    }
+    const up = byId[p.reports_to];
+    if(!up){
+      issues.push({ id: p.id, name: nameOf(p), problem: 'Reports to a deleted account — sales roll up to a ghost', icon: '👻' });
+      continue;
+    }
+    if(up.active === false){
+      issues.push({ id: p.id, name: nameOf(p), problem: 'Reports to ' + nameOf(up) + ', who is DEACTIVATED', icon: '👻' });
+      continue;
+    }
+    if(up.role === 'agent'){
+      issues.push({ id: p.id, name: nameOf(p), problem: 'Reports to ' + nameOf(up) + ', who is a plain AGENT (not an upline role)', icon: '⚠️' });
+    }
+    // Cycle walk from this person upward
+    let cur = p.reports_to; const hops = new Set([p.id]);
+    while(cur){
+      if(hops.has(cur)){
+        issues.push({ id: p.id, name: nameOf(p), problem: 'Circular reporting chain — this loop corrupts team totals', icon: '🔁' });
+        break;
+      }
+      hops.add(cur);
+      cur = byId[cur] ? byId[cur].reports_to : null;
+    }
+  }
+
+  if(issues.length === 0){
+    mount.innerHTML = `
+      <div style="background:rgba(0,255,136,0.05);border:1px solid rgba(0,255,136,0.25);border-radius:10px;padding:10px 16px;margin-bottom:16px;font-size:12.5px;color:rgba(255,255,255,0.7);display:flex;align-items:center;gap:10px;">
+        <span style="font-size:16px;">✅</span> <strong style="color:#00FF88;">Reporting structure healthy</strong> — every active field member rolls up to a real, active upline. Team totals are trustworthy.
+      </div>`;
+    return;
+  }
+  // De-dup by person (a person can trip multiple checks — show the first)
+  const seen = new Set(); const unique = issues.filter(i => { if(seen.has(i.id)) return false; seen.add(i.id); return true; });
+  mount.innerHTML = `
+    <div class="bo-card" style="border:1px solid rgba(248,113,113,0.45);background:rgba(248,113,113,0.05);margin-bottom:16px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px;">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:19px;color:#F87171;letter-spacing:1.5px;">🧭 REPORTING PROBLEMS — ${unique.length} ${unique.length === 1 ? 'PERSON NEEDS' : 'PEOPLE NEED'} A FIX</div>
+      </div>
+      <div style="font-size:12px;color:rgba(255,255,255,0.65);line-height:1.55;margin-bottom:10px;">Sales and team totals follow the "Reports To" chain. These people's sales are rolling up wrong (or to nobody) until fixed — tap Fix to set the right manager.</div>
+      ${unique.map(i => `
+        <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:rgba(0,0,0,0.25);border-radius:8px;margin-bottom:5px;flex-wrap:wrap;">
+          <span style="font-size:15px;flex-shrink:0;">${i.icon}</span>
+          <div style="flex:1;min-width:180px;">
+            <div style="font-size:13px;color:#fff;font-weight:700;">${i.name}</div>
+            <div style="font-size:11.5px;color:#FCA5A5;">${i.problem}</div>
+          </div>
+          <button class="bo-btn bo-btn-primary" style="padding:6px 16px;font-size:12px;flex-shrink:0;" onclick="openAgentModal('${i.id}')">🔧 Fix</button>
+        </div>
+      `).join('')}
+    </div>`;
+}
+window._runTeamStructureCheck = _runTeamStructureCheck;
 
 function filterAgentRows(q){
   const query = (q || '').toLowerCase().trim();
@@ -7608,6 +7710,39 @@ async function saveAgent(editId){
   const msg = document.getElementById('ag-msg');
 
   if(!full_name || !email){ msg.innerHTML = '<span style="color:#F87171;">Name and email are required.</span>'; return; }
+
+  // ─── Reporting-chain guard ───
+  // Sales roll up the reports_to chain, so a bad chain silently corrupts
+  // team totals. Block the three ways a chain goes bad:
+  //   1. Reporting to yourself.
+  //   2. A circular chain (A→B→…→A) — team math would attribute wrongly.
+  //   3. Reporting to a deactivated person — their team page is gone, so the
+  //      sales roll up to a ghost nobody looks at.
+  if(reports_to){
+    if(editId && reports_to === editId){
+      msg.innerHTML = '<span style="color:#F87171;">A person can\'t report to themselves. Pick a different manager.</span>'; return;
+    }
+    try {
+      const { data: chainProfiles } = await sb.from('profiles').select('id, reports_to, active, full_name, email');
+      const byId = {}; (chainProfiles || []).forEach(p => { byId[p.id] = p; });
+      const upline = byId[reports_to];
+      if(upline && upline.active === false){
+        msg.innerHTML = '<span style="color:#F87171;">' + escapeHtml(upline.full_name || upline.email || 'That person') + ' is deactivated — sales would roll up to a ghost. Pick an active manager.</span>'; return;
+      }
+      if(editId){
+        // Walk UP from the chosen manager; if we reach the person being
+        // edited, this save would create a loop.
+        let cur = reports_to; const hops = new Set();
+        while(cur && !hops.has(cur)){
+          hops.add(cur);
+          if(cur === editId){
+            msg.innerHTML = '<span style="color:#F87171;">That would create a circular reporting chain (' + escapeHtml(full_name) + ' would be above AND below the same person). Pick a different manager.</span>'; return;
+          }
+          cur = byId[cur] ? byId[cur].reports_to : null;
+        }
+      }
+    } catch(e){ console.warn('Reporting-chain guard check failed (allowing save):', e); }
+  }
 
   if(editId){
     const updateData = {
