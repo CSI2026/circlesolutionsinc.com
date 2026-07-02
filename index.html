@@ -2255,6 +2255,11 @@ window.addEventListener("DOMContentLoaded",function(){
 // latest build. Scheme: YYYY.MM.DD.N  (N = the Nth build that day).
 // ───────────────────────────────────────────────────────────────
 // BUILD LOG (newest first)
+//   2026.06.26.13 — Audit results now SHOW the numbers. The timesheet 'View'
+//                  detail has a SALES REPORTED card listing each day's goal
+//                  (check-in) and sold count (check-out), pulled from
+//                  payroll_sales_log. If a range has none it says so and notes
+//                  that check-outs before build .12 won't have them.
 //   2026.06.26.12 — Reliant check-in/out now captures sales. Check-IN asks the
 //                  agent's daily GOAL (numbers only, e.g. 3 -> they put 2).
 //                  Check-OUT asks SOLD applications; entering a number pops an
@@ -2318,7 +2323,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.06.26.12';
+const BUILD_VERSION = '2026.06.26.13';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -18419,6 +18424,17 @@ async function openTimesheetDetail(userId, startIso, endIso, agentName, rangeLab
     .lt('created_at', end.toISOString())
     .order('created_at', { ascending: true });
 
+  // Sales logged for this range (goal from check-in, sold from check-out, or
+  // manual entry) — so the audit results SHOW what was reported, not just photos.
+  const _startDate = start.toISOString().split('T')[0];
+  const _endDate   = end.toISOString().split('T')[0];
+  const { data: salesLog } = await sb.from('payroll_sales_log')
+    .select('log_date, daily_goal, manual_sales_count, entered_by, entered_at')
+    .eq('user_id', userId)
+    .gte('log_date', _startDate)
+    .lt('log_date', _endDate)
+    .order('log_date', { ascending: true });
+
   // Stitch in stores
   const storeIds = [...new Set((audits || []).map(a => a.store_id).filter(Boolean))];
   const { data: stores } = storeIds.length
@@ -18489,6 +18505,21 @@ async function openTimesheetDetail(userId, startIso, endIso, agentName, rangeLab
       <div style="font-family:'Bebas Neue',sans-serif;font-size:44px;color:#FF6B00;line-height:1;letter-spacing:1px;margin:4px 0;">${_fmtHMS(totalHours)}</div>
       <div style="font-size:11px;color:rgba(255,255,255,0.5);">${shifts.length} completed shift${shifts.length === 1 ? '' : 's'}${openShift ? ' + 1 open' : ''} · ${valid.length} valid punch${valid.length === 1 ? '' : 'es'}${(audits||[]).length !== valid.length ? ' · ' + ((audits||[]).length - valid.length) + ' invalid (geofence fail)' : ''}</div>
     </div>
+
+    ${(salesLog && salesLog.length) ? `
+      <div style="background:rgba(0,198,255,0.05);border:1px solid rgba(0,198,255,0.28);border-radius:10px;padding:14px;margin-bottom:14px;">
+        <div style="font-size:11px;color:rgba(0,198,255,0.9);letter-spacing:1.5px;font-weight:700;margin-bottom:6px;">📊 SALES REPORTED</div>
+        ${salesLog.map(r => `
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:7px 0;border-top:1px solid rgba(255,255,255,0.05);font-size:12.5px;">
+            <span style="color:rgba(255,255,255,0.6);">${new Date(r.log_date + 'T00:00:00').toLocaleDateString(undefined, {weekday:'short', month:'short', day:'numeric'})}</span>
+            <span style="color:#fff;">🎯 Goal <strong>${r.daily_goal != null ? r.daily_goal : '—'}</strong> &nbsp;·&nbsp; ✅ Sold <strong style="color:#00FF88;">${r.manual_sales_count != null ? r.manual_sales_count : '—'}</strong></span>
+          </div>
+        `).join('')}
+        <div style="font-size:10.5px;color:rgba(255,255,255,0.42);margin-top:8px;line-height:1.5;">Goal is entered at check-in, sold count at check-out. The weekly sales total uses the higher of the reported sold count and verified enrollments.</div>
+      </div>
+    ` : `
+      <div style="background:rgba(255,200,0,0.05);border:1px solid rgba(255,200,0,0.25);border-radius:10px;padding:12px 14px;margin-bottom:14px;font-size:12px;color:rgba(255,255,255,0.65);line-height:1.5;">📊 <strong>No goal or sold numbers reported for this range.</strong> These are captured at check-in/out starting build 2026.06.26.12 — check-outs done on an earlier build won't have them.</div>
+    `}
 
     ${shifts.length === 0 && !openShift ? `
       <div style="background:rgba(255,255,255,0.025);border:1px dashed rgba(255,255,255,0.15);border-radius:8px;padding:24px;text-align:center;color:rgba(255,255,255,0.55);font-size:13px;">No completed shifts in this range.</div>
