@@ -2107,24 +2107,31 @@ window.addEventListener("DOMContentLoaded",function(){
         </div>
       </div>
 
-      <!-- PROGRAM OF INTEREST -->
+      <!-- PROGRAM OF INTEREST (cascading: model → campaign → manager) -->
       <div style="margin-bottom:28px;">
         <div style="font-size:11px;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:#FF6B00;margin-bottom:16px;padding-bottom:8px;border-bottom:1px solid rgba(255,107,0,0.2);">Program of Interest</div>
-        <label class="form-label">Which program interests you most? *</label>
-        <select id="app-program" class="form-input" style="background:#1a1a1a;">
+        <label class="form-label">Which type of sales interests you most? *</label>
+        <select id="app-model" class="form-input" style="background:#1a1a1a;" onchange="appOnModelChange()">
           <option value="">Select...</option>
-          <option>Residential Retail Energy (In-Store Kiosks)</option>
-          <option>Business-to-Business Energy (B2B)</option>
-          <option>Fiber Internet (D2D)</option>
-          <option>Open to any / Let's discuss</option>
+          <option value="inside_retail">Inside Retail Sales</option>
+          <option value="b2b">Business-to-Business</option>
+          <option value="d2d">Door-to-Door</option>
         </select>
-        <div style="margin-top:16px;">
-          <label class="form-label">Preferred Manager (optional)</label>
+
+        <div id="app-campaign-wrap" style="margin-top:16px;display:none;">
+          <label class="form-label">Which program? *</label>
+          <select id="app-campaign" class="form-input" style="background:#1a1a1a;" onchange="appOnCampaignChange()">
+            <option value="">Select...</option>
+          </select>
+          <div id="app-campaign-empty" style="display:none;font-size:12px;color:rgba(255,255,255,0.4);margin-top:6px;">No programs listed under this option yet.</div>
+        </div>
+
+        <div id="app-manager-wrap" style="margin-top:16px;display:none;">
+          <label class="form-label">Did a manager refer you? (optional)</label>
           <select id="app-preferred-manager" class="form-input" style="background:#1a1a1a;">
             <option value="">— No preference —</option>
-            <!-- Populated dynamically by loadPublicManagerList() on page show -->
           </select>
-          <div style="font-size:12px;color:rgba(255,255,255,0.4);margin-top:6px;line-height:1.5;">If a Circle Solutions manager referred you or you have someone you want to work under, pick them here. They'll be notified about your application.</div>
+          <div style="font-size:12px;color:rgba(255,255,255,0.4);margin-top:6px;line-height:1.5;">If a Circle Solutions manager referred you — or you have someone you want to work under — pick them here. Only managers for the program you chose are shown, and they'll be notified about your application.</div>
         </div>
       </div>
 
@@ -2255,6 +2262,16 @@ window.addEventListener("DOMContentLoaded",function(){
 // latest build. Scheme: YYYY.MM.DD.N  (N = the Nth build that day).
 // ───────────────────────────────────────────────────────────────
 // BUILD LOG (newest first)
+//   2026.06.26.14 — Application form rebuilt. Program pick is now a cascade:
+//                  3 models (Inside Retail / B2B / Door-to-Door) -> the campaigns
+//                  under that model -> managers for that program only (live via
+//                  public RPC, so assigning/removing a manager in back office
+//                  adds/removes them here automatically). Manager dropdown no
+//                  longer empty (was RLS-blocked for anon). New applications now
+//                  email owner + onboarding with subject 'Heads Up! <name> Just
+//                  Applied'. Campaign editor gained an 'Application category'
+//                  (sales_model) selector; new campaigns show on the apply form.
+//                  Needs application_upgrade_migration.sql.
 //   2026.06.26.13 — Audit results now SHOW the numbers. The timesheet 'View'
 //                  detail has a SALES REPORTED card listing each day's goal
 //                  (check-in) and sold count (check-out), pulled from
@@ -2323,7 +2340,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.06.26.13';
+const BUILD_VERSION = '2026.06.26.14';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -2471,10 +2488,10 @@ function showPage(id){
   }
   window.scrollTo({top:0, behavior:'instant'});
 
-  // When the apply page is shown, populate the Preferred Manager dropdown
-  // with the live list of active managers from Supabase.
+  // When the apply page is shown, load the campaign list so the cascading
+  // program/campaign pickers work. Managers load after a campaign is chosen.
   if(id === 'apply-page'){
-    loadPublicManagerList();
+    appInitProgramCascade();
   }
 
   // When the B2B page is shown, load active campaigns under the b2b program
@@ -2532,37 +2549,80 @@ function escapePublic(s){
 // Load the list of active managers into the public Preferred Manager dropdown.
 // This runs on the public site (no auth) so it relies on the Supabase anon key
 // having SELECT access to a small subset of the profiles table.
-async function loadPublicManagerList(){
-  const sel = document.getElementById('app-preferred-manager');
-  if(!sel) return;
-  // Avoid double-loading
-  if(sel.dataset.loaded === 'true') return;
-  try {
-    const { data: managers } = await sb.from('profiles')
-      .select('id, full_name, email, programs')
-      .eq('role', 'manager')
-      .eq('active', true)
-      .order('full_name');
-    if(!managers || managers.length === 0) return;
-    // Add manager options in alphabetical order
-    for(const m of managers){
-      const opt = document.createElement('option');
-      opt.value = m.id;
-      // Show name + program(s) so applicants know who covers what
-      const programLabels = (m.programs || []).map(pid => {
-        const p = (typeof allPrograms !== 'undefined' ? allPrograms : []).find(x => x.id === pid);
-        return p ? p.name : pid;
-      }).filter(Boolean).join(' · ');
-      opt.textContent = (m.full_name || m.email) + (programLabels ? ' — ' + programLabels : '');
-      sel.appendChild(opt);
-    }
-    sel.dataset.loaded = 'true';
-  } catch(e){
-    // Silently fail — dropdown stays at "No preference"
-    console.warn('Manager list load failed:', e);
-  }
+// ── Apply-page program cascade: model → campaign → (filtered) manager ──
+const APP_MODEL_FALLBACK = { retail:'inside_retail', b2b:'b2b', fiber:'d2d' };
+const APP_MODEL_LABELS   = { inside_retail:'Inside Retail Sales', b2b:'Business-to-Business', d2d:'Door-to-Door' };
+function _appCampaignModel(c){
+  return c.sales_model || APP_MODEL_FALLBACK[c.program_id] || null;
 }
-window.loadPublicManagerList = loadPublicManagerList;
+let _appCampaignsCache = null;
+async function _appLoadCampaigns(){
+  if(_appCampaignsCache) return _appCampaignsCache;
+  let camps = (typeof allCampaigns !== 'undefined' && allCampaigns && allCampaigns.length) ? allCampaigns : null;
+  if(!camps){
+    try {
+      const { data } = await sb.from('campaigns')
+        .select('id,name,program_id,sales_model,display_order,is_active')
+        .eq('is_active', true)
+        .order('display_order', { ascending: true }).order('name');
+      camps = data || [];
+    } catch(_){ camps = []; }
+  }
+  _appCampaignsCache = camps;
+  return camps;
+}
+async function appInitProgramCascade(){
+  await _appLoadCampaigns();
+  const model = document.getElementById('app-model'); if(model) model.value = '';
+  const cw = document.getElementById('app-campaign-wrap'); if(cw) cw.style.display = 'none';
+  const mw = document.getElementById('app-manager-wrap'); if(mw) mw.style.display = 'none';
+}
+async function appOnModelChange(){
+  const model = document.getElementById('app-model')?.value || '';
+  const wrap = document.getElementById('app-campaign-wrap');
+  const sel = document.getElementById('app-campaign');
+  const empty = document.getElementById('app-campaign-empty');
+  const mw = document.getElementById('app-manager-wrap');
+  if(mw) mw.style.display = 'none';   // reset manager until a campaign is picked
+  if(!sel || !wrap) return;
+  sel.innerHTML = '<option value="">Select...</option>';
+  if(!model){ wrap.style.display = 'none'; return; }
+  const camps = await _appLoadCampaigns();
+  const matches = camps.filter(c => _appCampaignModel(c) === model);
+  for(const c of matches){
+    const opt = document.createElement('option');
+    opt.value = c.id; opt.textContent = c.name; opt.dataset.program = c.program_id || '';
+    sel.appendChild(opt);
+  }
+  wrap.style.display = 'block';
+  if(empty) empty.style.display = matches.length ? 'none' : 'block';
+}
+async function appOnCampaignChange(){
+  const sel = document.getElementById('app-campaign');
+  const mgrWrap = document.getElementById('app-manager-wrap');
+  const mgrSel = document.getElementById('app-preferred-manager');
+  if(!sel || !mgrSel) return;
+  mgrSel.innerHTML = '<option value="">— No preference —</option>';
+  const opt = sel.options[sel.selectedIndex];
+  const programId = opt ? (opt.dataset.program || '') : '';
+  if(!sel.value){ if(mgrWrap) mgrWrap.style.display = 'none'; return; }
+  // Live, program-filtered manager list via public RPC — reflects current
+  // back-office assignments automatically (assign/remove a manager and it
+  // shows/disappears here with no extra step).
+  try {
+    const { data: mgrs } = await sb.rpc('get_application_managers', { p_program_id: programId || null });
+    for(const m of (mgrs || [])){
+      const o = document.createElement('option');
+      o.value = m.id; o.textContent = m.full_name;
+      mgrSel.appendChild(o);
+    }
+  } catch(e){ console.warn('Manager list load failed:', e); }
+  if(mgrWrap) mgrWrap.style.display = 'block';
+}
+window.appInitProgramCascade = appInitProgramCascade;
+window.appOnModelChange = appOnModelChange;
+window.appOnCampaignChange = appOnCampaignChange;
+window.appInitProgramCascade = window.appInitProgramCascade || appInitProgramCascade;
 
 function toggleSubNav(btn){
   const links = btn.parentElement.querySelector('.subpage-nav-links');
@@ -19924,7 +19984,8 @@ async function openCampaignEditor(campaignId, programId){
     icon: '🎯',
     color: program.color || '#FF6B00',
     is_active: true,
-    display_order: 100
+    display_order: 100,
+    sales_model: (programId === 'b2b' ? 'b2b' : programId === 'fiber' ? 'd2d' : programId === 'retail' ? 'inside_retail' : '')
   };
   if(isEdit){
     const existing = (allCampaigns || []).find(x => x.id === campaignId);
@@ -19951,6 +20012,17 @@ async function openCampaignEditor(campaignId, programId){
     <div class="form-group">
       <label class="form-label">Description</label>
       <textarea id="ce-desc" class="form-input" rows="2" placeholder="Brief description of the campaign / business / contract.">${escapeHtml(c.description || '')}</textarea>
+    </div>
+
+    <div class="form-group">
+      <label class="form-label">Application category (where it shows on the apply form)</label>
+      <select id="ce-model" class="form-input" style="background:#1a1a1a;">
+        <option value="" ${!c.sales_model ? 'selected' : ''}>— Not shown on application —</option>
+        <option value="inside_retail" ${c.sales_model === 'inside_retail' ? 'selected' : ''}>Inside Retail Sales</option>
+        <option value="b2b" ${c.sales_model === 'b2b' ? 'selected' : ''}>Business-to-Business</option>
+        <option value="d2d" ${c.sales_model === 'd2d' ? 'selected' : ''}>Door-to-Door</option>
+      </select>
+      <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">Which of the 3 big options an applicant picks to see this campaign. Leave blank to hide it from the public application.</div>
     </div>
 
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
@@ -19994,6 +20066,7 @@ async function saveCampaign(existingId, programId){
   const icon = (document.getElementById('ce-icon').value || '🎯').trim();
   const color = document.getElementById('ce-color').value || '#FF6B00';
   const order = parseInt(document.getElementById('ce-order').value, 10) || 100;
+  const salesModel = (document.getElementById('ce-model')?.value || '').trim() || null;
 
   if(!idVal){ alert('Campaign ID is required.'); return; }
   if(!/^[a-z0-9_-]+$/.test(idVal)){ alert('Campaign ID must be lowercase letters, numbers, hyphens, or underscores only (no spaces or special chars).'); return; }
@@ -20007,6 +20080,7 @@ async function saveCampaign(existingId, programId){
       icon,
       color,
       display_order: order,
+      sales_model: salesModel,
       updated_at: new Date().toISOString()
     };
     const { error } = await sb.from('campaigns').update(payload).eq('id', existingId);
@@ -20020,6 +20094,7 @@ async function saveCampaign(existingId, programId){
       icon,
       color,
       display_order: order,
+      sales_model: salesModel,
       is_active: true,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString()
@@ -20677,7 +20752,10 @@ async function submitApplication(){
   const email = get('app-email');
   const city = get('app-city');
   const state = get('app-state');
-  const program = get('app-program');
+  const model = get('app-model');
+  const campaignSel = document.getElementById('app-campaign');
+  const campaignId = campaignSel ? campaignSel.value : '';
+  const campaignName = (campaignSel && campaignSel.selectedIndex >= 0) ? (campaignSel.options[campaignSel.selectedIndex].text || '').replace('Select...', '') : '';
   const type = get('app-type');
   const start = get('app-start');
   const hours = get('app-hours');
@@ -20694,14 +20772,18 @@ async function submitApplication(){
   // Optional: preferred manager pre-filled from dropdown
   const preferredManagerId = get('app-preferred-manager') || null;
   const err = document.getElementById('app-error');
-  if(!fname||!lname||!phone||!email||!city||!state||!program||!type||!start||!hours||!exp||!d2d||!income||!mgmt||!rejection||!motivate||!source||days.length===0){
+  if(!fname||!lname||!phone||!email||!city||!state||!model||!campaignId||!type||!start||!hours||!exp||!d2d||!income||!mgmt||!rejection||!motivate||!source||days.length===0){
     err.style.display='block'; window.scrollTo({top:0, behavior:'smooth'}); return;
   }
   err.style.display='none';
 
+  const MODEL_LABELS = { inside_retail:'Inside Retail Sales', b2b:'Business-to-Business', d2d:'Door-to-Door' };
   const appData = {
     submitted: new Date().toLocaleString(),
-    fname, lname, phone, email, city, state, program, type, start, hours, days, exp, industries, d2d, income, mgmt, rejection, motivate, source, why,
+    fname, lname, phone, email, city, state,
+    program: (MODEL_LABELS[model] || model) + (campaignName ? ' · ' + campaignName : ''),
+    sales_model: model, campaign_id: campaignId, campaign_name: campaignName,
+    type, start, hours, days, exp, industries, d2d, income, mgmt, rejection, motivate, source, why,
     preferred_manager_id: preferredManagerId
   };
 
@@ -20721,13 +20803,14 @@ async function submitApplication(){
 
 async function notifyAdminsOfNewApplication(data){
   try {
-    // 1. Pull owner + admin + onboarding (anyone with master center access).
-    //    Onboarding department is now included in every application notification
-    //    since they will be the ones to follow up on the application.
-    const { data: admins } = await sb.from('profiles')
-      .select('id,email,full_name,role,has_master_center_access')
-      .or('role.eq.owner,role.eq.admin,has_master_center_access.eq.true')
-      .eq('active', true);
+    // 1. Owner + admin + onboarding staff — via a public RPC so this works
+    //    even for an anonymous applicant (RLS blocks reading profiles directly,
+    //    which is why notification emails weren't going out).
+    let admins = [];
+    try {
+      const { data: recips } = await sb.rpc('get_application_notify_emails');
+      admins = recips || [];
+    } catch(e){ console.warn('notify-emails RPC failed:', e); }
     if(!admins || admins.length === 0) return;
 
     // 2. If applicant picked a preferred manager, look them up too. They get
@@ -20762,6 +20845,7 @@ async function notifyAdminsOfNewApplication(data){
     for(const a of admins){
       try {
         await sendEmailViaFunction('new_application_submitted', a.email, {
+          subject: 'Heads Up! ' + data.fname + ' Just Applied',
           applicant_name: data.fname + ' ' + data.lname,
           applicant_email: data.email,
           applicant_phone: data.phone,
@@ -20771,14 +20855,16 @@ async function notifyAdminsOfNewApplication(data){
           notes: notesBlock
         });
       } catch(e){ console.warn('new_application email failed for', a.email, e); }
-      try {
-        await notifyUser(a.id, {
-          type: 'new_application',
-          title: '📝 New application: ' + data.fname + ' ' + data.lname,
-          body: data.program + ' · ' + data.city + ', ' + data.state + (preferredManager ? ' · prefers ' + (preferredManager.full_name || preferredManager.email) : ''),
-          link_view: 'applications'
-        });
-      } catch(e){ console.warn('new_application in-app failed for', a.id, e); }
+      if(a.id){
+        try {
+          await notifyUser(a.id, {
+            type: 'new_application',
+            title: '📝 New application: ' + data.fname + ' ' + data.lname,
+            body: data.program + ' · ' + data.city + ', ' + data.state + (preferredManager ? ' · prefers ' + (preferredManager.full_name || preferredManager.email) : ''),
+            link_view: 'applications'
+          });
+        } catch(e){ console.warn('new_application in-app failed for', a.id, e); }
+      }
     }
 
     // 4. If a preferred manager was selected AND they are not already in the
@@ -20786,6 +20872,7 @@ async function notifyAdminsOfNewApplication(data){
     if(preferredManager && !admins.some(a => a.id === preferredManager.id)){
       try {
         await sendEmailViaFunction('new_application_submitted', preferredManager.email, {
+          subject: 'Heads Up! ' + data.fname + ' Just Applied (requested you)',
           applicant_name: data.fname + ' ' + data.lname,
           applicant_email: data.email,
           applicant_phone: data.phone,
@@ -20851,7 +20938,7 @@ function showEmailFallback(data){
 function sendApplicationEmail(data){
   const endpoint = 'https://formsubmit.co/ajax/' + CSI_NOTIFY_EMAIL;
   const payload = {
-    _subject: '🔔 CSI Agent Application — ' + data.fname + ' ' + data.lname,
+    _subject: 'Heads Up! ' + data.fname + ' Just Applied 🎉',
     _template: 'table', _captcha: 'false',
     'Applicant Name': data.fname + ' ' + data.lname,
     'Phone': data.phone, 'Email': data.email,
