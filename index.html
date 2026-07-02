@@ -1271,6 +1271,12 @@ window.addEventListener("DOMContentLoaded",function(){
 }
 .bo-nav-item:hover{background:rgba(255,255,255,0.04);color:#fff;}
 .bo-nav-item.active{background:rgba(255,107,0,0.1);color:#FF6B00;border-left:3px solid #FF6B00;padding-left:21px;}
+.bo-nav-group-label{
+  padding:14px 24px 5px;font-size:9.5px;font-weight:700;letter-spacing:2.2px;
+  color:rgba(255,107,0,0.75);font-family:'Outfit',sans-serif;text-transform:uppercase;
+  border-top:1px solid rgba(255,255,255,0.05);margin-top:6px;
+}
+.bo-nav-group-label:first-child{border-top:none;margin-top:0;}
 .bo-program-tab{
   width:100%;text-align:left;padding:13px 24px;
   background:none;border:none;color:rgba(255,255,255,0.7);
@@ -2262,6 +2268,12 @@ window.addEventListener("DOMContentLoaded",function(){
 // latest build. Scheme: YYYY.MM.DD.N  (N = the Nth build that day).
 // ───────────────────────────────────────────────────────────────
 // BUILD LOG (newest first)
+//   2026.06.26.15 — Owner back office reorganized. The owner sidebar was one
+//                  flat scattered list of 26 items; it's now grouped under
+//                  clear headers ordered by frequency of use: Owner Panel on
+//                  top, then DAILY OPERATIONS, PEOPLE & HIRING, PAYROLL &
+//                  MONEY, BUSINESS SETUP, DOCUMENTS & TOOLS. Every panel kept
+//                  — nothing removed, just organized. Other roles unchanged.
 //   2026.06.26.14 — Application form rebuilt. Program pick is now a cascade:
 //                  3 models (Inside Retail / B2B / Door-to-Door) -> the campaigns
 //                  under that model -> managers for that program only (live via
@@ -2340,7 +2352,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.06.26.14';
+const BUILD_VERSION = '2026.06.26.15';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -2968,6 +2980,45 @@ function renderSidebar(){
   // manager), Photo Audits & Time (already team-scoped), Onboarding Status (already
   // team-scoped). Permissions never delete data — they only hide views.
   const adminNavItems = [];
+  if(isOwner){
+    // ── OWNER: clean, grouped, ordered by how often it's used ──
+    // Same panels as before — nothing removed, just organized. Group labels
+    // render as small headers in the sidebar.
+    const G1 = 'DAILY OPERATIONS', G2 = 'PEOPLE & HIRING', G3 = 'PAYROLL & MONEY', G4 = 'BUSINESS SETUP', G5 = 'DOCUMENTS & TOOLS';
+    adminNavItems.push({ id:'owner-panel', label:'👑 Owner Panel' });
+    // Daily operations — what gets checked every day
+    adminNavItems.push({ id:'on-the-clock', label:'🟢 On the Clock', group:G1 });
+    adminNavItems.push({ id:'photo-audits-review', label:'📸 Photo Audits & Time', group:G1 });
+    adminNavItems.push({ id:'daily-sales-entry', label:'📊 Sales Entry', group:G1 });
+    adminNavItems.push({ id:'weekly-schedule', label:'📅 Weekly Schedule', group:G1 });
+    // People & hiring
+    adminNavItems.push({ id:'agents', label:'👥 Team', group:G2 });
+    adminNavItems.push({ id:'applications', label:'📝 Applications', group:G2 });
+    adminNavItems.push({ id:'recruiting', label:'🎤 Recruiting', group:G2 });
+    adminNavItems.push({ id:'my-interviews', label:'🎤 My Interviews', group:G2 });
+    adminNavItems.push({ id:'onboarding-status', label:'📊 Onboarding Status', group:G2 });
+    adminNavItems.push({ id:'onboarding-master', label:'🎯 Onboarding Center', group:G2 });
+    // Payroll & money
+    adminNavItems.push({ id:'payroll', label:'💵 Payroll', group:G3 });
+    adminNavItems.push({ id:'payroll-hours', label:'⏱️ Payroll Hours', group:G3 });
+    adminNavItems.push({ id:'payroll-log-sheets', label:'📋 Payroll Log Sheets', group:G3 });
+    adminNavItems.push({ id:'reliant-pending-approvals', label:'⚡ Reliant Approvals', group:G3 });
+    adminNavItems.push({ id:'lock-alerts', label:'🚨 Lock Alerts', group:G3 });
+    // Business setup — structure & config, touched occasionally
+    adminNavItems.push({ id:'programs-admin', label:'🎯 Programs & Campaigns', group:G4 });
+    adminNavItems.push({ id:'reliant-pipeline', label:'🎯 Reliant Pipeline', group:G4 });
+    adminNavItems.push({ id:'markets', label:'📍 Markets', group:G4 });
+    adminNavItems.push({ id:'stores', label:'🏪 Stores', group:G4 });
+    adminNavItems.push({ id:'sales-goals', label:'🎯 Sales Goals', group:G4 });
+    adminNavItems.push({ id:'inventory', label:'📦 Inventory', group:G4 });
+    // Documents & tools
+    adminNavItems.push({ id:'contract-hub', label:'📄 Contract Hub', group:G5 });
+    adminNavItems.push({ id:'forms-admin', label:'📋 All Forms', group:G5 });
+    adminNavItems.push({ id:'tool-box-admin', label:'🧰 Tool Box Admin', group:G5 });
+    if((currentProfile.programs || []).includes('retail')){
+      adminNavItems.push({ id:'reliant-email-settings', label:'📧 Reliant Email', group:G5 });
+    }
+  } else {
   if(isAdmin){
     // Owner + Admin only — full Team admin with clickable agent profiles
     adminNavItems.push({ id:'agents', label:'👥 Team' });
@@ -2975,20 +3026,7 @@ function renderSidebar(){
     // MM / TL — read-only My Team summary page
     adminNavItems.push({ id:'my-team', label:'👥 My Team' });
   }
-  if(isOwner){
-    adminNavItems.push({ id:'owner-panel', label:'👑 Owner Panel' });
-    adminNavItems.push({ id:'markets', label:'📍 Markets' });
-    adminNavItems.push({ id:'stores', label:'🏪 Stores' });
-    adminNavItems.push({ id:'contract-hub', label:'📄 Contract Hub' });
-    adminNavItems.push({ id:'forms-admin', label:'📋 All Forms' });
-    adminNavItems.push({ id:'applications', label:'📝 Applications' });
-    adminNavItems.push({ id:'programs-admin', label:'🎯 Programs & Campaigns' });
-    adminNavItems.push({ id:'sales-goals', label:'🎯 Sales Goals' });
-    adminNavItems.push({ id:'tool-box-admin', label:'🧰 Tool Box Admin' });
-    if((currentProfile.programs || []).includes('retail')){
-      adminNavItems.push({ id:'reliant-email-settings', label:'📧 Reliant Email' });
-    }
-  } else if(isAdmin){
+  if(isAdmin){
     adminNavItems.push({ id:'stores', label:'🏪 Stores' });
     adminNavItems.push({ id:'forms-admin', label:'📋 All Forms' });
     adminNavItems.push({ id:'applications', label:'📝 Applications' });
@@ -3036,16 +3074,17 @@ function renderSidebar(){
     // Phase 3.29: Reliant sales awaiting payroll approval
     adminNavItems.push({ id:'reliant-pending-approvals', label:'⚡ Reliant Approvals' });
   }
-  // Phase 3.29 — Reliant agent/MM company-section items.
-  // Only show to users tagged into the reliant campaign (or owner/admin
-  // who can see everything anyway via the admin section).
+  if(isOwner || currentProfile.has_master_center_access){
+    adminNavItems.push({ id:'onboarding-master', label:'🎯 Onboarding Center' });
+  }
+  } // end non-owner nav build
+
+  // Phase 3.29 — Reliant agent/MM company-section items. Used further below
+  // (company section), so it must be computed for ALL roles, owner included.
   const inReliantCampaign =
     isOwner || isAdmin ||
     currentProfile.campaign_id === 'reliant' ||
     (Array.isArray(currentProfile.campaigns) && currentProfile.campaigns.includes('reliant'));
-  if(isOwner || currentProfile.has_master_center_access){
-    adminNavItems.push({ id:'onboarding-master', label:'🎯 Onboarding Center' });
-  }
   // (Legacy "Pending Onboarding" removed — replaced by Phase 3.5 system.
   //  View an agent's onboarding via Team admin → 📋 View Onboarding.)
 
@@ -3120,13 +3159,21 @@ function renderSidebar(){
             onclick="boShowAdmin('${it.id}')">${it.label}</button>
   `).join('');
 
-  // 3. ADMINISTRATION section
-  const adminBody = adminNavItems.length === 0
-    ? ''
-    : adminNavItems.map(it => `
-        <button class="bo-nav-item ${activeAdminView === it.id ? 'active' : ''}"
-                onclick="boShowAdmin('${it.id}')">${it.label}</button>
-      `).join('');
+  // 3. ADMINISTRATION section — items may carry a `group` label; when the
+  //    group changes we render a small header so the owner's long list reads
+  //    as organized clusters instead of one scattered flat list.
+  let adminBody = '';
+  if(adminNavItems.length > 0){
+    let lastGroup = null;
+    for(const it of adminNavItems){
+      if(it.group && it.group !== lastGroup){
+        adminBody += `<div class="bo-nav-group-label">${it.group}</div>`;
+        lastGroup = it.group;
+      }
+      adminBody += `<button class="bo-nav-item ${activeAdminView === it.id ? 'active' : ''}"
+                onclick="boShowAdmin('${it.id}')">${it.label}</button>`;
+    }
+  }
 
   // 4. ACCOUNT section
   const accountBody = `
