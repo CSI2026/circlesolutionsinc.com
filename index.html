@@ -5275,7 +5275,7 @@ async function renderAgents(el){
               <td style="font-size:12px;color:rgba(255,255,255,0.7);">${market ? market.name : '<span style="color:rgba(255,255,255,0.3);">—</span>'}</td>
               <td style="font-size:12px;color:rgba(255,255,255,0.7);">${reportsTo ? (reportsTo.full_name || reportsTo.email) : '<span style="color:rgba(255,255,255,0.3);">—</span>'}</td>
               <td>${onboardingBadge}</td>
-              <td>${a.active ? '<span style="color:#00FF88;font-size:12px;">● Active</span>' : '<span style="color:rgba(255,255,255,0.4);font-size:12px;">○ Inactive</span>'}</td>
+              <td>${a.active ? '<span style="color:#00FF88;font-size:12px;">● Active</span>' : '<span style="color:rgba(255,255,255,0.4);font-size:12px;">○ Inactive</span>'}${a.contract_ended_at ? `<br><span style="background:rgba(239,68,68,0.15);color:#F87171;padding:2px 8px;border-radius:50px;font-size:9.5px;font-weight:700;letter-spacing:0.5px;white-space:nowrap;" title="${a.contract_end_reason ? escapeHtml(a.contract_end_reason) : 'No reason given'}">🔴 ENDED ${new Date(a.contract_ended_at).toLocaleDateString()}</span>` : ''}</td>
               <td style="text-align:right;white-space:nowrap;">
                 ${canViewProfile ? `<button class="bo-btn bo-btn-primary" style="padding:5px 10px;font-size:11px;margin-left:4px;" title="View full profile" onclick="openAgentProfile('${a.id}')">👤 Profile</button>` : ''}
                 ${canEdit ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" onclick="openAgentModal('${a.id}')">Edit</button>` : ''}
@@ -5284,6 +5284,10 @@ async function renderAgents(el){
                 ${canResetPw ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" title="Manage password" onclick="openResetPasswordModal('${a.id}')">🔑</button>` : ''}
                 ${(isOwner || isAdmin) ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;color:#FFC800;border-color:rgba(255,200,0,0.4);" title="Cancel all pending contracts for this agent" onclick="cancelPendingContractsFor('${a.id}', '${(a.full_name || a.email).replace(/'/g,"\\'")}')">🚫 Cancel Pending</button>` : ''}
                 ${canToggleActive ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;" onclick="toggleAgentActive('${a.id}', ${a.active})">${a.active ? 'Deactivate' : 'Activate'}</button>` : ''}
+                ${isOwner ? (a.contract_ended_at
+                  ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;border-color:rgba(0,255,136,0.4);color:#00FF88;" title="Reinstate" onclick="openReinstateModal('${a.id}', '${(a.full_name || a.email).replace(/'/g,"\\'")}')">↩️</button>`
+                  : `<button class="bo-btn bo-btn-ghost" style="padding:5px 10px;font-size:11px;margin-left:4px;border-color:rgba(239,68,68,0.5);color:#F87171;" title="End Agreement" onclick="openEndAgreementModal('${a.id}', '${(a.full_name || a.email).replace(/'/g,"\\'")}')">🔴</button>`
+                ) : ''}
                 ${canDelete ? `<button class="bo-btn bo-btn-danger" style="padding:5px 10px;font-size:11px;margin-left:4px;" onclick="deleteAgent('${a.id}', '${(a.full_name || a.email).replace(/'/g,"\\'")}')">🗑️</button>` : ''}
               </td>
             </tr>`; }).join('')}</tbody>
@@ -5544,6 +5548,7 @@ async function openAgentProfile(userId){
             <h1 style="font-family:'Bebas Neue',sans-serif;font-size:42px;color:#fff;letter-spacing:1px;margin:0;">${escapeHtml(agent.full_name || '—')}</h1>
             <span style="padding:4px 12px;border-radius:50px;font-size:11px;font-weight:700;letter-spacing:1.5px;background:${roleBadgeBg(agent.role)};color:${roleBadgeColor(agent.role)};">${roleLabel(agent.role)}</span>
             ${agent.active ? '<span style="color:#00FF88;font-size:12.5px;">● Active</span>' : '<span style="color:rgba(255,255,255,0.4);font-size:12.5px;">○ Inactive</span>'}
+            ${agent.contract_ended_at ? `<span style="background:rgba(239,68,68,0.15);color:#F87171;padding:3px 10px;border-radius:50px;font-size:11px;font-weight:700;letter-spacing:1px;" title="${agent.contract_end_reason ? escapeHtml(agent.contract_end_reason) : 'No reason given'}">🔴 CONTRACT ENDED ${new Date(agent.contract_ended_at).toLocaleDateString()}</span>` : ''}
             ${onboardBadge}
           </div>
           <div style="font-size:13.5px;color:rgba(255,255,255,0.6);margin-bottom:2px;">📧 ${escapeHtml(agent.email)}</div>
@@ -5568,6 +5573,10 @@ async function openAgentProfile(userId){
           <button class="bo-btn bo-btn-ghost" onclick="copyLoginLink('${agent.id}')">🔗 Copy Login Link</button>
           <button class="bo-btn bo-btn-ghost" style="border-color:rgba(255,200,0,0.4);color:#FFC800;" onclick="cancelPendingContractsFor('${agent.id}', '${(agent.full_name || agent.email).replace(/'/g,"\\'")}')">🚫 Cancel Pending Contracts</button>
           <button class="bo-btn bo-btn-ghost" style="border-color:rgba(198,40,40,0.4);color:#F87171;" onclick="openUrgentMessageModal('${agent.id}')">🚨 Send Urgent</button>
+          ${isOwner ? (agent.contract_ended_at
+            ? `<button class="bo-btn bo-btn-ghost" style="border-color:rgba(0,255,136,0.4);color:#00FF88;" title="Clear the contract-ended record and restore this contractor" onclick="openReinstateModal('${agent.id}', '${(agent.full_name || agent.email).replace(/'/g,"\\'")}')">↩️ Reinstate</button>`
+            : `<button class="bo-btn bo-btn-ghost" style="border-color:rgba(239,68,68,0.5);color:#F87171;" title="Permanently close this contractor's file with a record of their last day" onclick="openEndAgreementModal('${agent.id}', '${(agent.full_name || agent.email).replace(/'/g,"\\'")}')">🔴 End Agreement</button>`
+          ) : ''}
         </div>
       ` : ''}
     </div>
@@ -8177,6 +8186,85 @@ async function toggleAgentActive(id, currentlyActive){
       // Don't bother in-app for deactivated — they can't log in to see it
     }
   } catch(e){ console.warn('activate/deactivate notify failed:', e); }
+
+  renderMainContent();
+}
+
+// ─── End Agreement (owner only) ─────────────────────────────────────
+// Distinct from toggleAgentActive: `active` is just a login/access toggle
+// meant for temporary deactivation. contract_ended_at/contract_end_reason
+// are a PERMANENT historical record of the day this contractor's agreement
+// with the company was closed out — it survives independent of the active
+// flag and is never touched by the plain Activate/Deactivate button.
+async function openEndAgreementModal(id, name){
+  if(currentProfile.role !== 'owner'){ alert('Only the owner can end an agreement.'); return; }
+  const today = new Date().toISOString().slice(0,10);
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:#F87171;margin-bottom:6px;letter-spacing:1px;">🔴 End Agreement</h2>
+    <div style="font-size:13.5px;color:rgba(255,255,255,0.7);margin-bottom:16px;">This permanently closes out <strong style="color:#fff;">${escapeHtml(name)}</strong>'s file and records their last day under contract. This is separate from Deactivate — it will still show even if this person is later reactivated for account-access reasons.</div>
+    <div class="form-group" style="margin-bottom:12px;">
+      <label class="form-label">Last Day Contracted *</label>
+      <input id="ea-date" type="date" class="form-input" value="${today}" max="${today}"/>
+    </div>
+    <div class="form-group" style="margin-bottom:14px;">
+      <label class="form-label">Reason (optional, kept on internal record only)</label>
+      <textarea id="ea-reason" class="form-input" rows="3" placeholder="e.g. Voluntary resignation, performance termination, etc."></textarea>
+    </div>
+    <div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:12px;margin-bottom:16px;font-size:12.5px;color:#F87171;">This will also deactivate their account access. Use "Reinstate" later if this person is re-engaged.</div>
+    <div style="display:flex;gap:10px;">
+      <button class="bo-btn bo-btn-danger" onclick="confirmEndAgreement('${id}')">🔴 Confirm — End Agreement</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>
+    <div id="ea-msg" style="margin-top:12px;font-size:13px;"></div>`;
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function confirmEndAgreement(id){
+  const dateVal = document.getElementById('ea-date').value;
+  const reason = document.getElementById('ea-reason').value.trim();
+  const msg = document.getElementById('ea-msg');
+  if(!dateVal){ msg.innerHTML = '<span style="color:#F87171;">Pick the last day contracted.</span>'; return; }
+
+  // Store as an ISO timestamp anchored to the chosen date (noon local, to
+  // avoid timezone date-shift when displayed later).
+  const endedAt = new Date(dateVal + 'T12:00:00').toISOString();
+
+  const { error } = await sb.from('profiles').update({
+    active: false,
+    contract_ended_at: endedAt,
+    contract_end_reason: reason || null
+  }).eq('id', id);
+  if(error){ msg.innerHTML = '<span style="color:#F87171;">Error: '+error.message+'</span>'; return; }
+
+  try {
+    const { data: p } = await sb.from('profiles').select('email,full_name').eq('id', id).single();
+    if(p){
+      await sendEmailViaFunction('account_deactivated', p.email, { full_name: p.full_name, reason: reason || null });
+    }
+  } catch(e){ console.warn('end agreement notify failed:', e); }
+
+  closeAllModals();
+  renderMainContent();
+}
+
+async function openReinstateModal(id, name){
+  if(currentProfile.role !== 'owner'){ alert('Only the owner can reinstate a closed file.'); return; }
+  if(!await csiConfirm('Reinstate ' + name + '?\n\nThis clears the "Contract Ended" record and reactivates their account access. Use this only if this person is genuinely being re-engaged.')) return;
+
+  const { error } = await sb.from('profiles').update({
+    active: true,
+    contract_ended_at: null,
+    contract_end_reason: null
+  }).eq('id', id);
+  if(error){ alert('Error: ' + error.message); return; }
+
+  try {
+    const { data: p } = await sb.from('profiles').select('email,full_name').eq('id', id).single();
+    if(p){
+      await sendEmailViaFunction('account_reactivated', p.email, { full_name: p.full_name, reason: null });
+      await notifyUser(id, { type: 'account_reactivated', title: '✅ Your account is active again', body: 'Welcome back. Your access has been restored.' });
+    }
+  } catch(e){ console.warn('reinstate notify failed:', e); }
 
   renderMainContent();
 }
@@ -25683,6 +25771,9 @@ window.boShowAdmin = boShowAdmin;
 window.openAgentModal = openAgentModal;
 window.saveAgent = saveAgent;
 window.toggleAgentActive = toggleAgentActive;
+window.openEndAgreementModal = openEndAgreementModal;
+window.confirmEndAgreement = confirmEndAgreement;
+window.openReinstateModal = openReinstateModal;
 window.openEnrollmentModal = openEnrollmentModal;
 window.saveEnrollment = saveEnrollment;
 window.openTrainingModal = openTrainingModal;
