@@ -2372,7 +2372,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.07.15.01';
+const BUILD_VERSION = '2026.07.15.02';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -24615,6 +24615,58 @@ async function autoInstallReliantContractsIfNeeded(){
   }
 }
 
+// Links the new Retail Sales Agent Contract / Retail Market Manager Sales
+// Contract into the existing "Reliant Agent Onboarding Package" / "Reliant
+// Manager Onboarding Package" bundles, if they aren't already linked.
+// Purely additive — never removes or reorders anything already in a
+// package. Safe to run on every load; no-ops once linked.
+async function autoLinkReliantContractsIntoPackages(){
+  try {
+    let retailProgram = (allPrograms || []).find(p => p.id === 'retail')
+      || (allPrograms || []).find(p => /retail|reliant/i.test(p.name || ''));
+    if(!retailProgram) return { error: 'No Retail/Reliant program found.' };
+
+    const { data: myTemplates, error: tErr } = await sb.from('contract_templates_v2')
+      .select('id, title, target_role, body_html')
+      .eq('program_id', retailProgram.id)
+      .in('target_role', ['agent','manager']);
+    if(tErr) return { error: tErr.message };
+
+    const agentTpl = (myTemplates || []).find(t => t.target_role === 'agent' && (t.body_html||'').includes('CSI_RELIANT_CONTRACT_V1'));
+    const mgrTpl   = (myTemplates || []).find(t => t.target_role === 'manager' && (t.body_html||'').includes('CSI_RELIANT_CONTRACT_V1'));
+
+    const { data: packages, error: pErr } = await sb.from('onboarding_packages')
+      .select('id, name, target_role').eq('program_id', retailProgram.id);
+    if(pErr) return { error: pErr.message };
+
+    const agentPkg = (packages || []).find(p => p.target_role === 'agent' && /reliant/i.test(p.name || ''));
+    const mgrPkg   = (packages || []).find(p => p.target_role === 'manager' && /reliant/i.test(p.name || ''));
+
+    const toLink = [];
+    if(agentTpl && agentPkg) toLink.push({ pkg: agentPkg, tpl: agentTpl });
+    if(mgrTpl && mgrPkg)     toLink.push({ pkg: mgrPkg, tpl: mgrTpl });
+
+    let linkedCount = 0;
+    for(const { pkg, tpl } of toLink){
+      const { data: existingLinks } = await sb.from('onboarding_package_contracts')
+        .select('template_id, sign_order').eq('package_id', pkg.id);
+      const already = (existingLinks || []).some(l => l.template_id === tpl.id);
+      if(already) continue;
+      const maxOrder = (existingLinks || []).reduce((m, l) => Math.max(m, l.sign_order || 0), 0);
+      const { error: insErr } = await sb.from('onboarding_package_contracts').insert({
+        package_id: pkg.id,
+        template_id: tpl.id,
+        sign_order: maxOrder + 1
+      });
+      if(insErr) return { error: 'Linking "' + tpl.title + '" into "' + pkg.name + '" failed: ' + insErr.message };
+      linkedCount++;
+    }
+    return { error: null, linkedCount };
+  } catch(e){
+    return { error: e.message || String(e) };
+  }
+}
+
 async function renderContractHub(el){
   if(!_hubAccessOk()){
     el.innerHTML = '<div class="bo-card" style="color:#F87171;">Access denied. Owner, Admin, or Onboarding only.</div>';
@@ -24644,6 +24696,17 @@ async function renderContractHub(el){
     if(result.installed){
       el.innerHTML = '<div class="bo-card" style="color:#00FF88;">✓ Installed the new Reliant Retail Sales Agent + Market Manager contracts and removed the old ones. Loading…</div>';
       return renderContractHub(el);
+    }
+  }
+
+  // Purely-additive: make sure the new templates are linked into the
+  // Reliant onboarding packages so package bundles stay accurate. Safe to
+  // check every load — only inserts a link the first time it's missing.
+  if(isOwner && !window._reliantPackageLinkChecked){
+    window._reliantPackageLinkChecked = true;
+    const linkResult = await autoLinkReliantContractsIntoPackages();
+    if(linkResult.error){
+      console.warn('Reliant package linking issue:', linkResult.error);
     }
   }
 
