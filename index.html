@@ -2372,7 +2372,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.06.26.17';
+const BUILD_VERSION = '2026.07.15.01';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -24417,7 +24417,8 @@ const ROLE_BUCKETS = [
 // then inserts the two new rich-text templates in their place.
 // Already-signed agent contracts are unaffected — signed copies live on
 // contract_assignments as an independent snapshot + generated PDF.
-const RELIANT_AGENT_CONTRACT_HTML = `<h1 style="text-align:center;">CIRCLE SOLUTIONS INC.<br>RETAIL SALES AGENT CONTRACT</h1>
+const RELIANT_AGENT_CONTRACT_HTML = `<!-- CSI_RELIANT_CONTRACT_V1 -->
+<h1 style="text-align:center;">CIRCLE SOLUTIONS INC.<br>RETAIL SALES AGENT CONTRACT</h1>
 <p style="text-align:center;"><em>Independent Contractor Agreement — Performance-Based Compensation</em></p>
 <p><strong>This Agreement</strong> is entered into on {{today_date}} between <strong>Circle Solutions Inc.</strong> ("Company") and <strong>{{agent_name}}</strong> ("Agent").</p>
 
@@ -24457,7 +24458,8 @@ const RELIANT_AGENT_CONTRACT_HTML = `<h1 style="text-align:center;">CIRCLE SOLUT
 <p><strong>Date:</strong> {{signature_date}}</p>
 `;
 
-const RELIANT_MANAGER_CONTRACT_HTML = `<h1 style="text-align:center;">CIRCLE SOLUTIONS INC.<br>RETAIL MARKET MANAGER SALES CONTRACT</h1>
+const RELIANT_MANAGER_CONTRACT_HTML = `<!-- CSI_RELIANT_CONTRACT_V1 -->
+<h1 style="text-align:center;">CIRCLE SOLUTIONS INC.<br>RETAIL MARKET MANAGER SALES CONTRACT</h1>
 <p style="text-align:center;"><em>Independent Contractor Agreement — Performance-Based Compensation</em></p>
 <p><strong>This Agreement</strong> is entered into on {{today_date}} between <strong>Circle Solutions Inc.</strong> ("Company") and <strong>{{agent_name}}</strong> ("Manager").</p>
 
@@ -24594,18 +24596,22 @@ async function autoInstallReliantContractsIfNeeded(){
   try {
     let retailProgram = (allPrograms || []).find(p => p.id === 'retail')
       || (allPrograms || []).find(p => /retail|reliant/i.test(p.name || ''));
-    if(!retailProgram) return false;
+    if(!retailProgram) return { installed:false, error:'No "Retail"/"Reliant" program found in Programs list.' };
 
-    const { data: existing } = await sb.from('contract_templates_v2')
-      .select('id').eq('program_id', retailProgram.id).eq('target_role', 'agent')
-      .eq('title', 'Retail Sales Agent Contract').eq('active', true);
-    if(existing && existing.length > 0) return false; // already installed — nothing to do
+    // Check by content marker, NOT by title — a broken manually-pasted
+    // template can share the same title and would otherwise cause this
+    // to falsely think the correct version is already installed.
+    const { data: existing, error: findErr } = await sb.from('contract_templates_v2')
+      .select('id, body_html').eq('program_id', retailProgram.id).eq('target_role', 'agent').eq('active', true);
+    if(findErr) return { installed:false, error:'Lookup failed: ' + findErr.message };
+    const alreadyCorrect = (existing || []).some(t => (t.body_html || '').includes('CSI_RELIANT_CONTRACT_V1'));
+    if(alreadyCorrect) return { installed:false, error:null }; // genuinely already correct — nothing to do
 
     await _doReliantContractSwap(retailProgram.id);
-    return true;
+    return { installed:true, error:null };
   } catch(e){
     console.error('Reliant contract auto-install failed:', e);
-    return false;
+    return { installed:false, error: e.message || String(e) };
   }
 }
 
@@ -24618,13 +24624,24 @@ async function renderContractHub(el){
 
   el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading every contract in the company…</div>';
 
-  // One-time silent auto-install of the new Reliant Agent + Manager
-  // contracts. Runs the first time the owner opens this screen after
-  // deploy — no button click needed. No-ops on every load after that.
+  // One-time auto-install of the new Reliant Agent + Manager contracts.
+  // Runs the first time the owner opens this screen after deploy — no
+  // button click needed. Only marks itself "done" on a genuine success or
+  // a genuine "already correct" — if it errors, it will retry next time
+  // this screen loads, and the error is shown on-screen (not just console)
+  // so it can be reported instead of silently failing forever.
   if(isOwner && !window._reliantAutoInstallChecked){
+    const result = await autoInstallReliantContractsIfNeeded();
+    if(result.error){
+      el.innerHTML = `<div class="bo-card" style="color:#F87171;border:1px solid rgba(239,68,68,0.4);">
+        <strong>⚠️ Auto-install of the new Reliant contracts failed:</strong><br>${escapeHtml(result.error)}<br><br>
+        Build ${BUILD_VERSION} is loaded correctly — this is a database permission/lookup issue, not a deploy issue. Screenshot this and send it back.<br><br>
+        <button class="bo-btn bo-btn-primary" onclick="renderMainContent()">Retry</button>
+      </div>`;
+      return;
+    }
     window._reliantAutoInstallChecked = true;
-    const justInstalled = await autoInstallReliantContractsIfNeeded();
-    if(justInstalled){
+    if(result.installed){
       el.innerHTML = '<div class="bo-card" style="color:#00FF88;">✓ Installed the new Reliant Retail Sales Agent + Market Manager contracts and removed the old ones. Loading…</div>';
       return renderContractHub(el);
     }
