@@ -24509,7 +24509,6 @@ async function installReliantContracts(){
     alert('Could not find a "Retail" / "Reliant" program in the Programs list. Nothing was changed. Check Programs admin and confirm the program name/id, then try again.');
     return;
   }
-  const programId = retailProgram.id;
 
   if(!await csiConfirm(
     'This will:\n\n' +
@@ -24521,72 +24520,94 @@ async function installReliantContracts(){
     'Proceed?'
   )) return;
 
-  let deletedCount = 0;
   try {
-    const { data: oldV2, error: v2FindErr } = await sb.from('contract_templates_v2')
-      .select('id').eq('program_id', programId).in('target_role', ['agent','manager','all']);
-    if(v2FindErr) throw v2FindErr;
-    if(oldV2 && oldV2.length > 0){
-      const { error: delErr } = await sb.from('contract_templates_v2').delete().in('id', oldV2.map(t => t.id));
-      if(delErr) throw delErr;
-      deletedCount += oldV2.length;
-    }
+    const deletedCount = await _doReliantContractSwap(retailProgram.id);
+    alert('✓ Done. Removed ' + deletedCount + ' old ' + retailProgram.name + ' contract template(s) and installed the new Agent (auto-assign) and Manager (manual send) contracts.');
   } catch(e){
-    alert('Failed while clearing old contract templates: ' + e.message + '\n\nNothing further was changed.');
-    return;
+    alert('Something failed: ' + e.message + '\n\nUse + New Template to add them manually with the .txt files provided as backup if this keeps happening.');
+  }
+  renderMainContent();
+}
+window.installReliantContracts = installReliantContracts;
+
+// Shared delete-old / insert-new logic used by both the automatic
+// one-time install (below) and the manual "🔧 Install" button.
+async function _doReliantContractSwap(programId){
+  let deletedCount = 0;
+  const { data: oldV2, error: v2FindErr } = await sb.from('contract_templates_v2')
+    .select('id').eq('program_id', programId).in('target_role', ['agent','manager','all']);
+  if(v2FindErr) throw v2FindErr;
+  if(oldV2 && oldV2.length > 0){
+    const { error: delErr } = await sb.from('contract_templates_v2').delete().in('id', oldV2.map(t => t.id));
+    if(delErr) throw delErr;
+    deletedCount += oldV2.length;
   }
 
   try {
-    const { data: oldLegacy, error: legFindErr } = await sb.from('contract_templates')
+    const { data: oldLegacy } = await sb.from('contract_templates')
       .select('id').eq('program_id', programId).in('target_role', ['agent','manager','all']);
-    if(legFindErr) throw legFindErr;
     if(oldLegacy && oldLegacy.length > 0){
-      const { error: delErr2 } = await sb.from('contract_templates').delete().in('id', oldLegacy.map(t => t.id));
-      if(delErr2) throw delErr2;
+      await sb.from('contract_templates').delete().in('id', oldLegacy.map(t => t.id));
       deletedCount += oldLegacy.length;
     }
   } catch(e){
     console.warn('Legacy contract_templates cleanup skipped/failed (non-fatal):', e.message);
   }
 
-  try {
-    const { error: insErr } = await sb.from('contract_templates_v2').insert([
-      {
-        title: 'Retail Sales Agent Contract',
-        description: 'Flat $150/enrollment or $10/hr (whichever greater). Auto-assigned to new Reliant agents.',
-        program_id: programId,
-        target_role: 'agent',
-        source_type: 'rich_text',
-        body_html: RELIANT_AGENT_CONTRACT_HTML,
-        active: true,
-        auto_assign: true,
-        created_by: currentProfile.id,
-        updated_at: new Date().toISOString()
-      },
-      {
-        title: 'Retail Market Manager Sales Contract',
-        description: '$200/personal enrollment + $25 flat override per supervised agent enrollment. Manual send only — assign when someone is promoted to manager.',
-        program_id: programId,
-        target_role: 'manager',
-        source_type: 'rich_text',
-        body_html: RELIANT_MANAGER_CONTRACT_HTML,
-        active: true,
-        auto_assign: false,
-        created_by: currentProfile.id,
-        updated_at: new Date().toISOString()
-      }
-    ]);
-    if(insErr) throw insErr;
-  } catch(e){
-    alert('Old templates were removed, but adding the new ones failed: ' + e.message + '\n\nUse + New Template to add them manually with the .txt files provided as backup.');
-    renderMainContent();
-    return;
-  }
-
-  alert('✓ Done. Removed ' + deletedCount + ' old ' + retailProgram.name + ' contract template(s) and installed the new Agent (auto-assign) and Manager (manual send) contracts.');
-  renderMainContent();
+  const { error: insErr } = await sb.from('contract_templates_v2').insert([
+    {
+      title: 'Retail Sales Agent Contract',
+      description: 'Flat $150/enrollment or $10/hr (whichever greater). Auto-assigned to new Reliant agents.',
+      program_id: programId,
+      target_role: 'agent',
+      source_type: 'rich_text',
+      body_html: RELIANT_AGENT_CONTRACT_HTML,
+      active: true,
+      auto_assign: true,
+      created_by: currentProfile.id,
+      updated_at: new Date().toISOString()
+    },
+    {
+      title: 'Retail Market Manager Sales Contract',
+      description: '$200/personal enrollment + $25 flat override per supervised agent enrollment. Manual send only — assign when someone is promoted to manager.',
+      program_id: programId,
+      target_role: 'manager',
+      source_type: 'rich_text',
+      body_html: RELIANT_MANAGER_CONTRACT_HTML,
+      active: true,
+      auto_assign: false,
+      created_by: currentProfile.id,
+      updated_at: new Date().toISOString()
+    }
+  ]);
+  if(insErr) throw insErr;
+  return deletedCount;
 }
-window.installReliantContracts = installReliantContracts;
+
+// Runs automatically (silently, once per page load) the first time the
+// owner opens Contract Hub after this build is deployed. Checks whether
+// the new Retail Sales Agent Contract already exists+active before doing
+// anything — safe to leave in permanently, it will no-op after the first
+// successful run. Returns true if it just installed (so the caller can
+// show a banner and refresh), false otherwise.
+async function autoInstallReliantContractsIfNeeded(){
+  try {
+    let retailProgram = (allPrograms || []).find(p => p.id === 'retail')
+      || (allPrograms || []).find(p => /retail|reliant/i.test(p.name || ''));
+    if(!retailProgram) return false;
+
+    const { data: existing } = await sb.from('contract_templates_v2')
+      .select('id').eq('program_id', retailProgram.id).eq('target_role', 'agent')
+      .eq('title', 'Retail Sales Agent Contract').eq('active', true);
+    if(existing && existing.length > 0) return false; // already installed — nothing to do
+
+    await _doReliantContractSwap(retailProgram.id);
+    return true;
+  } catch(e){
+    console.error('Reliant contract auto-install failed:', e);
+    return false;
+  }
+}
 
 async function renderContractHub(el){
   if(!_hubAccessOk()){
@@ -24596,6 +24617,18 @@ async function renderContractHub(el){
   const isOwner = currentProfile?.role === 'owner';
 
   el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading every contract in the company…</div>';
+
+  // One-time silent auto-install of the new Reliant Agent + Manager
+  // contracts. Runs the first time the owner opens this screen after
+  // deploy — no button click needed. No-ops on every load after that.
+  if(isOwner && !window._reliantAutoInstallChecked){
+    window._reliantAutoInstallChecked = true;
+    const justInstalled = await autoInstallReliantContractsIfNeeded();
+    if(justInstalled){
+      el.innerHTML = '<div class="bo-card" style="color:#00FF88;">✓ Installed the new Reliant Retail Sales Agent + Market Manager contracts and removed the old ones. Loading…</div>';
+      return renderContractHub(el);
+    }
+  }
 
   // Pull EVERY template from BOTH tables in parallel + packages
   const [v2Result, legacyResult, asgResult, pkgResult, pkgContractsResult] = await Promise.all([
