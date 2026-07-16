@@ -2373,7 +2373,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.07.16.06';
+const BUILD_VERSION = '2026.07.16.07';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -4474,6 +4474,45 @@ async function renderLeaderboard(el, prog){
     if(typeof e.commission === 'number') tally[uid].commission += e.commission;
   });
 
+  // Calvin, 2026-07-16: pending Reliant sales must show on the leaderboard
+  // immediately too, not just after approval — removed automatically if
+  // later rejected since we only count status='pending'. Only relevant
+  // when Reliant is in scope: program mode on the Reliant program itself,
+  // or company-wide mode (which includes every program).
+  const reliantInScope = viewMode === 'company' || prog.id === 'retail';
+  if(reliantInScope){
+    try {
+      const { data: pendingRows } = await sb.from('pending_reliant_sales')
+        .select('agent_id,status,install_date')
+        .eq('status', 'pending')
+        .gte('install_date', startISO)
+        .lte('install_date', endISO);
+      const pendingAgentIds = Array.from(new Set((pendingRows || []).map(p => p.agent_id).filter(Boolean)));
+      const { data: pendingProfiles } = pendingAgentIds.length
+        ? await sb.from('profiles').select('id,full_name,email,avatar_url,role,active').in('id', pendingAgentIds)
+        : { data: [] };
+      const profileMap = Object.fromEntries((pendingProfiles || []).map(p => [p.id, p]));
+      (pendingRows || []).forEach(p => {
+        const prof = profileMap[p.agent_id];
+        if(!prof || !prof.active) return;
+        if(prof.role === 'admin' || prof.role === 'owner') return;
+        const uid = p.agent_id;
+        if(!tally[uid]){
+          tally[uid] = {
+            userId: uid,
+            name: prof.full_name || prof.email || 'Unknown',
+            email: prof.email || '',
+            avatar_url: prof.avatar_url || null,
+            role: prof.role || 'agent',
+            total: 0, active: 0, commission: 0
+          };
+        }
+        tally[uid].total++;
+        tally[uid].active++; // pending counts as "in motion" for the active metric too
+      });
+    } catch(e){ console.warn('Pending Reliant leaderboard overlay failed:', e); }
+  }
+
   const scoreOf = (t) => metric === 'enrollment_active_count' ? t.active : metric === 'commission_sum' ? t.commission : t.total;
 
   // Score + sort helper (reused across role-segmented sub-lists)
@@ -6293,6 +6332,37 @@ async function _payrollManualMap(userIds, startStr, endStr){
   } catch(_){ return {}; }
 }
 
+// Calvin, 2026-07-16: "when i put a sales order in the system it doesn't
+// show up on the dashboard... it needs to be in the dashboard working
+// correctly unless we unapprove it later." Previously daily_sales (and
+// enrollments, for the leaderboard) were ONLY written at approval time —
+// a fresh pending submission showed as zero everywhere until office acted
+// on it. This overlay counts PENDING Reliant sales (status='pending', NOT
+// 'approved' or 'rejected') alongside the real daily_sales numbers, so a
+// submission shows immediately. Once approved, the RPC's own daily_sales
+// write takes over and this overlay naturally excludes it (no double
+// count). Once rejected, it silently drops out (no manual cleanup needed).
+async function _pendingReliantByUserDay(userIds, startStr, endStr){
+  if(!userIds || userIds.length === 0) return {};
+  try {
+    const { data } = await sb.from('pending_reliant_sales')
+      .select('agent_id, install_date, status')
+      .in('agent_id', userIds)
+      .eq('status', 'pending')
+      .gte('install_date', startStr)
+      .lte('install_date', endStr);
+    const byUserDay = {};
+    for(const row of (data || [])){
+      const u = (byUserDay[row.agent_id] = byUserDay[row.agent_id] || {});
+      u[row.install_date] = (u[row.install_date] || 0) + 1;
+    }
+    return byUserDay;
+  } catch(e){
+    console.warn('_pendingReliantByUserDay failed:', e);
+    return {};
+  }
+}
+
 async function _getMySalesAggregates(userId, programId){
   const week  = _scoreboardWeekRange();
   const month = _scoreboardMonthRange();
@@ -6304,27 +6374,31 @@ async function _getMySalesAggregates(userId, programId){
   const endStr   = (week.sundayStr > month.lastStr)  ? week.sundayStr : month.lastStr;
 
   const targetProg = (programId || '').trim().toLowerCase();
-  const [{ data, error }, manualMap] = await Promise.all([
+  const [{ data, error }, manualMap, pendingMap] = await Promise.all([
     sb.from('daily_sales')
       .select('sale_date, count, program_id, user_id')
       .eq('user_id', userId)
       .gte('sale_date', startStr)
       .lte('sale_date', endStr),
-    targetProg === 'retail' ? _payrollManualMap([userId], startStr, endStr) : Promise.resolve({})
+    targetProg === 'retail' ? _payrollManualMap([userId], startStr, endStr) : Promise.resolve({}),
+    targetProg === 'retail' ? _pendingReliantByUserDay([userId], startStr, endStr) : Promise.resolve({})
   ]);
   if(error && !data) return { weekly: 0, monthly: 0, today: 0, week, month };
 
-  // Per-day totals from daily_sales, then blend MAX with payroll manual.
+  // Per-day totals from daily_sales, then blend MAX with payroll manual,
+  // then ADD pending (not yet approved) Reliant submissions on top so a
+  // fresh submission shows immediately instead of waiting on approval.
   const byDay = {};
   for(const row of (data || [])){
     if((row.program_id || '').trim().toLowerCase() !== targetProg) continue;
     byDay[row.sale_date] = (byDay[row.sale_date] || 0) + row.count;
   }
   const manualDays = (manualMap[userId]) || {};
-  const allDays = new Set([...Object.keys(byDay), ...Object.keys(manualDays)]);
+  const pendingDays = (pendingMap[userId]) || {};
+  const allDays = new Set([...Object.keys(byDay), ...Object.keys(manualDays), ...Object.keys(pendingDays)]);
   let weekly = 0, monthly = 0, todayCount = 0;
   for(const day of allDays){
-    const eff = Math.max(byDay[day] || 0, manualDays[day] || 0);
+    const eff = Math.max(byDay[day] || 0, manualDays[day] || 0) + (pendingDays[day] || 0);
     if(day >= month.firstStr && day <= month.lastStr) monthly += eff;
     if(day >= week.mondayStr  && day <= week.sundayStr) weekly += eff;
     if(day === today) todayCount += eff;
@@ -6370,17 +6444,18 @@ async function _getMyTeamAggregates(managerId, programId){
   const endStr   = (week.sundayStr > month.lastStr)  ? week.sundayStr : month.lastStr;
   const targetProg = (programId || '').trim().toLowerCase();
 
-  const [{ data, error }, manualMap] = await Promise.all([
+  const [{ data, error }, manualMap, pendingMap] = await Promise.all([
     sb.from('daily_sales')
       .select('sale_date, count, program_id, user_id')
       .in('user_id', teamIds)
       .gte('sale_date', startStr)
       .lte('sale_date', endStr),
-    targetProg === 'retail' ? _payrollManualMap(teamIds, startStr, endStr) : Promise.resolve({})
+    targetProg === 'retail' ? _payrollManualMap(teamIds, startStr, endStr) : Promise.resolve({}),
+    targetProg === 'retail' ? _pendingReliantByUserDay(teamIds, startStr, endStr) : Promise.resolve({})
   ]);
   if(error && !data) return { weekly: 0, monthly: 0, today: 0, week, month, teamSize: teamIds.length, members: [] };
 
-  // Per member, per day → MAX(daily_sales, payroll manual), then bucket.
+  // Per member, per day → MAX(daily_sales, payroll manual) + pending overlay, then bucket.
   const byUserDay = {};
   for(const row of (data || [])){
     if((row.program_id || '').trim().toLowerCase() !== targetProg) continue;
@@ -6392,10 +6467,11 @@ async function _getMyTeamAggregates(managerId, programId){
   for(const uid of teamIds){
     const dsDays = byUserDay[uid] || {};
     const mnDays = manualMap[uid] || {};
-    const allDays = new Set([...Object.keys(dsDays), ...Object.keys(mnDays)]);
+    const pdDays = pendingMap[uid] || {};
+    const allDays = new Set([...Object.keys(dsDays), ...Object.keys(mnDays), ...Object.keys(pdDays)]);
     let mW = 0, mM = 0, mT = 0;
     for(const day of allDays){
-      const eff = Math.max(dsDays[day] || 0, mnDays[day] || 0);
+      const eff = Math.max(dsDays[day] || 0, mnDays[day] || 0) + (pdDays[day] || 0);
       if(day >= month.firstStr && day <= month.lastStr) mM += eff;
       if(day >= week.mondayStr  && day <= week.sundayStr) mW += eff;
       if(day === today) mT += eff;
@@ -6450,6 +6526,21 @@ async function _getProgramLeaderboard(programId){
       t += Math.max(ds[day] || 0, mn[day] || 0);
     }
     if(t > 0) totals[uid] = t;
+  }
+
+  // Calvin, 2026-07-16: pending Reliant sales count here too, immediately —
+  // same rule as the scoreboard tile and the full leaderboard page.
+  if(targetProg === 'retail'){
+    try {
+      const { data: pendingRows } = await sb.from('pending_reliant_sales')
+        .select('agent_id, install_date')
+        .eq('status', 'pending')
+        .gte('install_date', week.mondayStr)
+        .lte('install_date', week.sundayStr);
+      (pendingRows || []).forEach(p => {
+        totals[p.agent_id] = (totals[p.agent_id] || 0) + 1;
+      });
+    } catch(e){ console.warn('Pending Reliant dashboard-rank overlay failed:', e); }
   }
 
   const leaderboard = (users || []).map(u => ({
@@ -6610,6 +6701,31 @@ async function renderScoreboardWidget(programId){
         </div>
       </div>
     </div>
+
+    ${peerCount > 0 ? `
+      <div class="bo-card" style="margin-bottom:22px;border-left:3px solid ${accent};">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:${accent};letter-spacing:1.5px;">🏆 TOP PERFORMERS THIS WEEK — ${escapeHtml(prog.name.toUpperCase())}</div>
+          <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="activeSubView='leaderboard';renderMainContent();">Full Leaderboard →</button>
+        </div>
+        ${leaderboard.filter(l => l.weekly_count > 0).slice(0, 5).map((l, idx) => {
+          const isMe = l.user_id === me.id;
+          const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : '#' + (idx + 1);
+          return `
+          <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:${isMe ? 'rgba(255,107,0,0.08)' : 'rgba(255,255,255,0.025)'};border-radius:8px;margin-bottom:5px;${isMe ? 'border:1px solid ' + accent + '55;' : ''}">
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:${accent};width:30px;text-align:center;flex-shrink:0;">${medal}</div>
+            <div style="flex:1;min-width:0;font-size:13px;color:#fff;font-weight:${isMe ? '700' : '600'};">${escapeHtml(l.name)}${isMe ? ' <span style="font-size:10px;color:' + accent + ';">(you)</span>' : ''}</div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:${accent};line-height:1;">${l.weekly_count}</div>
+          </div>`;
+        }).join('') || '<div style="color:rgba(255,255,255,0.4);font-size:12.5px;padding:10px 0;">No sales logged yet this week — be the first on the board.</div>'}
+        ${!leaderboard.slice(0,5).some(l => l.user_id === me.id) && myEntry ? `
+          <div style="margin-top:8px;padding-top:10px;border-top:1px dashed ${accentDim};display:flex;align-items:center;gap:10px;padding-left:10px;">
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:${accent};width:30px;text-align:center;">★${myRank}</div>
+            <div style="flex:1;font-size:13px;color:#fff;font-weight:700;">${escapeHtml(me.full_name || me.email)} <span style="font-size:10px;color:${accent};">(you)</span></div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:${accent};">${myEntry.weekly_count}</div>
+          </div>` : ''}
+      </div>
+    ` : ''}
 
     ${isMgr && (agg.members || []).length > 0 ? `
       <div class="bo-card" style="margin-bottom:22px;border-left:3px solid ${accent};">
@@ -18351,10 +18467,7 @@ async function renderReliantSaleEntry(el){
     <div class="bo-card" style="max-width:680px;">
       ${noStoresMsg}
 
-      <div class="form-group">
-        <label class="form-label">CUSTOMER NAME *</label>
-        <input id="rs-name" class="form-input" placeholder="Full name as on the agreement" maxlength="120"/>
-      </div>
+      <input type="hidden" id="rs-name" value=""/>
 
       <div class="form-group">
         <label class="form-label">LOCATION *</label>
@@ -18384,7 +18497,7 @@ async function renderReliantSaleEntry(el){
       </div>
     </div>`;
 
-  setTimeout(()=>{ document.getElementById('rs-name')?.focus(); }, 50);
+  setTimeout(()=>{ document.getElementById('rs-account')?.focus(); }, 50);
 }
 
 // Formats CA input as the user types: 8 digits, dash, 1 digit (9 digits total).
@@ -18399,9 +18512,15 @@ async function submitReliantSale(){
   const msg = document.getElementById('rs-msg');
   if(!msg) return;
   msg.innerHTML = '';
-  const name    = (document.getElementById('rs-name')?.value || '').trim();
   const storeId = document.getElementById('rs-store')?.value || '';
   const account = (document.getElementById('rs-account')?.value || '').trim();
+  // Phase 3.30 → simplified further 2026-07-16 (Calvin: "the customer name
+  // is not needed, we just need the customer order number"). The
+  // submit_reliant_sale RPC still expects a name parameter server-side, so
+  // we derive a placeholder from the CA# rather than touching the RPC —
+  // approval screens/notifications will show "CA 12345678-9" instead of a
+  // real name, which is fine since the CA# is now the source of truth.
+  const name = 'CA ' + account;
   // Phase 3.30 — install date is auto-set to today (sale = enrollment moment).
   // If payroll needs to record a future install, they can edit the
   // resulting daily_sales row directly. Removing the field cuts agent
@@ -18410,7 +18529,6 @@ async function submitReliantSale(){
   const install = new Date().toISOString().slice(0,10);
   const notes   = null;
 
-  if(!name)    { msg.innerHTML = '<span style="color:#F87171;">Customer name is required.</span>'; return; }
   if(!storeId) { msg.innerHTML = '<span style="color:#F87171;">Pick a location (store or Emailed Customer / Remote Sale).</span>'; return; }
   if(!/^\d{8}-\d$/.test(account)) { msg.innerHTML = '<span style="color:#F87171;">CA number must be 8 digits, a dash, then 1 digit (e.g. 12345678-9).</span>'; return; }
 
@@ -18429,7 +18547,11 @@ async function submitReliantSale(){
     return;
   }
 
-  msg.innerHTML = '<span style="color:#00FF88;">✓ Submitted. Payroll and the store manager have been notified for review.</span>';
+  msg.innerHTML = '<span style="color:#00FF88;">✓ Submitted — already counted on your dashboard and the leaderboard. Payroll and the store manager have been notified for review.</span>';
+
+  // Dashboard/leaderboard should reflect this the instant it's submitted,
+  // not only after approval (Calvin, 2026-07-16).
+  try { _bustScoreboardCache(); } catch(_){}
 
   // Fire notifications in the background — owner + admin + payroll + agent's
   // direct manager + the MM(s) of the store the sale was logged at.
@@ -18447,9 +18569,8 @@ async function submitReliantSale(){
   })();
 
   // Reset the form for the next entry
-  document.getElementById('rs-name').value = '';
   document.getElementById('rs-account').value = '';
-  document.getElementById('rs-name')?.focus();
+  document.getElementById('rs-account')?.focus();
   try { renderUrgentFlyer(); } catch(_){}
 }
 window.submitReliantSale = submitReliantSale;
