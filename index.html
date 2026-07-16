@@ -2373,7 +2373,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.07.16.04';
+const BUILD_VERSION = '2026.07.16.06';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -7719,8 +7719,8 @@ function renderAgentModalUI(existing, editId, availablePrograms, isOwner, isAdmi
     <label style="display:${isAdmin ? 'flex' : 'none'};align-items:center;gap:10px;cursor:pointer;padding:10px 12px;background:rgba(0,198,255,0.05);border:1px solid rgba(0,198,255,0.25);border-radius:8px;margin-top:8px;">
       <input type="checkbox" id="ag-signed-elsewhere" ${e.doc_overrides?.agent_contract ? 'checked' : ''} style="width:18px;height:18px;accent-color:#00C6FF;flex-shrink:0;"/>
       <div style="flex:1;">
-        <div style="font-weight:600;color:#00C6FF;font-size:14px;">📄 Already signed onboarding documents elsewhere</div>
-        <div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-top:2px;line-height:1.5;">Check this if the contract was signed outside the system before they got back-office access. Skips the in-app sign prompt. Upload the actual signed copy afterward from their profile → 📤 Upload Signed Contract.</div>
+        <div style="font-weight:600;color:#00C6FF;font-size:14px;">📄 Contracts already signed elsewhere — full bypass</div>
+        <div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-top:2px;line-height:1.5;">Check this ONLY if everything (agreement, background check, tax/banking info) was already handled outside the system. Skips onboarding entirely — this agent gets full back-office and tool access the instant they log in, no wizard, no BG review. Leave unchecked for the normal flow: BG consent + upload → office marks pass/fail on their profile → passing unlocks the agreement → they sign → full access. Upload proof afterward from their profile → 📤 Upload Signed Contract.</div>
       </div>
     </label>
 
@@ -8439,18 +8439,16 @@ async function openReinstateModal(id, name){
 // for agents who signed before getting back-office access). Office-only —
 // gated at the button level (isOwner||isAdmin) and again here.
 
-// BUG FIX 2026-07-16: profile.doc_overrides only affected the OLDER
-// candidate-stage flow (_loadStepStatuses / renderOnboardingContractStep /
-// renderOnboardingConsentForm). Real agents actually go through a SEPARATE
-// wizard system (agent_onboarding + agent_onboarding_steps, driven by
-// profile.onboarding_status, opened via openOnboardingWizard) which never
-// checked doc_overrides at all — so the sign prompt kept showing regardless
-// of the override. This helper closes that gap by directly marking the
-// matching wizard steps complete. Only touches step_type 'document' and
-// 'background_check' (the actual signature/authorization steps) — NEVER
-// personal_info, w9, direct_deposit, id_upload, profile_photo, or
-// emergency_contact, since those collect real data (SSN, banking, ID scans)
-// that an office override has no business fabricating.
+// LOCKED SPEC (Calvin, 2026-07-16): "signed elsewhere" is a full bypass,
+// not a partial one. If checked at agent creation, the agent gets full
+// back-office + tools access IMMEDIATELY — every onboarding step (personal
+// info, W-9, direct deposit, emergency contact, ID upload, the document
+// AND the background check) skipped, no exceptions. If left unchecked, the
+// normal flow is untouched: BG consent + upload -> office marks pass/fail
+// under the agent's profile -> pass unlocks the agent agreement -> agent
+// signs -> full access. Fail -> rejection email + automatic lockout. This
+// function implements the CHECKED path only — it never runs unless the
+// office explicitly checked the box.
 async function _applySignedElsewhereToWizardSteps(userId, overriddenByName){
   try {
     const { data: packets } = await sb.from('agent_onboarding').select('id, status').eq('user_id', userId);
@@ -8458,7 +8456,6 @@ async function _applySignedElsewhereToWizardSteps(userId, overriddenByName){
     const packetIds = packets.map(p => p.id);
     const { data: steps } = await sb.from('agent_onboarding_steps')
       .select('id, step_type, status, agent_onboarding_id').in('agent_onboarding_id', packetIds)
-      .in('step_type', ['document','background_check'])
       .neq('status', 'complete');
     let updated = 0;
     if(steps && steps.length > 0){
@@ -8469,7 +8466,7 @@ async function _applySignedElsewhereToWizardSteps(userId, overriddenByName){
           completed_at: nowIso,
           submitted_data: {
             overridden: true,
-            signature_value: 'Signed elsewhere — marked by office' + (overriddenByName ? ' (' + overriddenByName + ')' : ''),
+            note: 'Completed elsewhere — bypassed by office' + (overriddenByName ? ' (' + overriddenByName + ')' : ''),
           }
         }).eq('id', s.id);
         updated++;
@@ -8538,7 +8535,7 @@ async function openDocOverridesModal(id, name){
 
   document.getElementById('modal-box').innerHTML = `
     <h2 style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#00C6FF;margin-bottom:4px;letter-spacing:1px;">📄 Manage Documents</h2>
-    <div style="font-size:13px;color:rgba(255,255,255,0.6);margin-bottom:14px;">${escapeHtml(name)} — check a box for any document already signed outside the system. This unlocks that step for them without requiring an in-app signature.</div>
+    <div style="font-size:13px;color:rgba(255,255,255,0.6);margin-bottom:14px;">${escapeHtml(name)} — checking ANY box here bypasses their ENTIRE onboarding (all steps, not just this one) and gives them full back-office access immediately. Use this only when everything was genuinely handled outside the system.</div>
     <div style="max-height:50vh;overflow-y:auto;">${rows || '<div style="color:rgba(255,255,255,0.4);padding:20px;text-align:center;">No onboarding steps found for this person&#39;s program.</div>'}</div>
     <div style="display:flex;gap:10px;margin-top:16px;">
       <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Close</button>
@@ -23404,6 +23401,49 @@ async function checkAndShowOnboardingLockout(){
   // Show lockout screen with packets to complete
   const sidebar = document.getElementById('bo-sidebar');
   if(sidebar) sidebar.style.display = 'none';
+
+  // BUG FIX 2026-07-16 (round 2): a packet can have 100% of its OWN steps
+  // marked complete (e.g. every step submitted normally, or the office
+  // "signed elsewhere" override only touched document/background_check
+  // steps and this packet has none of those types) while the packet row
+  // itself never flipped to 'complete' — this happens whenever a step gets
+  // marked complete some way OTHER than the exact wizardSubmit() cascade
+  // (which is the only code path that checks "are all steps done, then
+  // flip the packet"). Self-heal here too, per-packet, not just when zero
+  // packets exist — otherwise a 5-of-5-complete agent stays stuck forever.
+  const stillInProgress = [];
+  const healedPacketIds = [];
+  for(const pk of packets){
+    const { data: steps } = await sb.from('agent_onboarding_steps').select('status').eq('agent_onboarding_id', pk.id);
+    const allDone = (steps || []).length > 0 && (steps || []).every(s => s.status === 'complete');
+    if(allDone){
+      await sb.from('agent_onboarding').update({ status:'complete', completed_at: new Date().toISOString() }).eq('id', pk.id);
+      healedPacketIds.push(pk.id);
+    } else {
+      stillInProgress.push(pk);
+    }
+  }
+  if(healedPacketIds.length > 0){
+    // Re-check: if THAT healing just finished every packet this user has,
+    // flip the profile flag too and drop them straight into the dashboard.
+    const { data: allPackets } = await sb.from('agent_onboarding').select('status').eq('user_id', currentProfile.id);
+    const everythingDone = (allPackets || []).length > 0 && (allPackets || []).every(p => p.status === 'complete');
+    if(everythingDone){
+      await sb.from('profiles').update({
+        onboarding_status: 'complete',
+        onboarding_completed_at: new Date().toISOString()
+      }).eq('id', currentProfile.id);
+      currentProfile.onboarding_status = 'complete';
+      if(sidebar) sidebar.style.display = '';
+      renderMainContent();
+      return;
+    }
+    // Some packets healed, but at least one genuinely still needs work —
+    // re-render the lockout with only the real remaining packet(s).
+    if(stillInProgress.length === 0){ renderMainContent(); return; }
+  }
+  packets.length = 0;
+  packets.push(...stillInProgress);
 
   const packetCards = await Promise.all(packets.map(async pk => {
     const { data: steps } = await sb.from('agent_onboarding_steps')
