@@ -2373,7 +2373,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.07.16.10';
+const BUILD_VERSION = '2026.07.16.11';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -7901,6 +7901,18 @@ function renderAgentModalUI(existing, editId, availablePrograms, isOwner, isAdmi
       <div>${programCheckboxes || '<div style="color:rgba(255,255,255,0.4);font-size:12.5px;">No programs available.</div>'}</div>
     </div>
 
+    <div class="form-group" style="background:rgba(255,200,0,0.05);border:1px solid rgba(255,200,0,0.25);border-radius:8px;padding:12px;">
+      <label class="form-label" style="color:#FFC800;">⚡ Campaign — REQUIRED or this person is permanently stuck</label>
+      <select id="ag-campaign" class="form-input">
+        <option value="">— No campaign (they will be blocked at login) —</option>
+        ${(allCampaigns || []).filter(c => c.is_active !== false).map(c => {
+          const prog = (allPrograms || []).find(p => p.id === c.program_id);
+          return `<option value="${c.id}" ${e.campaign_id === c.id ? 'selected' : ''}>${c.icon || '📋'} ${escapeHtml(c.name)}${prog ? ' — ' + escapeHtml(prog.name) : ''}</option>`;
+        }).join('')}
+      </select>
+      <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:5px;line-height:1.5;">Checking a program above is NOT enough by itself — this person also needs a specific campaign inside that program, or they will land on a "No Campaigns Assigned" dead end no matter how their onboarding/documents are handled.</div>
+    </div>
+
     <div class="form-group">
       <label class="form-label">Market (optional)</label>
       <select id="ag-market" class="form-input" style="background:#1a1a1a;" data-selected="${e.market_id || ''}">
@@ -8019,6 +8031,7 @@ async function saveAgent(editId){
   const is_tool_builder = toolBuilderEl ? (toolBuilderEl.type === 'checkbox' ? toolBuilderEl.checked : toolBuilderEl.value === 'on') : false;
   const signedElsewhereEl = document.getElementById('ag-signed-elsewhere');
   const signed_elsewhere = signedElsewhereEl ? signedElsewhereEl.checked : false;
+  const campaign_id = document.getElementById('ag-campaign')?.value || null;
   const msg = document.getElementById('ag-msg');
 
   if(!full_name || !email){ msg.innerHTML = '<span style="color:#F87171;">Name and email are required.</span>'; return; }
@@ -8059,7 +8072,7 @@ async function saveAgent(editId){
   if(editId){
     const updateData = {
       full_name, phone: phone || null, role, programs, market_id, reports_to,
-      phone_carrier, sms_opt_in,
+      phone_carrier, sms_opt_in, campaign_id,
       updated_at: new Date().toISOString()
     };
     // Only owners can change can_host_meetings + is_inventory_manager + is_payroll_manager + can_manage_rates + is_tool_builder
@@ -8108,7 +8121,7 @@ async function saveAgent(editId){
       body: {
         email, password, full_name, phone: phone || null,
         role, programs, market_id, reports_to,
-        phone_carrier, sms_opt_in,
+        phone_carrier, sms_opt_in, campaign_id,
         can_host_meetings: currentProfile.role === 'owner' ? can_host_meetings : false
       }
     });
@@ -8135,6 +8148,19 @@ async function saveAgent(editId){
     }
 
     const newUserId = data?.user_id;
+
+    // Guaranteed campaign_id write — the admin-create-user Edge Function is
+    // passed campaign_id above too, but that server function may not know
+    // about this field yet since it predates this fix. This direct update
+    // makes sure it lands regardless, using the exact same "write right
+    // after creation" pattern as doc_overrides below. Missing campaign_id
+    // is what leaves a brand-new agent permanently stuck on "No Campaigns
+    // Assigned" even with onboarding fully bypassed — this is the fix for
+    // that specific dead end.
+    if(newUserId && campaign_id){
+      const { error: campErr } = await sb.from('profiles').update({ campaign_id }).eq('id', newUserId);
+      if(campErr) console.warn('Failed to set campaign_id at creation:', campErr);
+    }
 
     // "Signed elsewhere" checkbox, office-only — set right at creation so
     // it's in place before the agent's first login, no separate step needed.
