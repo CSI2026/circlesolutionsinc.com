@@ -2373,7 +2373,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.07.16.11';
+const BUILD_VERSION = '2026.07.16.12';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -22505,6 +22505,7 @@ async function renderDocumentLibrary(el, prog, title, subtitle){
       <button class="bo-btn bo-btn-primary" onclick="openFolderModal(${programId ? "'"+programId+"'" : 'null'})">📂 New Folder</button>
       <button class="bo-btn bo-btn-ghost" onclick="openDocUploadModal(${programId ? "'"+programId+"'" : 'null'}, null)">⬆️ Upload File to Root</button>
     </div>` : ''}
+    ${!isAdmin ? `<div style="background:rgba(255,200,0,0.06);border:1px solid rgba(255,200,0,0.25);border-radius:8px;padding:10px 14px;margin-bottom:16px;font-size:12px;color:rgba(255,255,255,0.6);">🔒 These are company documents for reference. Downloading is restricted to owner/admin — contact your office if you need a copy of something here.</div>` : ''}
 
     ${(folders || []).length === 0 && rootDocs.length === 0 ? '<div class="bo-card" style="color:rgba(255,255,255,0.4);text-align:center;padding:40px;">No documents yet. ' + (canUpload ? 'Create a folder or upload a file to get started.' : 'Check back later.') + '</div>' : ''}
 
@@ -22525,20 +22526,20 @@ async function renderDocumentLibrary(el, prog, title, subtitle){
         </div>
         ${(folderDocs[f.id] || []).length === 0 ? '<div style="color:rgba(255,255,255,0.3);font-size:12.5px;padding:8px 0;">Empty folder</div>' : `
           <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;">
-            ${folderDocs[f.id].map(d => docCard(d, canUpload, accentColor)).join('')}
+            ${folderDocs[f.id].map(d => docCard(d, canUpload, accentColor, isAdmin)).join('')}
           </div>`}
       </div>`).join('')}
 
     ${rootDocs.length > 0 ? `<div class="bo-card">
       <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:#fff;letter-spacing:1px;margin-bottom:12px;">Root Files</div>
       <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;">
-        ${rootDocs.map(d => docCard(d, canUpload, accentColor)).join('')}
+        ${rootDocs.map(d => docCard(d, canUpload, accentColor, isAdmin)).join('')}
       </div>
     </div>` : ''}
   `;
 }
 
-function docCard(d, canDelete, accentColor){
+function docCard(d, canDelete, accentColor, isAdmin){
   const sizeKb = d.size_bytes ? Math.round(d.size_bytes/1024) : 0;
   const sizeStr = sizeKb > 1024 ? (sizeKb/1024).toFixed(1) + ' MB' : sizeKb + ' KB';
   const icon = fileIcon(d.mime_type || d.name);
@@ -22551,7 +22552,10 @@ function docCard(d, canDelete, accentColor){
       </div>
     </div>
     <div style="display:flex;gap:6px;">
-      <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;flex:1;" onclick="downloadDoc('${d.file_path}','${escapeHtml(d.name).replace(/'/g,"\\'")}')">Download</button>
+      ${isAdmin
+        ? `<button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;flex:1;" onclick="downloadDoc('${d.file_path}','${escapeHtml(d.name).replace(/'/g,"\\'")}')">Download</button>`
+        : `<div style="padding:5px 12px;font-size:11px;flex:1;text-align:center;color:rgba(255,255,255,0.3);">🔒 Restricted</div>`
+      }
       ${canDelete ? `<button class="bo-btn bo-btn-danger" style="padding:5px 10px;font-size:11px;" onclick="deleteDoc('${d.id}','${d.file_path}')">✕</button>` : ''}
     </div>
   </div>`;
@@ -22670,6 +22674,19 @@ async function uploadDoc(programId, folderId){
 }
 
 async function downloadDoc(filePath, displayName){
+  // Calvin, 2026-07-16: "I do NOT want any of our documents or contracts
+  // to be able to be downloaded by an agent or manager without our
+  // permission." The Download button is already hidden from non-admins,
+  // but this guard blocks it here too — in case someone calls this
+  // function directly (e.g. from the browser console) instead of clicking
+  // a button that was never shown to them. Real security still needs a
+  // matching Supabase Storage policy on the 'documents' bucket restricting
+  // signed-URL generation to owner/admin — this is a client-side backstop,
+  // not a replacement for that.
+  if(!['owner','admin'].includes(currentProfile?.role)){
+    alert('Downloading company documents is restricted to owner/admin. Contact your office if you need a copy.');
+    return;
+  }
   const { data, error } = await sb.storage.from('documents').createSignedUrl(filePath, 60);
   if(error || !data?.signedUrl){ alert('Error generating download link'); return; }
   const a = document.createElement('a');
