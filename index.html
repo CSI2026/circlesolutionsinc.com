@@ -2373,7 +2373,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.07.16.09';
+const BUILD_VERSION = '2026.07.16.10';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -8086,7 +8086,10 @@ async function saveAgent(editId){
     const { error } = await sb.from('profiles').update(updateData).eq('id', editId);
     if(error){ msg.innerHTML = '<span style="color:#F87171;">'+error.message+'</span>'; return; }
     if(signed_elsewhere && ['owner','admin'].includes(currentProfile.role)){
-      await _applySignedElsewhereToWizardSteps(editId, currentProfile.full_name || currentProfile.email);
+      const bypassResult = await _applySignedElsewhereToWizardSteps(editId, currentProfile.full_name || currentProfile.email);
+      if(bypassResult.error){
+        alert('⚠️ Saved, but unlocking their onboarding failed:\n\n' + bypassResult.error + '\n\nThey are likely STILL BLOCKED. This is a database permissions issue, not something wrong with your click — screenshot this and send it over.');
+      }
     }
     closeAllModals();
     if(editId === currentProfile.id){ await loadCurrentProfile(); enterBackOffice(); return; }
@@ -8158,8 +8161,12 @@ async function saveAgent(editId){
     // MUST run AFTER autoAssignOnboardingPackets — the wizard steps this
     // marks complete don't exist until that call creates them. Doing this
     // before would silently update zero rows.
+    let signedElsewhereWarning = '';
     if(newUserId && signed_elsewhere && ['owner','admin'].includes(currentProfile.role)){
-      await _applySignedElsewhereToWizardSteps(newUserId, currentProfile.full_name || currentProfile.email);
+      const bypassResult = await _applySignedElsewhereToWizardSteps(newUserId, currentProfile.full_name || currentProfile.email);
+      if(bypassResult.error){
+        signedElsewhereWarning = '\n\n⚠️ "Signed elsewhere" was checked but the bypass FAILED: ' + bypassResult.error + '\nThis agent is likely still blocked from their dashboard — this is a database permissions issue, not something wrong with your click.';
+      }
     }
 
     // Send welcome email — best-effort
@@ -8176,8 +8183,9 @@ async function saveAgent(editId){
       emailStatus = '<div style="margin-top:8px;font-size:12.5px;color:#F87171;">⚠️ Email send failed — click 📧 Email Login in the team list to retry.</div>';
     }
 
-    msg.innerHTML = '<div style="color:#00FF88;font-weight:600;">✓ Team member created.</div>' + emailStatus;
-    setTimeout(() => { closeAllModals(); renderMainContent(); }, 5500);
+    msg.innerHTML = '<div style="color:#00FF88;font-weight:600;">✓ Team member created.</div>' + emailStatus
+      + (signedElsewhereWarning ? '<div style="margin-top:10px;padding:10px 12px;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.4);border-radius:8px;color:#F87171;font-size:12.5px;white-space:pre-line;">' + escapeHtml(signedElsewhereWarning) + '</div>' : '');
+    setTimeout(() => { closeAllModals(); renderMainContent(); }, signedElsewhereWarning ? 12000 : 5500);
   } catch(e){
     msg.innerHTML = '<span style="color:#F87171;">Error: '+e.message+'. Make sure the admin-create-user Edge Function is deployed.</span>';
   }
@@ -8623,17 +8631,21 @@ async function openReinstateModal(id, name){
 // office explicitly checked the box.
 async function _applySignedElsewhereToWizardSteps(userId, overriddenByName){
   try {
-    const { data: packets } = await sb.from('agent_onboarding').select('id, status').eq('user_id', userId);
-    if(!packets || packets.length === 0) return { updated: 0 };
+    const { data: packets, error: pkErr } = await sb.from('agent_onboarding').select('id, status').eq('user_id', userId);
+    if(pkErr) return { updated: 0, error: 'Could not read onboarding packets: ' + pkErr.message };
+    if(!packets || packets.length === 0) return { updated: 0, error: null, noPacket: true };
     const packetIds = packets.map(p => p.id);
-    const { data: steps } = await sb.from('agent_onboarding_steps')
+    const { data: steps, error: stepFindErr } = await sb.from('agent_onboarding_steps')
       .select('id, step_type, status, agent_onboarding_id').in('agent_onboarding_id', packetIds)
       .neq('status', 'complete');
+    if(stepFindErr) return { updated: 0, error: 'Could not read onboarding steps: ' + stepFindErr.message };
+
     let updated = 0;
+    const writeFailures = [];
     if(steps && steps.length > 0){
       const nowIso = new Date().toISOString();
       for(const s of steps){
-        await sb.from('agent_onboarding_steps').update({
+        const { error: updErr } = await sb.from('agent_onboarding_steps').update({
           status: 'complete',
           completed_at: nowIso,
           submitted_data: {
@@ -8641,36 +8653,62 @@ async function _applySignedElsewhereToWizardSteps(userId, overriddenByName){
             note: 'Completed elsewhere — bypassed by office' + (overriddenByName ? ' (' + overriddenByName + ')' : ''),
           }
         }).eq('id', s.id);
+        // BUG FIX 2026-07-16 (round 3): this write was never checked for
+        // errors before. If Supabase row-level security silently blocked
+        // an office/admin user from updating someone ELSE's onboarding
+        // step row, this would fail with zero indication — the function
+        // would still report success, the checkbox would show checked,
+        // but the actual database state never changed. That is almost
+        // certainly why the override "worked" (no error shown) but the
+        // agent still could not get in. Now every failure is captured and
+        // surfaced instead of silently ignored.
+        if(updErr){ writeFailures.push(s.id + ': ' + updErr.message); continue; }
         updated++;
       }
     }
-    if(updated === 0) return { updated: 0 };
+    if(writeFailures.length > 0){
+      return { updated, error: 'Database blocked ' + writeFailures.length + ' step update(s) — likely a permissions (row-level security) issue, not a code bug: ' + writeFailures[0] };
+    }
+    if(updated === 0 && steps && steps.length === 0){
+      // Nothing needed updating — every step was already complete. Still
+      // run the cascade check below in case the PACKET/PROFILE flag itself
+      // just never got flipped despite the steps being done.
+    }
 
     // Replicate wizardSubmit's completion cascade — if this override just
     // completed the LAST remaining step(s) in a packet, that packet (and
     // possibly the whole profile) needs to flip to complete too, or the
     // person stays trapped in the lockout screen despite a 100% bar.
+    const cascadeFailures = [];
     for(const pk of packets){
       if(pk.status === 'complete') continue;
-      const { data: allSteps } = await sb.from('agent_onboarding_steps').select('status').eq('agent_onboarding_id', pk.id);
+      const { data: allSteps, error: allStepsErr } = await sb.from('agent_onboarding_steps').select('status').eq('agent_onboarding_id', pk.id);
+      if(allStepsErr){ cascadeFailures.push('reading steps for packet ' + pk.id + ': ' + allStepsErr.message); continue; }
       const allDone = (allSteps || []).length > 0 && (allSteps || []).every(s => s.status === 'complete');
       if(allDone){
-        await sb.from('agent_onboarding').update({ status:'complete', completed_at: new Date().toISOString() }).eq('id', pk.id);
+        const { error: pkUpdErr } = await sb.from('agent_onboarding').update({ status:'complete', completed_at: new Date().toISOString() }).eq('id', pk.id);
+        if(pkUpdErr) cascadeFailures.push('marking packet ' + pk.id + ' complete: ' + pkUpdErr.message);
       }
     }
-    const { data: allPackets } = await sb.from('agent_onboarding').select('status').eq('user_id', userId);
+    if(cascadeFailures.length > 0){
+      return { updated, error: 'Steps were marked complete, but the packet-level update failed (permissions issue): ' + cascadeFailures[0] };
+    }
+
+    const { data: allPackets, error: allPkErr } = await sb.from('agent_onboarding').select('status').eq('user_id', userId);
+    if(allPkErr) return { updated, error: 'Steps and packets updated, but could not verify final status: ' + allPkErr.message };
     const everythingDone = (allPackets || []).length > 0 && (allPackets || []).every(p => p.status === 'complete');
     if(everythingDone){
-      await sb.from('profiles').update({
+      const { error: profErr } = await sb.from('profiles').update({
         onboarding_status: 'complete',
         onboarding_completed_at: new Date().toISOString()
       }).eq('id', userId);
+      if(profErr) return { updated, error: 'Every packet is complete, but flipping the profile to unlock the dashboard failed (permissions issue): ' + profErr.message };
       try { notifyAdminsOnboardingComplete(); } catch(_){}
     }
-    return { updated };
+    return { updated, error: null };
   } catch(e){
     console.warn('_applySignedElsewhereToWizardSteps failed:', e);
-    return { updated: 0, error: e.message };
+    return { updated: 0, error: e.message || String(e) };
   }
 }
 window._applySignedElsewhereToWizardSteps = _applySignedElsewhereToWizardSteps;
@@ -8729,7 +8767,12 @@ async function toggleDocOverride(userId, stepId, checked, name){
   // whenever a contract/consent step is being marked signed-elsewhere —
   // this is the fix for the real reported bug (agent still saw sign prompt).
   if(checked){
-    await _applySignedElsewhereToWizardSteps(userId, currentProfile.full_name || currentProfile.email);
+    const result = await _applySignedElsewhereToWizardSteps(userId, currentProfile.full_name || currentProfile.email);
+    if(result.error){
+      alert('⚠️ The checkbox was saved, but unlocking their onboarding failed:\n\n' + result.error + '\n\nThey are likely STILL BLOCKED from their dashboard. This needs to be fixed at the database level (a permissions/RLS policy issue) — screenshot this and send it over.');
+    } else if(result.noPacket){
+      alert('Note: this person has no onboarding packet assigned yet, so there was nothing to bypass. If they still cannot get in, check that a packet was actually assigned to them.');
+    }
   }
   // Re-render the modal so status labels reflect the change immediately.
   openDocOverridesModal(userId, name);
@@ -23550,15 +23593,22 @@ async function checkAndShowOnboardingLockout(){
     // nothing was ever assigned.
     const { data: anyPackets } = await sb.from('agent_onboarding').select('id, status').eq('user_id', currentProfile.id);
     if(anyPackets && anyPackets.length > 0 && anyPackets.every(p => p.status === 'complete')){
-      await sb.from('profiles').update({
+      const { error: healErr } = await sb.from('profiles').update({
         onboarding_status: 'complete',
         onboarding_completed_at: new Date().toISOString()
       }).eq('id', currentProfile.id);
-      currentProfile.onboarding_status = 'complete';
-      const sidebar = document.getElementById('bo-sidebar');
-      if(sidebar) sidebar.style.display = '';
-      renderMainContent();
-      return;
+      if(healErr){
+        console.error('Self-heal failed to flip onboarding_status:', healErr);
+        // Fall through to the SETUP INCOMPLETE screen below rather than
+        // silently looping forever — at least this makes the failure
+        // visible (via a support contact) instead of an invisible loop.
+      } else {
+        currentProfile.onboarding_status = 'complete';
+        const sidebar = document.getElementById('bo-sidebar');
+        if(sidebar) sidebar.style.display = '';
+        renderMainContent();
+        return;
+      }
     }
     // No onboarding packet is available for your assigned program(s) yet. This is a setup issue on our side, not yours.
     document.getElementById('bo-content').innerHTML = `
@@ -25434,16 +25484,18 @@ async function saveCampaign(id){
 window.saveCampaign = saveCampaign;
 
 async function toggleCampaignActive(id, currentlyActive){
-  await sb.from('bonus_campaigns').update({ active: !currentlyActive }).eq('id', id);
+  const { error } = await sb.from('bonus_campaigns').update({ active: !currentlyActive }).eq('id', id);
+  if(error){ alert('Failed to update: ' + error.message); return; }
   renderMainContent();
 }
 window.toggleCampaignActive = toggleCampaignActive;
 
 async function deleteCampaign(id){
   if(!await csiConfirm('Delete this campaign? This cannot be undone.')) return;
-  await sb.from('campaign_prizes').delete().eq('campaign_id', id);
-  await sb.from('campaign_banner_dismissals').delete().eq('campaign_id', id);
-  await sb.from('bonus_campaigns').delete().eq('id', id);
+  const { error: e1 } = await sb.from('campaign_prizes').delete().eq('campaign_id', id);
+  const { error: e2 } = await sb.from('campaign_banner_dismissals').delete().eq('campaign_id', id);
+  const { error: e3 } = await sb.from('bonus_campaigns').delete().eq('id', id);
+  if(e1 || e2 || e3){ alert('Delete failed: ' + (e3 || e1 || e2).message); return; }
   renderMainContent();
 }
 window.deleteCampaign = deleteCampaign;
