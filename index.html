@@ -2372,7 +2372,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.07.16.02';
+const BUILD_VERSION = '2026.07.16.03';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -7666,6 +7666,14 @@ function renderAgentModalUI(existing, editId, availablePrograms, isOwner, isAdmi
     </div>
     ` : '<input type="hidden" id="ag-inv-mgr" value="' + (e.is_inventory_manager ? 'on' : '') + '"/><input type="hidden" id="ag-payroll-mgr" value="' + (e.is_payroll_manager ? 'on' : '') + '"/><input type="hidden" id="ag-rate-mgr" value="' + (e.can_manage_rates ? 'on' : '') + '"/><input type="hidden" id="ag-tool-builder" value="' + (e.is_tool_builder ? 'on' : '') + '"/>'}
 
+    <label style="display:${isAdmin ? 'flex' : 'none'};align-items:center;gap:10px;cursor:pointer;padding:10px 12px;background:rgba(0,198,255,0.05);border:1px solid rgba(0,198,255,0.25);border-radius:8px;margin-top:8px;">
+      <input type="checkbox" id="ag-signed-elsewhere" ${e.doc_overrides?.agent_contract ? 'checked' : ''} style="width:18px;height:18px;accent-color:#00C6FF;flex-shrink:0;"/>
+      <div style="flex:1;">
+        <div style="font-weight:600;color:#00C6FF;font-size:14px;">📄 Already signed onboarding documents elsewhere</div>
+        <div style="font-size:11.5px;color:rgba(255,255,255,0.55);margin-top:2px;line-height:1.5;">Check this if the contract was signed outside the system before they got back-office access. Skips the in-app sign prompt. Upload the actual signed copy afterward from their profile → 📤 Upload Signed Contract.</div>
+      </div>
+    </label>
+
     <div class="form-group">
       <label class="form-label">Programs — check all that this user should access</label>
       <div>${programCheckboxes || '<div style="color:rgba(255,255,255,0.4);font-size:12.5px;">No programs available.</div>'}</div>
@@ -7787,6 +7795,8 @@ async function saveAgent(editId){
   const can_manage_rates = rateMgrEl ? (rateMgrEl.type === 'checkbox' ? rateMgrEl.checked : rateMgrEl.value === 'on') : false;
   const toolBuilderEl = document.getElementById('ag-tool-builder');
   const is_tool_builder = toolBuilderEl ? (toolBuilderEl.type === 'checkbox' ? toolBuilderEl.checked : toolBuilderEl.value === 'on') : false;
+  const signedElsewhereEl = document.getElementById('ag-signed-elsewhere');
+  const signed_elsewhere = signedElsewhereEl ? signedElsewhereEl.checked : false;
   const msg = document.getElementById('ag-msg');
 
   if(!full_name || !email){ msg.innerHTML = '<span style="color:#F87171;">Name and email are required.</span>'; return; }
@@ -7838,8 +7848,24 @@ async function saveAgent(editId){
       updateData.can_manage_rates = can_manage_rates;
       updateData.is_tool_builder = is_tool_builder;
     }
+    // "Signed elsewhere" is office-only (owner/admin), same gate as the
+    // dedicated Manage Documents modal. Merge into doc_overrides so this
+    // doesn't clobber any other step overrides already set there.
+    if(['owner','admin'].includes(currentProfile.role)){
+      const { data: existingProf } = await sb.from('profiles').select('doc_overrides').eq('id', editId).maybeSingle();
+      const overrides = existingProf?.doc_overrides || {};
+      if(signed_elsewhere){
+        overrides.agent_contract = overrides.agent_contract || { overridden_by: currentProfile.id, overridden_at: new Date().toISOString() };
+      } else {
+        delete overrides.agent_contract;
+      }
+      updateData.doc_overrides = overrides;
+    }
     const { error } = await sb.from('profiles').update(updateData).eq('id', editId);
     if(error){ msg.innerHTML = '<span style="color:#F87171;">'+error.message+'</span>'; return; }
+    if(signed_elsewhere && ['owner','admin'].includes(currentProfile.role)){
+      await _applySignedElsewhereToWizardSteps(editId, currentProfile.full_name || currentProfile.email);
+    }
     closeAllModals();
     if(editId === currentProfile.id){ await loadCurrentProfile(); enterBackOffice(); return; }
     renderMainContent();
@@ -7885,6 +7911,16 @@ async function saveAgent(editId){
 
     const newUserId = data?.user_id;
 
+    // "Signed elsewhere" checkbox, office-only — set right at creation so
+    // it's in place before the agent's first login, no separate step needed.
+    if(newUserId && signed_elsewhere && ['owner','admin'].includes(currentProfile.role)){
+      try {
+        await sb.from('profiles').update({
+          doc_overrides: { agent_contract: { overridden_by: currentProfile.id, overridden_at: new Date().toISOString() } }
+        }).eq('id', newUserId);
+      } catch(e){ console.warn('Failed to set signed-elsewhere override at creation:', e); }
+    }
+
     // Auto-assign contracts for this agent's programs (filtered by their role)
     if(newUserId) await autoAssignContracts(newUserId, programs, role);
 
@@ -7896,6 +7932,13 @@ async function saveAgent(editId){
     // gone now. Every active packet matching the agent's program(s)
     // (filtered by role) gets assigned the instant the account is born.
     if(newUserId) await autoAssignOnboardingPackets(newUserId, programs, role);
+
+    // MUST run AFTER autoAssignOnboardingPackets — the wizard steps this
+    // marks complete don't exist until that call creates them. Doing this
+    // before would silently update zero rows.
+    if(newUserId && signed_elsewhere && ['owner','admin'].includes(currentProfile.role)){
+      await _applySignedElsewhereToWizardSteps(newUserId, currentProfile.full_name || currentProfile.email);
+    }
 
     // Send welcome email — best-effort
     let emailStatus = '';
@@ -8345,6 +8388,73 @@ async function openReinstateModal(id, name){
 // a box marks that step complete regardless of actual signed status (used
 // for agents who signed before getting back-office access). Office-only —
 // gated at the button level (isOwner||isAdmin) and again here.
+
+// BUG FIX 2026-07-16: profile.doc_overrides only affected the OLDER
+// candidate-stage flow (_loadStepStatuses / renderOnboardingContractStep /
+// renderOnboardingConsentForm). Real agents actually go through a SEPARATE
+// wizard system (agent_onboarding + agent_onboarding_steps, driven by
+// profile.onboarding_status, opened via openOnboardingWizard) which never
+// checked doc_overrides at all — so the sign prompt kept showing regardless
+// of the override. This helper closes that gap by directly marking the
+// matching wizard steps complete. Only touches step_type 'document' and
+// 'background_check' (the actual signature/authorization steps) — NEVER
+// personal_info, w9, direct_deposit, id_upload, profile_photo, or
+// emergency_contact, since those collect real data (SSN, banking, ID scans)
+// that an office override has no business fabricating.
+async function _applySignedElsewhereToWizardSteps(userId, overriddenByName){
+  try {
+    const { data: packets } = await sb.from('agent_onboarding').select('id, status').eq('user_id', userId);
+    if(!packets || packets.length === 0) return { updated: 0 };
+    const packetIds = packets.map(p => p.id);
+    const { data: steps } = await sb.from('agent_onboarding_steps')
+      .select('id, step_type, status, agent_onboarding_id').in('agent_onboarding_id', packetIds)
+      .in('step_type', ['document','background_check'])
+      .neq('status', 'complete');
+    let updated = 0;
+    if(steps && steps.length > 0){
+      const nowIso = new Date().toISOString();
+      for(const s of steps){
+        await sb.from('agent_onboarding_steps').update({
+          status: 'complete',
+          completed_at: nowIso,
+          submitted_data: {
+            overridden: true,
+            signature_value: 'Signed elsewhere — marked by office' + (overriddenByName ? ' (' + overriddenByName + ')' : ''),
+          }
+        }).eq('id', s.id);
+        updated++;
+      }
+    }
+    if(updated === 0) return { updated: 0 };
+
+    // Replicate wizardSubmit's completion cascade — if this override just
+    // completed the LAST remaining step(s) in a packet, that packet (and
+    // possibly the whole profile) needs to flip to complete too, or the
+    // person stays trapped in the lockout screen despite a 100% bar.
+    for(const pk of packets){
+      if(pk.status === 'complete') continue;
+      const { data: allSteps } = await sb.from('agent_onboarding_steps').select('status').eq('agent_onboarding_id', pk.id);
+      const allDone = (allSteps || []).length > 0 && (allSteps || []).every(s => s.status === 'complete');
+      if(allDone){
+        await sb.from('agent_onboarding').update({ status:'complete', completed_at: new Date().toISOString() }).eq('id', pk.id);
+      }
+    }
+    const { data: allPackets } = await sb.from('agent_onboarding').select('status').eq('user_id', userId);
+    const everythingDone = (allPackets || []).length > 0 && (allPackets || []).every(p => p.status === 'complete');
+    if(everythingDone){
+      await sb.from('profiles').update({
+        onboarding_status: 'complete',
+        onboarding_completed_at: new Date().toISOString()
+      }).eq('id', userId);
+      try { notifyAdminsOnboardingComplete(); } catch(_){}
+    }
+    return { updated };
+  } catch(e){
+    console.warn('_applySignedElsewhereToWizardSteps failed:', e);
+    return { updated: 0, error: e.message };
+  }
+}
+window._applySignedElsewhereToWizardSteps = _applySignedElsewhereToWizardSteps;
 async function openDocOverridesModal(id, name){
   if(!['owner','admin'].includes(currentProfile?.role)){ alert('Access denied.'); return; }
   document.getElementById('modal-box').innerHTML = '<div style="padding:30px;color:rgba(255,255,255,0.5);">Loading documents…</div>';
@@ -8396,6 +8506,12 @@ async function toggleDocOverride(userId, stepId, checked, name){
   }
   const { error } = await sb.from('profiles').update({ doc_overrides: overrides }).eq('id', userId);
   if(error){ alert('Failed to save: ' + error.message); return; }
+  // Also unblock the SEPARATE wizard lockout system (agent_onboarding_steps)
+  // whenever a contract/consent step is being marked signed-elsewhere —
+  // this is the fix for the real reported bug (agent still saw sign prompt).
+  if(checked){
+    await _applySignedElsewhereToWizardSteps(userId, currentProfile.full_name || currentProfile.email);
+  }
   // Re-render the modal so status labels reflect the change immediately.
   openDocOverridesModal(userId, name);
 }
@@ -12569,6 +12685,39 @@ async function renderOnboardingContractStep(el){
   const pending = assignments.find(a => a.status === 'pending');
   const signed = assignments.find(a => a.status === 'signed');
 
+  // Office "signed elsewhere" override — BUG FIX 2026-07-16: this screen
+  // used to only check contract_assignments directly, completely ignoring
+  // profile.doc_overrides, so an overridden agent still saw the sign
+  // prompt. Every step in every flow uses the id 'agent_contract' for its
+  // contract step, so this check is safe across Reliant/B2B/default flows.
+  let overrideInfo = null;
+  try {
+    const { data: prof } = await sb.from('profiles').select('doc_overrides').eq('id', currentProfile.id).maybeSingle();
+    overrideInfo = prof?.doc_overrides?.agent_contract || null;
+  } catch(_){}
+
+  if(overrideInfo && !signed){
+    el.innerHTML = `
+      <button class="bo-back-btn show-on-mobile" onclick="boShowAdmin('onboarding-packet')">← Back to Packet</button>
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:18px;">
+        <div>
+          <div style="font-size:11px;color:#00C6FF;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:6px;">On File</div>
+          <h1 style="font-family:'Bebas Neue',sans-serif;font-size:38px;color:#fff;line-height:1;">📜 Field Sales Agent Contract</h1>
+        </div>
+        <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('onboarding-packet')" style="padding:7px 14px;font-size:12px;">← Back</button>
+      </div>
+      <div class="bo-card" style="background:linear-gradient(135deg,rgba(0,198,255,0.08),rgba(0,198,255,0));border:1px solid rgba(0,198,255,0.3);">
+        <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+          <div style="width:54px;height:54px;border-radius:50%;background:rgba(0,198,255,0.15);display:flex;align-items:center;justify-content:center;font-size:30px;color:#00C6FF;flex-shrink:0;">✓</div>
+          <div style="flex:1;min-width:200px;">
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#00C6FF;letter-spacing:1px;">Signed Elsewhere — On File With The Office</div>
+            <div style="font-size:13px;color:rgba(255,255,255,0.7);margin-top:4px;">Your office has this contract on record. No signature needed here.</div>
+          </div>
+        </div>
+      </div>`;
+    return;
+  }
+
   el.innerHTML = `
     <button class="bo-back-btn show-on-mobile" onclick="boShowAdmin('onboarding-packet')">← Back to Packet</button>
     <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:18px;">
@@ -12698,6 +12847,36 @@ async function renderOnboardingConsentForm(el, consentType){
         </div>`;
       return;
     }
+  }
+
+  // Office "signed elsewhere" override — same bug class as the contract
+  // step: step id equals consentType for every consent step across every
+  // flow, so this check is safe everywhere. Fixed 2026-07-16.
+  let consentOverride = null;
+  try {
+    const { data: prof } = await sb.from('profiles').select('doc_overrides').eq('id', currentProfile.id).maybeSingle();
+    consentOverride = prof?.doc_overrides?.[consentType] || null;
+  } catch(_){}
+  if(consentOverride){
+    el.innerHTML = `
+      <button class="bo-back-btn show-on-mobile" onclick="boShowAdmin('onboarding-packet')">← Back to Packet</button>
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:18px;">
+        <div>
+          <div style="font-size:11px;color:#00C6FF;font-weight:700;letter-spacing:2.5px;text-transform:uppercase;margin-bottom:6px;">On File</div>
+          <h1 style="font-family:'Bebas Neue',sans-serif;font-size:34px;color:#fff;line-height:1.1;">${cfg.icon} ${escapeHtml(cfg.label)}</h1>
+        </div>
+        <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('onboarding-packet')" style="padding:7px 14px;font-size:12px;">← Back</button>
+      </div>
+      <div class="bo-card" style="background:linear-gradient(135deg,rgba(0,198,255,0.08),rgba(0,198,255,0));border:1px solid rgba(0,198,255,0.3);">
+        <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+          <div style="width:54px;height:54px;border-radius:50%;background:rgba(0,198,255,0.15);display:flex;align-items:center;justify-content:center;font-size:30px;color:#00C6FF;flex-shrink:0;">✓</div>
+          <div style="flex:1;min-width:200px;">
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#00C6FF;letter-spacing:1px;">Signed Elsewhere — On File With The Office</div>
+            <div style="font-size:13px;color:rgba(255,255,255,0.7);margin-top:4px;">Your office has this on record. No signature needed here.</div>
+          </div>
+        </div>
+      </div>`;
+    return;
   }
 
   // Load existing signature (if any) so we show a locked view
