@@ -1217,7 +1217,8 @@ window.addEventListener("DOMContentLoaded",function(){
   <div class="portal-header">
     <div style="display:flex;align-items:center;gap:16px;">
       <button id="bo-hamburger" class="bo-hamburger" onclick="toggleBoSidebar()" aria-label="Open menu" style="display:none;background:none;border:none;color:#fff;font-size:24px;cursor:pointer;padding:6px 10px;border-radius:8px;line-height:1;flex-shrink:0;">☰</button>
-      <div onclick="showPage('home')" style="cursor:pointer;"><span class="bo-brand-text" style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:2px;">CIRCLE SOLUTIONS</span></div>
+      <div onclick="goBoHomeOrPublic()" style="cursor:pointer;"><span class="bo-brand-text" style="font-family:'Bebas Neue',sans-serif;font-size:22px;color:#fff;letter-spacing:2px;">CIRCLE SOLUTIONS</span></div>
+      <button onclick="boGoBack()" title="Back to previous page" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.15);color:rgba(255,255,255,0.75);border-radius:50px;padding:7px 14px;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:6px;flex-shrink:0;min-height:38px;">←<span class="bo-home-label">Back</span></button>
       <button onclick="goBoHome()" title="Back-office home" style="background:rgba(0,255,136,0.1);border:1px solid rgba(0,255,136,0.35);color:#00FF88;border-radius:50px;padding:7px 14px;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;gap:6px;flex-shrink:0;min-height:38px;">🏠<span class="bo-home-label">Home</span></button>
       <div id="bo-role-badge" class="role-badge role-agent" style="padding:5px 13px;font-size:11px;"></div>
     </div>
@@ -2372,7 +2373,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.07.16.03';
+const BUILD_VERSION = '2026.07.16.04';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -3330,7 +3331,44 @@ function getAccessibleCampaignsForProgram(programId){
   return all.filter(c => myCampaigns.has(c.id));
 }
 
+// ─── Simple in-app back-navigation history (Calvin, 2026-07-16: "I need a
+// back button to take me to the previous page"). Captures a snapshot of
+// nav state before each navigation so boGoBack() can restore it. Capped so
+// it never grows unbounded.
+window._boNavHistory = window._boNavHistory || [];
+function _boPushNavHistory(){
+  window._boNavHistory.push({
+    activeAdminView, activeProgramId, activeCampaignId,
+    activeSubView: (typeof activeSubView !== 'undefined' ? activeSubView : 'dashboard')
+  });
+  if(window._boNavHistory.length > 40) window._boNavHistory.shift();
+}
+function boGoBack(){
+  const prev = window._boNavHistory.pop();
+  if(!prev){ goBoHome(); return; }
+  activeAdminView = prev.activeAdminView;
+  activeProgramId = prev.activeProgramId;
+  activeCampaignId = prev.activeCampaignId;
+  try { if(typeof activeSubView !== 'undefined') activeSubView = prev.activeSubView; } catch(_){}
+  try { _persistNavState(); } catch(_){}
+  renderSidebar();
+  renderMainContent();
+  closeBoSidebar();
+  scrollMainToTop();
+}
+window.boGoBack = boGoBack;
+
+// Logo click: always go to back-office home for a signed-in user. Never
+// route a logged-in person to the public marketing page — that page has
+// no back-office navigation at all, so a stray click there used to strand
+// people (Calvin, 2026-07-16: "stuck and can't move").
+function goBoHomeOrPublic(){
+  if(currentProfile){ goBoHome(); } else { showPage('home'); }
+}
+window.goBoHomeOrPublic = goBoHomeOrPublic;
+
 function boSelectProgram(programId){
+  _boPushNavHistory();
   activeProgramId = programId;
   activeAdminView = null;
   activeSubView = 'dashboard';
@@ -3363,6 +3401,7 @@ function boSelectProgram(programId){
 }
 
 function boSelectCampaign(campaignId){
+  _boPushNavHistory();
   activeCampaignId = campaignId;
   activeSubView = 'dashboard';
   renderSidebar();
@@ -3374,6 +3413,7 @@ function boSelectCampaign(campaignId){
 
 function boBackToCampaignChooser(){
   // Used from the program view "← Switch Campaign" button
+  _boPushNavHistory();
   activeCampaignId = null;
   activeSubView = 'dashboard';
   renderSidebar();
@@ -3386,6 +3426,7 @@ window.boSelectCampaign = boSelectCampaign;
 window.boBackToCampaignChooser = boBackToCampaignChooser;
 
 function boShowAdmin(view){
+  _boPushNavHistory();
   activeAdminView = view;
   activeProgramId = null;
   activeCampaignId = null;
@@ -3402,6 +3443,7 @@ function boShowAdmin(view){
 // Home button: jump back to the back-office landing (the "Welcome" home with
 // today's check-in activity) without hunting through the sidebar dropdown.
 function goBoHome(){
+  _boPushNavHistory();
   activeAdminView = null;
   activeProgramId = null;
   activeCampaignId = null;
@@ -3492,6 +3534,14 @@ function renderMainContent(){
     showAccountLockoutScreen();
     return;
   }
+
+  // BUG FIX 2026-07-16: several lockout/holding screens above set
+  // bo-sidebar to display:none and return early. If any of those code
+  // paths ever left the sidebar hidden without correctly restoring it on
+  // the next normal render (Calvin reported getting stuck with no way to
+  // navigate), this guarantees it's always visible again once we reach
+  // normal routing below.
+  { const sb_ = document.getElementById('bo-sidebar'); if(sb_ && sb_.style.display === 'none') sb_.style.display = ''; }
 
   if(activeAdminView === 'profile'){ renderMyProfile(el); return; }
   if(activeAdminView === 'credentials'){ el.innerHTML = renderChangePassword(); return; }
@@ -23315,13 +23365,28 @@ async function checkAndShowOnboardingLockout(){
     .eq('status', 'in_progress');
 
   if(!packets || packets.length === 0){
-    // No packets assigned yet — show a holding screen.
-    // Phase 3.36 — Calvin's go-live rule: every new retail agent SHOULD
-    // already have a packet auto-assigned by saveAgent → autoAssignOnboardingPackets.
-    // If we're here, either (a) no active packet exists for any of their
-    // programs (configuration gap on the owner side), or (b) the auto-
-    // assign failed mid-flight. Tell them exactly that — don't tell them
-    // "your manager will send it shortly".
+    // BUG FIX 2026-07-16: zero 'in_progress' packets does NOT mean "no
+    // packet was ever assigned" — it also happens when every packet is
+    // already 'complete' but profile.onboarding_status never flipped
+    // (e.g. a write hiccup in the completion cascade, or a step marked
+    // complete outside the normal wizardSubmit path). Previously this
+    // showed a dead-end "SETUP INCOMPLETE — Sign Out" screen even for
+    // agents who had genuinely finished everything, permanently stranding
+    // them. Self-heal: check for ANY packet at all before concluding
+    // nothing was ever assigned.
+    const { data: anyPackets } = await sb.from('agent_onboarding').select('id, status').eq('user_id', currentProfile.id);
+    if(anyPackets && anyPackets.length > 0 && anyPackets.every(p => p.status === 'complete')){
+      await sb.from('profiles').update({
+        onboarding_status: 'complete',
+        onboarding_completed_at: new Date().toISOString()
+      }).eq('id', currentProfile.id);
+      currentProfile.onboarding_status = 'complete';
+      const sidebar = document.getElementById('bo-sidebar');
+      if(sidebar) sidebar.style.display = '';
+      renderMainContent();
+      return;
+    }
+    // No onboarding packet is available for your assigned program(s) yet. This is a setup issue on our side, not yours.
     document.getElementById('bo-content').innerHTML = `
       <div style="max-width:560px;margin:80px auto;text-align:center;padding:40px;background:#0d0d0d;border:1px solid rgba(255,255,255,0.08);border-radius:18px;">
         <div style="font-size:60px;margin-bottom:18px;">⚠️</div>
