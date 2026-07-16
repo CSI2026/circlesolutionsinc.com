@@ -2373,7 +2373,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.07.16.08';
+const BUILD_VERSION = '2026.07.16.09';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -4005,8 +4005,8 @@ async function renderDashboard(el, prog, canManage){
   try {
     const { data: myEnrollments } = await sb.from('enrollments')
       .select('*').eq('program_id', prog.id).eq('user_id', currentUser.id);
-    const myTotal = (myEnrollments || []).length;
-    const myActive = (myEnrollments || []).filter(e => e.status === 'active').length;
+    let myTotal = (myEnrollments || []).length;
+    let myActive = (myEnrollments || []).filter(e => e.status === 'active').length;
 
     let teamTotal = null;
     let pipelineAgents = [];
@@ -4025,6 +4025,33 @@ async function renderDashboard(el, prog, canManage){
         .order('onboarding_status', { ascending: true });
       // Only show agents who haven't been unlocked yet
       pipelineAgents = (pa || []).filter(a => !a.codes_unlocked || a.onboarding_status !== 'complete').slice(0, 10);
+    }
+
+    // Calvin, 2026-07-16: "my enrollment, team total etc should also be
+    // working" — these stat cards were reading straight from `enrollments`,
+    // which (same root cause as the scoreboard tile and leaderboard) is
+    // only written at approval time. A fresh pending submission showed as
+    // zero here too. Same fix, same rule: count pending Reliant sales now,
+    // drop out automatically if later rejected, replaced by the real
+    // approved count once approved (no double-count since a pending row's
+    // status flips away from 'pending' the moment it's decided either way).
+    if((prog.id || '').trim().toLowerCase() === 'retail'){
+      try {
+        const { data: myPending } = await sb.from('pending_reliant_sales')
+          .select('id', { count: 'exact' })
+          .eq('agent_id', currentUser.id)
+          .eq('status', 'pending');
+        const myPendingCount = myPending?.length || 0;
+        myTotal += myPendingCount;
+        myActive += myPendingCount;
+
+        if(canManage){
+          const { count: teamPendingCount } = await sb.from('pending_reliant_sales')
+            .select('*', { count: 'exact', head: true })
+            .eq('status', 'pending');
+          teamTotal = (teamTotal || 0) + (teamPendingCount || 0);
+        }
+      } catch(e){ console.warn('Pending Reliant stat-card overlay failed:', e); }
     }
 
     const recent = (myEnrollments || []).slice(0, 5);
