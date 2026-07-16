@@ -2372,7 +2372,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.07.15.02';
+const BUILD_VERSION = '2026.07.16.02';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -2684,6 +2684,22 @@ async function doLogin(e){
   }
 
   await loadCurrentProfile();
+
+  // Block sign-in for deactivated or contract-ended accounts. The account
+  // access itself was previously not gated by this — active/contract_ended_at
+  // only showed as a badge. This makes it a real lock.
+  if(currentProfile && (currentProfile.active === false || currentProfile.contract_ended_at)){
+    const reason = currentProfile.contract_ended_at
+      ? 'Your agreement with the company ended on ' + new Date(currentProfile.contract_ended_at).toLocaleDateString() + '.'
+      : 'Your account has been deactivated.';
+    await sb.auth.signOut();
+    currentUser = null;
+    currentProfile = null;
+    errBox.textContent = reason + ' Contact your office if you believe this is a mistake.';
+    errBox.style.display = 'block';
+    return;
+  }
+
   enterBackOffice();
 }
 
@@ -2768,6 +2784,17 @@ async function loadCurrentProfile(){
     if(!ok){
       await new Promise(r => setTimeout(r, 600));
       ok = await loadCurrentProfile();
+    }
+    if(ok){
+      // Same lockout enforced here as in doLogin() — a session token alone
+      // shouldn't grant access if the account was deactivated/ended after
+      // the token was issued.
+      if(currentProfile && (currentProfile.active === false || currentProfile.contract_ended_at)){
+        await sb.auth.signOut();
+        currentUser = null;
+        currentProfile = null;
+        ok = false;
+      }
     }
     if(ok){
       // If they were on a portal page refresh, bring them back; otherwise stay on whatever page
@@ -2967,6 +2994,7 @@ function enterBackOffice(){
   // Phase 3.28: Show the huge flyer banner for unacknowledged alerts +
   // fresh audit activity. Owner / admin / payroll managers only.
   try { renderUrgentFlyer(); } catch(e){ console.warn('Flyer render failed:', e); }
+  try { renderCampaignBillboard(); } catch(e){ console.warn('Campaign billboard render failed:', e); }
 
   // Phase 3.33 — if the agent reloaded mid-shift, restart the geofence
   // monitor from the persisted sessionStorage anchor.
@@ -3023,6 +3051,7 @@ function renderSidebar(){
     adminNavItems.push({ id:'payroll-hours', label:'⏱️ Payroll Hours', group:G3 });
     adminNavItems.push({ id:'payroll-log-sheets', label:'📋 Payroll Log Sheets', group:G3 });
     adminNavItems.push({ id:'reliant-pending-approvals', label:'⚡ Reliant Approvals', group:G3 });
+    adminNavItems.push({ id:'campaigns-admin', label:'🎁 Campaigns', group:G3 });
     adminNavItems.push({ id:'lock-alerts', label:'🚨 Lock Alerts', group:G3 });
     // Business setup — structure & config, touched occasionally
     adminNavItems.push({ id:'programs-admin', label:'🎯 Programs & Campaigns', group:G4 });
@@ -3481,6 +3510,7 @@ function renderMainContent(){
   if(activeAdminView === 'contract-builder'){ renderContractBuilder(el); return; }
   if(activeAdminView === 'contract-templates'){ renderContractBuilder(el); return; }  // backward compat
   if(activeAdminView === 'contract-hub'){ renderContractHub(el); return; }
+  if(activeAdminView === 'campaigns-admin'){ renderCampaignsAdmin(el); return; }
   if(activeAdminView === 'forms-admin'){ renderFormsAdmin(el); return; }
   if(activeAdminView === 'my-forms'){ renderMyForms(el); return; }
   if(activeAdminView === 'my-contracts'){ renderMyContracts(el); return; }
@@ -4354,14 +4384,22 @@ async function renderLeaderboard(el, prog){
   const metric = prog.leaderboard_metric || 'enrollment_count';
   const showDollars = !!prog.leaderboard_show_dollars;
 
+  // Selectable views (Calvin, 2026-07-16): Program (this program only),
+  // Company-wide (every program together), Role-segmented (leaders ranked
+  // against leaders, agents ranked against agents — never mixed).
+  if(typeof window._lbViewMode !== 'string') window._lbViewMode = 'program';
+  const viewMode = window._lbViewMode;
+  const LEADER_ROLES = ['manager','team_lead'];
+
   // Pull enrollments in this period
   const startISO = period.start.toISOString().split('T')[0];
   const endISO = period.end.toISOString().split('T')[0];
-  const { data: enrollments } = await sb.from('enrollments')
+  let eq = sb.from('enrollments')
     .select('user_id,status,commission,enrollment_date,profiles!enrollments_user_id_fkey(full_name,email,avatar_url,role,active)')
-    .eq('program_id', prog.id)
     .gte('enrollment_date', startISO)
     .lte('enrollment_date', endISO);
+  if(viewMode !== 'company') eq = eq.eq('program_id', prog.id);
+  const { data: enrollments } = await eq;
 
   // Aggregate per user
   const tally = {};
@@ -4386,19 +4424,27 @@ async function renderLeaderboard(el, prog){
     if(typeof e.commission === 'number') tally[uid].commission += e.commission;
   });
 
-  // Score each entry by the chosen metric
-  const ranked = Object.values(tally).map(t => {
-    let score;
-    if(metric === 'enrollment_active_count') score = t.active;
-    else if(metric === 'commission_sum') score = t.commission;
-    else score = t.total; // default: enrollment_count
-    return { ...t, score };
-  }).filter(t => t.score > 0)
-    .sort((a,b) => b.score - a.score || b.total - a.total);
+  const scoreOf = (t) => metric === 'enrollment_active_count' ? t.active : metric === 'commission_sum' ? t.commission : t.total;
+
+  // Score + sort helper (reused across role-segmented sub-lists)
+  const buildRanked = (people) => people.map(t => ({ ...t, score: scoreOf(t) }))
+    .filter(t => t.score > 0).sort((a,b) => b.score - a.score || b.total - a.total);
+
+  const allTallied = Object.values(tally);
+  const ranked = viewMode === 'role' ? [] : buildRanked(allTallied);
+  const rankedLeaders = viewMode === 'role' ? buildRanked(allTallied.filter(t => LEADER_ROLES.includes(t.role))) : [];
+  const rankedAgents  = viewMode === 'role' ? buildRanked(allTallied.filter(t => !LEADER_ROLES.includes(t.role))) : [];
 
   // Find current user's rank for "your rank" pill
   const myRank = ranked.findIndex(r => r.userId === currentProfile.id) + 1;
   const me = ranked.find(r => r.userId === currentProfile.id);
+
+  const viewToggle = `
+    <div style="display:flex;gap:6px;flex-wrap:wrap;">
+      <button class="bo-btn ${viewMode === 'program' ? 'bo-btn-primary' : 'bo-btn-ghost'}" style="padding:6px 12px;font-size:11px;" onclick="lbSetViewMode('program')">${prog.icon || '🎯'} Program</button>
+      <button class="bo-btn ${viewMode === 'company' ? 'bo-btn-primary' : 'bo-btn-ghost'}" style="padding:6px 12px;font-size:11px;" onclick="lbSetViewMode('company')">🌐 Company-wide</button>
+      <button class="bo-btn ${viewMode === 'role' ? 'bo-btn-primary' : 'bo-btn-ghost'}" style="padding:6px 12px;font-size:11px;" onclick="lbSetViewMode('role')">🎭 Leaders vs Agents</button>
+    </div>`;
 
   // Period nav buttons
   const periodNav = `
@@ -4417,7 +4463,7 @@ async function renderLeaderboard(el, prog){
     <div class="bo-card">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;margin-bottom:18px;">
         <div>
-          <div style="font-family:'Bebas Neue',sans-serif;font-size:28px;color:#fff;letter-spacing:1px;">🏆 ${escapeHtml(prog.name)} Leaderboard</div>
+          <div style="font-family:'Bebas Neue',sans-serif;font-size:28px;color:#fff;letter-spacing:1px;">🏆 ${viewMode === 'company' ? 'Company-wide' : escapeHtml(prog.name)} Leaderboard</div>
           <div style="font-size:12px;color:rgba(255,255,255,0.45);margin-top:2px;">Ranking by ${metricLabel.toLowerCase()}${prog.leaderboard_reset === 'never' ? '' : ' · resets ' + prog.leaderboard_reset}</div>
         </div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
@@ -4426,7 +4472,9 @@ async function renderLeaderboard(el, prog){
         </div>
       </div>
 
-      ${myRank > 0 && myRank > 10 && me ? `
+      <div style="margin-bottom:16px;">${viewToggle}</div>
+
+      ${viewMode !== 'role' && myRank > 0 && myRank > 10 && me ? `
         <div style="background:rgba(255,107,0,0.06);border:1px solid rgba(255,107,0,0.25);border-radius:10px;padding:12px;margin-bottom:14px;display:flex;align-items:center;gap:12px;">
           <div style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#FF6B00;min-width:40px;text-align:center;">#${myRank}</div>
           <div style="flex:1;">
@@ -4435,44 +4483,65 @@ async function renderLeaderboard(el, prog){
           </div>
         </div>` : ''}
 
-      ${ranked.length === 0 ? `
-        <div style="text-align:center;padding:40px 20px;color:rgba(255,255,255,0.4);">
-          <div style="font-size:40px;margin-bottom:8px;">📊</div>
-          <div style="font-size:14px;">No enrollments logged in this period yet.</div>
-          ${offset === 0 ? '<div style="font-size:12px;margin-top:6px;">Be the first on the board — log an enrollment from the Dashboard.</div>' : ''}
+      ${viewMode === 'role' ? `
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px;">
+          <div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#00C6FF;letter-spacing:1.5px;margin-bottom:10px;">🎭 LEADERS</div>
+            ${_lbRenderRows(rankedLeaders, metric, showDollars, offset)}
+          </div>
+          <div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:#FF6B00;letter-spacing:1.5px;margin-bottom:10px;">👤 AGENTS</div>
+            ${_lbRenderRows(rankedAgents, metric, showDollars, offset)}
+          </div>
         </div>
-      ` : `
-        <div style="display:flex;flex-direction:column;gap:6px;">
-          ${ranked.slice(0, 50).map((r, i) => {
-            const rank = i + 1;
-            const medal = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : '';
-            const rankColor = rank === 1 ? '#FFD700' : rank === 2 ? '#C0C0C0' : rank === 3 ? '#CD7F32' : 'rgba(255,255,255,0.4)';
-            const isMe = r.userId === currentProfile.id;
-            const avatar = r.avatar_url
-              ? `<img src="${r.avatar_url}" style="width:40px;height:40px;border-radius:50%;object-fit:cover;border:1px solid rgba(255,255,255,0.15);"/>`
-              : `<div style="width:40px;height:40px;border-radius:50%;background:${roleBadgeBg(r.role)};color:${roleBadgeColor(r.role)};display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px;">${(r.name || '?').substring(0,1).toUpperCase()}</div>`;
-            const scoreDisplay = metric === 'commission_sum'
-              ? '$' + r.score.toLocaleString(undefined, {minimumFractionDigits:0, maximumFractionDigits:0})
-              : r.score;
-            const subInfo = (showDollars && metric !== 'commission_sum')
-              ? '$' + r.commission.toFixed(0) + ' · ' + r.total + ' total'
-              : (metric === 'commission_sum' ? r.total + ' enrollments' : (r.active + ' active'));
-            return `
-              <div style="display:flex;align-items:center;gap:12px;padding:10px 14px;background:${isMe ? 'rgba(255,107,0,0.08)' : (rank <= 3 ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.02)')};border:1px solid ${isMe ? 'rgba(255,107,0,0.3)' : 'rgba(255,255,255,0.05)'};border-radius:10px;">
-                <div style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:${rankColor};min-width:48px;text-align:center;">${medal || '#'+rank}</div>
-                ${avatar}
-                <div style="flex:1;min-width:0;">
-                  <div style="font-size:13.5px;color:#fff;font-weight:600;">${escapeHtml(r.name)}${isMe ? ' <span style="color:#FF6B00;font-size:10.5px;font-weight:700;margin-left:4px;letter-spacing:1px;">YOU</span>' : ''}</div>
-                  <div style="font-size:11px;color:rgba(255,255,255,0.45);">${escapeHtml(subInfo)}</div>
-                </div>
-                <div style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:${rank <= 3 ? rankColor : '#fff'};letter-spacing:1px;min-width:60px;text-align:right;">${scoreDisplay}</div>
-              </div>`;
-          }).join('')}
-        </div>
-        ${ranked.length > 50 ? `<div style="text-align:center;color:rgba(255,255,255,0.4);font-size:11.5px;margin-top:12px;">Showing top 50 of ${ranked.length}</div>` : ''}
-      `}
+      ` : _lbRenderRows(ranked, metric, showDollars, offset)}
     </div>`;
 }
+
+// Shared row-renderer used by all three leaderboard view modes. Full list —
+// never truncated (Calvin, 2026-07-16: "full visible ranked list in every
+// view, not a truncated top-N").
+function _lbRenderRows(ranked, metric, showDollars, offset){
+  if(ranked.length === 0){
+    return `
+      <div style="text-align:center;padding:40px 20px;color:rgba(255,255,255,0.4);">
+        <div style="font-size:40px;margin-bottom:8px;">📊</div>
+        <div style="font-size:14px;">No enrollments logged in this period yet.</div>
+        ${offset === 0 ? '<div style="font-size:12px;margin-top:6px;">Be the first on the board — log an enrollment from the Dashboard.</div>' : ''}
+      </div>`;
+  }
+  return `
+    <div style="display:flex;flex-direction:column;gap:6px;">
+      ${ranked.map((r, i) => {
+        const rank = i + 1;
+        const medal = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : '';
+        const rankColor = rank === 1 ? '#FFD700' : rank === 2 ? '#C0C0C0' : rank === 3 ? '#CD7F32' : 'rgba(255,255,255,0.4)';
+        const isMe = r.userId === currentProfile.id;
+        const avatar = r.avatar_url
+          ? `<img src="${r.avatar_url}" style="width:40px;height:40px;border-radius:50%;object-fit:cover;border:1px solid rgba(255,255,255,0.15);"/>`
+          : `<div style="width:40px;height:40px;border-radius:50%;background:${roleBadgeBg(r.role)};color:${roleBadgeColor(r.role)};display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px;">${(r.name || '?').substring(0,1).toUpperCase()}</div>`;
+        const scoreDisplay = metric === 'commission_sum'
+          ? '$' + r.score.toLocaleString(undefined, {minimumFractionDigits:0, maximumFractionDigits:0})
+          : r.score;
+        const subInfo = (showDollars && metric !== 'commission_sum')
+          ? '$' + r.commission.toFixed(0) + ' · ' + r.total + ' total'
+          : (metric === 'commission_sum' ? r.total + ' enrollments' : (r.active + ' active'));
+        return `
+          <div style="display:flex;align-items:center;gap:12px;padding:10px 14px;background:${isMe ? 'rgba(255,107,0,0.08)' : (rank <= 3 ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.02)')};border:1px solid ${isMe ? 'rgba(255,107,0,0.3)' : 'rgba(255,255,255,0.05)'};border-radius:10px;">
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:${rankColor};min-width:48px;text-align:center;">${medal || '#'+rank}</div>
+            ${avatar}
+            <div style="flex:1;min-width:0;">
+              <div style="font-size:13.5px;color:#fff;font-weight:600;">${escapeHtml(r.name)}${isMe ? ' <span style="color:#FF6B00;font-size:10.5px;font-weight:700;margin-left:4px;letter-spacing:1px;">YOU</span>' : ''}</div>
+              <div style="font-size:11px;color:rgba(255,255,255,0.45);">${escapeHtml(subInfo)}</div>
+            </div>
+            <div style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:${rank <= 3 ? rankColor : '#fff'};letter-spacing:1px;min-width:60px;text-align:right;">${scoreDisplay}</div>
+          </div>`;
+      }).join('')}
+    </div>`;
+}
+
+function lbSetViewMode(mode){ window._lbViewMode = mode; renderMainContent(); }
+window.lbSetViewMode = lbSetViewMode;
 
 function lbShiftPeriod(direction){
   if(direction === 'reset'){ window._lbOffset = 0; }
@@ -5573,6 +5642,8 @@ async function openAgentProfile(userId){
           <button class="bo-btn bo-btn-ghost" onclick="copyLoginLink('${agent.id}')">🔗 Copy Login Link</button>
           <button class="bo-btn bo-btn-ghost" style="border-color:rgba(255,200,0,0.4);color:#FFC800;" onclick="cancelPendingContractsFor('${agent.id}', '${(agent.full_name || agent.email).replace(/'/g,"\\'")}')">🚫 Cancel Pending Contracts</button>
           <button class="bo-btn bo-btn-ghost" style="border-color:rgba(198,40,40,0.4);color:#F87171;" onclick="openUrgentMessageModal('${agent.id}')">🚨 Send Urgent</button>
+          ${(isOwner || isAdmin) ? `<button class="bo-btn bo-btn-ghost" style="border-color:rgba(0,198,255,0.4);color:#00C6FF;" title="Mark documents as already signed elsewhere, or view current status" onclick="openDocOverridesModal('${agent.id}', '${(agent.full_name || agent.email).replace(/'/g,"\\'")}')">📄 Manage Documents</button>
+          <button class="bo-btn bo-btn-ghost" style="border-color:rgba(168,85,247,0.4);color:#A855F7;" title="Upload a scanned/PDF copy of a signed contract for recordkeeping" onclick="openUploadSignedDocModal('${agent.id}', '${(agent.full_name || agent.email).replace(/'/g,"\\'")}')">📤 Upload Signed Contract</button>` : ''}
           ${isOwner ? (agent.contract_ended_at
             ? `<button class="bo-btn bo-btn-ghost" style="border-color:rgba(0,255,136,0.4);color:#00FF88;" title="Clear the contract-ended record and restore this contractor" onclick="openReinstateModal('${agent.id}', '${(agent.full_name || agent.email).replace(/'/g,"\\'")}')">↩️ Reinstate</button>`
             : `<button class="bo-btn bo-btn-ghost" style="border-color:rgba(239,68,68,0.5);color:#F87171;" title="Permanently close this contractor's file with a record of their last day" onclick="openEndAgreementModal('${agent.id}', '${(agent.full_name || agent.email).replace(/'/g,"\\'")}')">🔴 End Agreement</button>`
@@ -8268,6 +8339,151 @@ async function openReinstateModal(id, name){
 
   renderMainContent();
 }
+
+// ─── Manage Documents: office-only "already signed elsewhere" overrides ───
+// Lists every step in the agent's onboarding flow with a checkbox. Checking
+// a box marks that step complete regardless of actual signed status (used
+// for agents who signed before getting back-office access). Office-only —
+// gated at the button level (isOwner||isAdmin) and again here.
+async function openDocOverridesModal(id, name){
+  if(!['owner','admin'].includes(currentProfile?.role)){ alert('Access denied.'); return; }
+  document.getElementById('modal-box').innerHTML = '<div style="padding:30px;color:rgba(255,255,255,0.5);">Loading documents…</div>';
+  document.getElementById('modal-backdrop').style.display = 'flex';
+
+  const { data: prof } = await sb.from('profiles').select('programs, role, doc_overrides').eq('id', id).maybeSingle();
+  const flow = _resolveOnboardingFlow(prof?.programs || [], prof?.role || 'agent');
+  const statuses = await _loadStepStatuses(id);
+  const overrides = prof?.doc_overrides || {};
+
+  const rows = flow.map(step => {
+    const st = statuses[step.id] || {};
+    const overridden = !!overrides[step.id];
+    const naturallyComplete = st.complete && !overridden;
+    let statusLabel, statusColor;
+    if(overridden){ statusLabel = '✓ Marked signed elsewhere'; statusColor = '#00C6FF'; }
+    else if(naturallyComplete){ statusLabel = '✓ Signed in-app'; statusColor = '#00FF88'; }
+    else { statusLabel = 'Not yet signed'; statusColor = 'rgba(255,255,255,0.4)'; }
+    return `
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid rgba(255,255,255,0.07);">
+        <div style="flex:1;">
+          <div style="font-size:14px;color:#fff;font-weight:600;">${step.icon || '📄'} ${escapeHtml(step.label)}</div>
+          <div style="font-size:12px;color:${statusColor};margin-top:2px;">${statusLabel}</div>
+        </div>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:12px;color:rgba(255,255,255,0.7);">
+          <input type="checkbox" ${overridden ? 'checked' : ''} onchange="toggleDocOverride('${id}','${step.id}',this.checked,'${(name||'').replace(/'/g,"\\'")}')" style="width:16px;height:16px;accent-color:#00C6FF;"/>
+          Signed elsewhere
+        </label>
+      </div>`;
+  }).join('');
+
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#00C6FF;margin-bottom:4px;letter-spacing:1px;">📄 Manage Documents</h2>
+    <div style="font-size:13px;color:rgba(255,255,255,0.6);margin-bottom:14px;">${escapeHtml(name)} — check a box for any document already signed outside the system. This unlocks that step for them without requiring an in-app signature.</div>
+    <div style="max-height:50vh;overflow-y:auto;">${rows || '<div style="color:rgba(255,255,255,0.4);padding:20px;text-align:center;">No onboarding steps found for this person&#39;s program.</div>'}</div>
+    <div style="display:flex;gap:10px;margin-top:16px;">
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Close</button>
+    </div>`;
+}
+
+async function toggleDocOverride(userId, stepId, checked, name){
+  if(!['owner','admin'].includes(currentProfile?.role)){ alert('Access denied.'); return; }
+  const { data: prof } = await sb.from('profiles').select('doc_overrides').eq('id', userId).maybeSingle();
+  const overrides = prof?.doc_overrides || {};
+  if(checked){
+    overrides[stepId] = { overridden_by: currentProfile.id, overridden_at: new Date().toISOString() };
+  } else {
+    delete overrides[stepId];
+  }
+  const { error } = await sb.from('profiles').update({ doc_overrides: overrides }).eq('id', userId);
+  if(error){ alert('Failed to save: ' + error.message); return; }
+  // Re-render the modal so status labels reflect the change immediately.
+  openDocOverridesModal(userId, name);
+}
+window.openDocOverridesModal = openDocOverridesModal;
+window.toggleDocOverride = toggleDocOverride;
+
+// ─── Upload a scanned/PDF copy of an already-signed contract ───
+// Recordkeeping only — does not affect onboarding step completion (use
+// Manage Documents / doc_overrides for that). Stored in the existing
+// 'onboarding-docs' bucket, indexed in agent_uploaded_documents.
+async function openUploadSignedDocModal(id, name){
+  if(!['owner','admin'].includes(currentProfile?.role)){ alert('Access denied.'); return; }
+  const { data: existing } = await sb.from('agent_uploaded_documents')
+    .select('id, title, file_name, uploaded_at').eq('user_id', id).order('uploaded_at', { ascending:false });
+
+  const list = (existing || []).map(d => `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.06);font-size:12.5px;">
+      <div><span style="color:#fff;">${escapeHtml(d.title)}</span> <span style="color:rgba(255,255,255,0.4);">— ${new Date(d.uploaded_at).toLocaleDateString()}</span></div>
+      <div style="display:flex;gap:8px;">
+        <button class="bo-btn bo-btn-ghost" style="padding:4px 10px;font-size:11px;" onclick="viewUploadedSignedDoc('${d.id}')">View</button>
+        <button class="bo-btn bo-btn-danger" style="padding:4px 10px;font-size:11px;" onclick="deleteUploadedSignedDoc('${d.id}','${id}','${(name||'').replace(/'/g,"\\'")}')">✕</button>
+      </div>
+    </div>`).join('') || '<div style="color:rgba(255,255,255,0.4);font-size:12.5px;padding:10px 0;">No files uploaded yet.</div>';
+
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:24px;color:#A855F7;margin-bottom:4px;letter-spacing:1px;">📤 Upload Signed Contract</h2>
+    <div style="font-size:13px;color:rgba(255,255,255,0.6);margin-bottom:14px;">${escapeHtml(name)} — attach a scan or PDF of a contract they signed outside the system, for your records.</div>
+    <div class="form-group" style="margin-bottom:10px;">
+      <label class="form-label">Document title</label>
+      <input id="usd-title" class="form-input" placeholder="e.g. Retail Sales Agent Contract (signed 2026-03-01)"/>
+    </div>
+    <div class="form-group" style="margin-bottom:14px;">
+      <label class="form-label">File (PDF or image)</label>
+      <input id="usd-file" type="file" accept="application/pdf,image/*" class="form-input"/>
+    </div>
+    <div id="usd-msg" style="margin-bottom:10px;font-size:13px;"></div>
+    <div style="display:flex;gap:10px;margin-bottom:16px;">
+      <button class="bo-btn bo-btn-primary" onclick="uploadSignedDocFile('${id}','${(name||'').replace(/'/g,"\\'")}')">📤 Upload</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Close</button>
+    </div>
+    <div style="border-top:1px solid rgba(255,255,255,0.08);padding-top:12px;">
+      <div style="font-size:11px;color:rgba(255,255,255,0.5);letter-spacing:1px;text-transform:uppercase;margin-bottom:6px;">Already on file</div>
+      ${list}
+    </div>`;
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+
+async function uploadSignedDocFile(userId, name){
+  const titleEl = document.getElementById('usd-title');
+  const fileEl = document.getElementById('usd-file');
+  const msg = document.getElementById('usd-msg');
+  const title = (titleEl?.value || '').trim();
+  const file = fileEl?.files?.[0];
+  if(!title){ msg.innerHTML = '<span style="color:#F87171;">Give the document a title.</span>'; return; }
+  if(!file){ msg.innerHTML = '<span style="color:#F87171;">Choose a file.</span>'; return; }
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.5);">Uploading…</span>';
+
+  const path = `signed-contracts/${userId}/${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g,'_')}`;
+  const { error: upErr } = await sb.storage.from('onboarding-docs').upload(path, file, { upsert: true });
+  if(upErr){ msg.innerHTML = '<span style="color:#F87171;">Upload failed: ' + upErr.message + '</span>'; return; }
+
+  const { error: insErr } = await sb.from('agent_uploaded_documents').insert({
+    user_id: userId, title, file_path: path, file_name: file.name, uploaded_by: currentProfile.id
+  });
+  if(insErr){ msg.innerHTML = '<span style="color:#F87171;">Saved the file but failed to record it: ' + insErr.message + '</span>'; return; }
+
+  openUploadSignedDocModal(userId, name);
+}
+
+async function viewUploadedSignedDoc(docId){
+  const { data: doc } = await sb.from('agent_uploaded_documents').select('file_path').eq('id', docId).maybeSingle();
+  if(!doc){ alert('Document not found.'); return; }
+  const { data } = await sb.storage.from('onboarding-docs').createSignedUrl(doc.file_path, 3600);
+  if(data?.signedUrl) window.open(data.signedUrl, '_blank');
+  else alert('Could not open file.');
+}
+
+async function deleteUploadedSignedDoc(docId, userId, name){
+  if(!await csiConfirm('Delete this uploaded document? This cannot be undone.')) return;
+  const { data: doc } = await sb.from('agent_uploaded_documents').select('file_path').eq('id', docId).maybeSingle();
+  if(doc?.file_path){ try { await sb.storage.from('onboarding-docs').remove([doc.file_path]); } catch(_){} }
+  await sb.from('agent_uploaded_documents').delete().eq('id', docId);
+  openUploadSignedDocModal(userId, name);
+}
+window.openUploadSignedDocModal = openUploadSignedDocModal;
+window.uploadSignedDocFile = uploadSignedDocFile;
+window.viewUploadedSignedDoc = viewUploadedSignedDoc;
+window.deleteUploadedSignedDoc = deleteUploadedSignedDoc;
 
 // ─── Delete agent (owner only) ───
 async function deleteAgent(id, name){
@@ -11504,13 +11720,25 @@ async function _loadStepStatuses(userId){
     b2bIntakeRow = data;
   } catch(_){}
 
+  // 5. Office-set "already signed elsewhere" overrides, per step id. Set only
+  // by Owner/Admin/Onboarding via the agent's profile — never agent-set.
+  let docOverrides = {};
+  try {
+    const { data: prof2 } = await sb.from('profiles').select('doc_overrides').eq('id', userId).maybeSingle();
+    docOverrides = prof2?.doc_overrides || {};
+  } catch(_){}
+
   // Build result for each step in the AGENT's flow (not the viewer's)
   const result = {};
   let priorComplete = true;
   for(const step of flow){
     let complete = false;
     let sourceRow = null;
-    if(step.kind === 'contract'){
+    const overridden = !!docOverrides[step.id];
+    if(overridden){
+      complete = true;
+      sourceRow = docOverrides[step.id];
+    } else if(step.kind === 'contract'){
       complete = contractRow && contractRow.status === 'signed';
       sourceRow = contractRow;
     } else if(step.kind === 'consent'){
@@ -11526,7 +11754,9 @@ async function _loadStepStatuses(userId){
       sourceRow = s;
     }
     let stageLocked = false;
-    if(step.requiresStage && !_stageAtOrAfter(agentStage, step.requiresStage)){
+    // An office override also clears any stage-gate — if staff says "already
+    // handled", the agent shouldn't be stuck behind bg_passed for it.
+    if(!overridden && step.requiresStage && !_stageAtOrAfter(agentStage, step.requiresStage)){
       stageLocked = true;
     }
     result[step.id] = {
@@ -17830,10 +18060,35 @@ async function renderReliantSaleEntry(el){
     }
   }
 
+  // Auto-detect the store they're currently checked into (if any) so it's
+  // pre-selected — cuts a step for the common case. They can still change it
+  // or pick "Emailed Customer / Remote Sale" for deals closed off-site.
+  let autoStoreId = '';
+  try {
+    const since = new Date(Date.now() - 20 * 3600 * 1000).toISOString();
+    const { data: myAudits } = await sb.from('photo_audits')
+      .select('user_id,audit_type,store_id,created_at,geofence_passed')
+      .eq('user_id', currentProfile.id).gte('created_at', since).order('created_at', { ascending: true });
+    const open = _computeOpenShifts(myAudits || []);
+    const mine = open.find(o => o.user_id === currentProfile.id);
+    if(mine && stores.some(s => s.id === mine.store_id)) autoStoreId = mine.store_id;
+  } catch(_){}
+
   const storeOptions = stores.map(s => {
     const mktName = s.markets?.name ? ' — ' + s.markets.name : '';
-    return `<option value="${s.id}">${escapeHtml(s.name + mktName)}</option>`;
+    return `<option value="${s.id}" ${s.id === autoStoreId ? 'selected' : ''}>${escapeHtml(s.name + mktName)}${s.id === autoStoreId ? ' (currently checked in)' : ''}</option>`;
   }).join('');
+
+  // Pull the "Emailed Customer / Remote Sale" virtual store separately —
+  // it's not tied to any market so it wouldn't show up in the scoped query
+  // above, but every Reliant agent/manager should always be able to pick it.
+  let remoteOption = '';
+  try {
+    const { data: remoteStore } = await sb.from('stores').select('id').eq('name', 'Emailed Customer / Remote Sale').maybeSingle();
+    if(remoteStore){
+      remoteOption = `<option value="${remoteStore.id}">📧 Emailed Customer / Remote Sale (no store visit)</option>`;
+    }
+  } catch(_){}
 
   // Diagnostic empty-state — tells the user (and Calvin) exactly which
   // assignment is missing so it can be fixed in one place.
@@ -17876,23 +18131,25 @@ async function renderReliantSaleEntry(el){
       </div>
 
       <div class="form-group">
-        <label class="form-label">STORE *</label>
-        <select id="rs-store" class="form-input" ${stores.length === 0 ? 'disabled' : ''}>
-          <option value="">— Pick the store —</option>
+        <label class="form-label">LOCATION *</label>
+        <select id="rs-store" class="form-input">
+          <option value="">— Pick location —</option>
+          ${remoteOption}
           ${storeOptions}
         </select>
-        <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">${stores.length} store${stores.length === 1 ? '' : 's'} in your market.</div>
+        <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">${autoStoreId ? "Auto-filled from your current check-in — change it if this deal wasn't closed there." : (stores.length + ' store' + (stores.length === 1 ? '' : 's') + ' in your market, plus the remote-sale option above.')}</div>
       </div>
 
       <div class="form-group">
-        <label class="form-label">ACCOUNT NUMBER *</label>
-        <input id="rs-account" class="form-input" placeholder="Reliant account number" maxlength="40"/>
+        <label class="form-label">CA (CUSTOMER ACCOUNT #) *</label>
+        <input id="rs-account" class="form-input" placeholder="12345678-9" maxlength="10" oninput="_rsMaskCA(this)"/>
+        <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">8 digits, a dash, then 1 digit — 9 digits total.</div>
       </div>
 
       <div id="rs-msg" style="margin:10px 0;min-height:18px;font-size:13px;"></div>
 
       <div style="display:flex;gap:10px;flex-wrap:wrap;">
-        <button class="bo-btn bo-btn-primary" onclick="submitReliantSale()" style="padding:12px 24px;font-size:14px;background:linear-gradient(135deg,#FF6B00,#FF0080);" ${stores.length === 0 ? 'disabled' : ''}>Submit for Approval →</button>
+        <button class="bo-btn bo-btn-primary" onclick="submitReliantSale()" style="padding:12px 24px;font-size:14px;background:linear-gradient(135deg,#FF6B00,#FF0080);" ${(stores.length === 0 && !remoteOption) ? 'disabled' : ''}>Submit for Approval →</button>
         <button class="bo-btn bo-btn-ghost" onclick="boShowAdmin('reliant-my-sales')" style="padding:12px 24px;font-size:14px;">View My Submissions</button>
       </div>
 
@@ -17903,6 +18160,14 @@ async function renderReliantSaleEntry(el){
 
   setTimeout(()=>{ document.getElementById('rs-name')?.focus(); }, 50);
 }
+
+// Formats CA input as the user types: 8 digits, dash, 1 digit (9 digits total).
+function _rsMaskCA(el){
+  let digits = el.value.replace(/\D/g,'').slice(0,9);
+  if(digits.length > 8) el.value = digits.slice(0,8) + '-' + digits.slice(8);
+  else el.value = digits;
+}
+window._rsMaskCA = _rsMaskCA;
 
 async function submitReliantSale(){
   const msg = document.getElementById('rs-msg');
@@ -17920,8 +18185,8 @@ async function submitReliantSale(){
   const notes   = null;
 
   if(!name)    { msg.innerHTML = '<span style="color:#F87171;">Customer name is required.</span>'; return; }
-  if(!storeId) { msg.innerHTML = '<span style="color:#F87171;">Pick the store.</span>'; return; }
-  if(!account) { msg.innerHTML = '<span style="color:#F87171;">Account number is required.</span>'; return; }
+  if(!storeId) { msg.innerHTML = '<span style="color:#F87171;">Pick a location (store or Emailed Customer / Remote Sale).</span>'; return; }
+  if(!/^\d{8}-\d$/.test(account)) { msg.innerHTML = '<span style="color:#F87171;">CA number must be 8 digits, a dash, then 1 digit (e.g. 12345678-9).</span>'; return; }
 
   msg.innerHTML = '<span style="color:rgba(255,255,255,0.5);">Submitting…</span>';
 
@@ -24531,6 +24796,333 @@ async function installReliantContracts(){
   renderMainContent();
 }
 window.installReliantContracts = installReliantContracts;
+
+// ═══════════════════════════════════════════════════════════════════════
+// CAMPAIGNS / BONUS PROMOTIONS (Calvin, 2026-07-16)
+// Owner creates a campaign (program-specific or company-wide), sets
+// free-text prizes per placement, sends an announcement, and it shows as
+// a billboard banner on matching agents'/managers' dashboards.
+// ═══════════════════════════════════════════════════════════════════════
+
+async function renderCampaignsAdmin(el){
+  if(currentProfile?.role !== 'owner'){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Owner only.</div>';
+    return;
+  }
+  el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading campaigns…</div>';
+
+  const { data: campaigns } = await sb.from('bonus_campaigns').select('*').order('start_date', { ascending: false });
+  const { data: allPrizes } = await sb.from('campaign_prizes').select('*').order('place_rank');
+  const prizesByCampaign = {};
+  (allPrizes || []).forEach(p => { (prizesByCampaign[p.campaign_id] = prizesByCampaign[p.campaign_id] || []).push(p); });
+
+  const today = new Date().toISOString().slice(0,10);
+
+  el.innerHTML = `
+    <div style="margin-bottom:22px;display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;">
+      <div>
+        <h1 style="font-family:'Bebas Neue',sans-serif;font-size:48px;color:#fff;line-height:1;">🎁 Campaigns</h1>
+        <p style="font-size:14px;color:rgba(255,255,255,0.5);margin-top:6px;">Bonus promotions with flexible prizes — cash, gift cards, anything. Sends an email + dashboard billboard.</p>
+      </div>
+      <button class="bo-btn bo-btn-primary" style="background:linear-gradient(135deg,#FF6B00,#FF0080);" onclick="openCampaignModal()">+ New Campaign</button>
+    </div>
+
+    ${(campaigns || []).length === 0 ? `
+      <div class="bo-card" style="text-align:center;padding:40px;color:rgba(255,255,255,0.4);">No campaigns yet. Click + New Campaign to launch your first one.</div>
+    ` : `
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px;">
+        ${(campaigns || []).map(c => {
+          const isLive = c.active && c.start_date <= today && c.end_date >= today;
+          const prizes = (prizesByCampaign[c.id] || []).sort((a,b) => a.place_rank - b.place_rank);
+          const prog = c.scope === 'program' ? (allPrograms || []).find(p => p.id === c.program_id) : null;
+          return `
+          <div class="bo-card" style="${isLive ? 'border-left:3px solid #00FF88;' : ''}">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:6px;">
+              <div style="font-size:15px;font-weight:700;color:#fff;flex:1;">${escapeHtml(c.title)}</div>
+              ${isLive ? '<span style="background:rgba(0,255,136,0.15);color:#00FF88;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;">LIVE</span>' : (c.start_date > today ? '<span style="background:rgba(255,200,0,0.15);color:#FFC800;padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;">UPCOMING</span>' : '<span style="background:rgba(255,255,255,0.1);color:rgba(255,255,255,0.5);padding:2px 8px;border-radius:50px;font-size:10px;font-weight:700;">ENDED</span>')}
+            </div>
+            <div style="font-size:11.5px;color:rgba(255,255,255,0.4);margin-bottom:8px;">${c.scope === 'company' ? '🌐 Company-wide' : (prog ? prog.icon + ' ' + escapeHtml(prog.name) : '🎯 Program')} · ${c.role_segment === 'all' ? 'Everyone' : (c.role_segment === 'manager' ? 'Managers only' : 'Agents only')} · ${c.start_date} → ${c.end_date}</div>
+            ${c.description ? `<div style="font-size:12px;color:rgba(255,255,255,0.55);margin-bottom:8px;">${escapeHtml(c.description)}</div>` : ''}
+            <div style="display:flex;flex-direction:column;gap:3px;margin-bottom:12px;">
+              ${prizes.map(p => `<div style="font-size:12px;color:rgba(255,255,255,0.7);">#${p.place_rank} — ${escapeHtml(p.prize_text)}</div>`).join('') || '<div style="font-size:12px;color:rgba(255,255,255,0.35);">No prizes set</div>'}
+            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;">
+              <button class="bo-btn bo-btn-primary" style="padding:5px 12px;font-size:11px;" onclick="sendCampaignAnnouncement('${c.id}')">📧 Send Announcement</button>
+              <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="openCampaignModal('${c.id}')">Edit</button>
+              <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="toggleCampaignActive('${c.id}',${c.active})">${c.active ? 'Deactivate' : 'Activate'}</button>
+              <button class="bo-btn bo-btn-danger" style="padding:5px 10px;font-size:11px;" onclick="deleteCampaign('${c.id}')">✕</button>
+            </div>
+          </div>`;
+        }).join('')}
+      </div>
+    `}`;
+}
+window.renderCampaignsAdmin = renderCampaignsAdmin;
+
+async function openCampaignModal(id){
+  let c = { title:'', description:'', scope:'program', program_id:'', role_segment:'all', start_date: new Date().toISOString().slice(0,10), end_date:'', active:true };
+  let prizes = [{ place_rank:1, prize_text:'' }, { place_rank:2, prize_text:'' }, { place_rank:3, prize_text:'' }];
+  if(id){
+    const { data } = await sb.from('bonus_campaigns').select('*').eq('id', id).maybeSingle();
+    if(data) c = data;
+    const { data: p } = await sb.from('campaign_prizes').select('*').eq('campaign_id', id).order('place_rank');
+    if(p && p.length) prizes = p;
+  }
+  const programOptions = (allPrograms || []).map(p => `<option value="${p.id}" ${p.id === c.program_id ? 'selected' : ''}>${p.icon} ${escapeHtml(p.name)}</option>`).join('');
+
+  document.getElementById('modal-box').innerHTML = `
+    <h2 style="font-family:'Bebas Neue',sans-serif;font-size:26px;color:#FF6B00;margin-bottom:14px;letter-spacing:1px;">🎁 ${id ? 'Edit' : 'New'} Campaign</h2>
+    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Title</label><input id="cm-title" class="form-input" value="${escapeHtml(c.title)}" placeholder="e.g. Top 3 Company-Wide Cash Bonus"/></div>
+    <div class="form-group" style="margin-bottom:10px;"><label class="form-label">Description (shown in the announcement)</label><textarea id="cm-desc" class="form-input" rows="2">${escapeHtml(c.description || '')}</textarea></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;">
+      <div class="form-group"><label class="form-label">Scope</label>
+        <select id="cm-scope" class="form-input" onchange="document.getElementById('cm-program-wrap').style.display=this.value==='program'?'block':'none';">
+          <option value="program" ${c.scope==='program'?'selected':''}>One program</option>
+          <option value="company" ${c.scope==='company'?'selected':''}>Company-wide</option>
+        </select>
+      </div>
+      <div class="form-group"><label class="form-label">Who's eligible</label>
+        <select id="cm-role" class="form-input">
+          <option value="all" ${c.role_segment==='all'?'selected':''}>Everyone</option>
+          <option value="agent" ${c.role_segment==='agent'?'selected':''}>Agents only</option>
+          <option value="manager" ${c.role_segment==='manager'?'selected':''}>Managers only</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-group" id="cm-program-wrap" style="margin-bottom:10px;display:${c.scope==='program'?'block':'none'};">
+      <label class="form-label">Program</label>
+      <select id="cm-program" class="form-input"><option value="">— pick —</option>${programOptions}</select>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px;">
+      <div class="form-group"><label class="form-label">Start date</label><input id="cm-start" type="date" class="form-input" value="${c.start_date}"/></div>
+      <div class="form-group"><label class="form-label">End date</label><input id="cm-end" type="date" class="form-input" value="${c.end_date}"/></div>
+    </div>
+    <div style="margin-bottom:8px;font-size:12px;color:rgba(255,255,255,0.6);letter-spacing:1px;text-transform:uppercase;">Prizes — free text, any placement</div>
+    <div id="cm-prizes" style="margin-bottom:10px;">
+      ${prizes.map((p,i) => `
+        <div style="display:flex;gap:8px;margin-bottom:6px;" data-prize-row>
+          <input type="number" min="1" class="form-input cm-prize-rank" value="${p.place_rank}" style="width:70px;" placeholder="#"/>
+          <input type="text" class="form-input cm-prize-text" value="${escapeHtml(p.prize_text || '')}" placeholder="e.g. $500 cash, spa day for 2, PS5..." style="flex:1;"/>
+          <button class="bo-btn bo-btn-ghost" style="padding:8px;" onclick="this.closest('[data-prize-row]').remove()">✕</button>
+        </div>`).join('')}
+    </div>
+    <button class="bo-btn bo-btn-ghost" style="padding:6px 12px;font-size:11px;margin-bottom:16px;" onclick="_cmAddPrizeRow()">+ Add placement</button>
+    <div id="cm-msg" style="margin-bottom:10px;font-size:13px;"></div>
+    <div style="display:flex;gap:10px;">
+      <button class="bo-btn bo-btn-primary" onclick="saveCampaign('${id||''}')">💾 Save Campaign</button>
+      <button class="bo-btn bo-btn-ghost" onclick="closeAllModals()">Cancel</button>
+    </div>`;
+  document.getElementById('modal-backdrop').style.display = 'flex';
+}
+window.openCampaignModal = openCampaignModal;
+
+function _cmAddPrizeRow(){
+  const wrap = document.getElementById('cm-prizes');
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:8px;margin-bottom:6px;';
+  row.setAttribute('data-prize-row','');
+  row.innerHTML = `
+    <input type="number" min="1" class="form-input cm-prize-rank" value="${wrap.children.length+1}" style="width:70px;" placeholder="#"/>
+    <input type="text" class="form-input cm-prize-text" placeholder="e.g. $500 cash, spa day for 2, PS5..." style="flex:1;"/>
+    <button class="bo-btn bo-btn-ghost" style="padding:8px;" onclick="this.closest('[data-prize-row]').remove()">✕</button>`;
+  wrap.appendChild(row);
+}
+window._cmAddPrizeRow = _cmAddPrizeRow;
+
+async function saveCampaign(id){
+  const msg = document.getElementById('cm-msg');
+  const title = document.getElementById('cm-title').value.trim();
+  const description = document.getElementById('cm-desc').value.trim();
+  const scope = document.getElementById('cm-scope').value;
+  const role_segment = document.getElementById('cm-role').value;
+  const program_id = scope === 'program' ? (document.getElementById('cm-program').value || null) : null;
+  const start_date = document.getElementById('cm-start').value;
+  const end_date = document.getElementById('cm-end').value;
+
+  if(!title){ msg.innerHTML = '<span style="color:#F87171;">Give it a title.</span>'; return; }
+  if(scope === 'program' && !program_id){ msg.innerHTML = '<span style="color:#F87171;">Pick a program, or switch scope to company-wide.</span>'; return; }
+  if(!start_date || !end_date){ msg.innerHTML = '<span style="color:#F87171;">Set both start and end dates.</span>'; return; }
+  if(end_date < start_date){ msg.innerHTML = '<span style="color:#F87171;">End date is before the start date.</span>'; return; }
+
+  const prizeRows = Array.from(document.querySelectorAll('[data-prize-row]')).map(row => ({
+    place_rank: parseInt(row.querySelector('.cm-prize-rank').value) || 0,
+    prize_text: row.querySelector('.cm-prize-text').value.trim()
+  })).filter(p => p.place_rank > 0 && p.prize_text);
+
+  if(prizeRows.length === 0){ msg.innerHTML = '<span style="color:#F87171;">Add at least one prize.</span>'; return; }
+
+  msg.innerHTML = '<span style="color:rgba(255,255,255,0.5);">Saving…</span>';
+
+  const payload = { title, description, scope, program_id, role_segment, start_date, end_date, updated_at: new Date().toISOString() };
+  let campaignId = id;
+  if(id){
+    const { error } = await sb.from('bonus_campaigns').update(payload).eq('id', id);
+    if(error){ msg.innerHTML = '<span style="color:#F87171;">' + error.message + '</span>'; return; }
+    await sb.from('campaign_prizes').delete().eq('campaign_id', id);
+  } else {
+    const { data, error } = await sb.from('bonus_campaigns').insert({ ...payload, active:true, created_by: currentProfile.id }).select('id').single();
+    if(error){ msg.innerHTML = '<span style="color:#F87171;">' + error.message + '</span>'; return; }
+    campaignId = data.id;
+  }
+  const { error: prizeErr } = await sb.from('campaign_prizes').insert(prizeRows.map(p => ({ ...p, campaign_id: campaignId })));
+  if(prizeErr){ msg.innerHTML = '<span style="color:#F87171;">Saved campaign but prizes failed: ' + prizeErr.message + '</span>'; return; }
+
+  closeAllModals();
+  renderMainContent();
+}
+window.saveCampaign = saveCampaign;
+
+async function toggleCampaignActive(id, currentlyActive){
+  await sb.from('bonus_campaigns').update({ active: !currentlyActive }).eq('id', id);
+  renderMainContent();
+}
+window.toggleCampaignActive = toggleCampaignActive;
+
+async function deleteCampaign(id){
+  if(!await csiConfirm('Delete this campaign? This cannot be undone.')) return;
+  await sb.from('campaign_prizes').delete().eq('campaign_id', id);
+  await sb.from('campaign_banner_dismissals').delete().eq('campaign_id', id);
+  await sb.from('bonus_campaigns').delete().eq('id', id);
+  renderMainContent();
+}
+window.deleteCampaign = deleteCampaign;
+
+// Sends the announcement: in-app notification to every matching person
+// (always works) + attempts an email via the 'campaign_announcement'
+// server template (requires that template to be configured in
+// Brevo/Resend — same pending setup as the other email templates; if it's
+// not configured yet the in-app notification + billboard still land).
+async function sendCampaignAnnouncement(campaignId){
+  if(currentProfile?.role !== 'owner'){ alert('Owner only.'); return; }
+  const { data: c } = await sb.from('bonus_campaigns').select('*').eq('id', campaignId).maybeSingle();
+  if(!c){ alert('Campaign not found.'); return; }
+  const { data: prizes } = await sb.from('campaign_prizes').select('*').eq('campaign_id', campaignId).order('place_rank');
+  if(!await csiConfirm('Send the announcement now to everyone eligible for "' + c.title + '"?')) return;
+
+  let q = sb.from('profiles').select('id,email,full_name,role,programs').eq('active', true).not('role','in','("owner","admin")');
+  const { data: people } = await q;
+  const LEADER_ROLES = ['manager','team_lead'];
+  const matched = (people || []).filter(p => {
+    if(c.scope === 'program' && !(p.programs || []).includes(c.program_id)) return false;
+    if(c.role_segment === 'agent' && LEADER_ROLES.includes(p.role)) return false;
+    if(c.role_segment === 'manager' && !LEADER_ROLES.includes(p.role)) return false;
+    return true;
+  });
+
+  const prizesText = (prizes || []).map(p => '#' + p.place_rank + ' — ' + p.prize_text).join('\n');
+  let emailFailures = 0;
+  for(const person of matched){
+    try {
+      await notifyUser(person.id, {
+        type: 'generic',
+        title: '🎁 ' + c.title,
+        body: c.description || 'A new bonus campaign just launched — check your dashboard for details.',
+        link_view: 'leaderboard'
+      });
+    } catch(_){}
+    try {
+      await sendEmailViaFunction('campaign_announcement', person.email, {
+        full_name: person.full_name,
+        campaign_title: c.title,
+        campaign_description: c.description || '',
+        prizes_text: prizesText,
+        start_date: c.start_date,
+        end_date: c.end_date
+      });
+    } catch(_){ emailFailures++; }
+  }
+
+  alert('Sent to ' + matched.length + ' people.' + (emailFailures > 0 ? ' Note: ' + emailFailures + ' emails failed to send (the "campaign_announcement" template may not be set up yet in Brevo/Resend) — everyone still got the in-app notification and will see the dashboard billboard.' : ''));
+}
+window.sendCampaignAnnouncement = sendCampaignAnnouncement;
+
+// ─── Dashboard billboard banner ───
+// Shows the best-matching live campaign at the top of the dashboard for
+// any agent/manager it applies to, until they dismiss it.
+async function renderCampaignBillboard(){
+  if(!currentProfile || ['owner','admin'].includes(currentProfile.role)) return;
+  const today = new Date().toISOString().slice(0,10);
+
+  const { data: campaigns } = await sb.from('bonus_campaigns')
+    .select('*').eq('active', true).lte('start_date', today).gte('end_date', today);
+  if(!campaigns || campaigns.length === 0) return;
+
+  const LEADER_ROLES = ['manager','team_lead'];
+  const myBucket = LEADER_ROLES.includes(currentProfile.role) ? 'manager' : 'agent';
+  const eligible = campaigns.filter(c => {
+    if(c.scope === 'program' && !(currentProfile.programs || []).includes(c.program_id)) return false;
+    if(c.role_segment !== 'all' && c.role_segment !== myBucket) return false;
+    return true;
+  });
+  if(eligible.length === 0) return;
+
+  const { data: dismissed } = await sb.from('campaign_banner_dismissals')
+    .select('campaign_id').eq('user_id', currentProfile.id).in('campaign_id', eligible.map(c => c.id));
+  const dismissedIds = new Set((dismissed || []).map(d => d.campaign_id));
+  const campaign = eligible.find(c => !dismissedIds.has(c.id));
+  if(!campaign) return;
+
+  const { data: prizes } = await sb.from('campaign_prizes').select('*').eq('campaign_id', campaign.id).order('place_rank');
+  const prog = campaign.scope === 'program' ? (allPrograms || []).find(p => p.id === campaign.program_id) : null;
+  const accent = campaign.scope === 'company' ? '#FF6B00' : '#00C6FF';
+
+  let host = document.getElementById('bo-campaign-billboard-host');
+  if(!host){
+    const main = document.querySelector('#backoffice .bo-main') || document.querySelector('#backoffice main') ||
+                 document.getElementById('bo-content') || document.querySelector('#backoffice');
+    if(!main) return;
+    host = document.createElement('div');
+    host.id = 'bo-campaign-billboard-host';
+    main.insertBefore(host, main.firstChild);
+  }
+
+  const medalRow = (p) => {
+    const medal = p.place_rank === 1 ? '🥇' : p.place_rank === 2 ? '🥈' : p.place_rank === 3 ? '🥉' : '#' + p.place_rank;
+    return `<div style="background:rgba(255,255,255,0.06);border:0.5px solid rgba(255,255,255,0.15);border-radius:8px;padding:10px 16px;flex:1;min-width:130px;">
+      <div style="font-size:16px;font-weight:600;color:#fff;">${medal}</div>
+      <div style="font-size:12px;color:rgba(255,255,255,0.65);margin-top:2px;">${escapeHtml(p.prize_text)}</div>
+    </div>`;
+  };
+
+  host.innerHTML = `
+    <div style="background:#0d0d0d;border-radius:12px;border:2px solid ${accent};padding:22px 26px;margin:14px;position:relative;">
+      <button onclick="dismissCampaignBanner('${campaign.id}')" style="position:absolute;top:14px;right:14px;background:none;border:none;color:rgba(255,255,255,0.4);font-size:18px;cursor:pointer;">✕</button>
+      <div style="font-size:11px;font-weight:700;letter-spacing:2px;color:${accent};text-transform:uppercase;margin-bottom:8px;">${campaign.scope === 'company' ? 'Company-wide campaign' : (prog ? prog.name : 'Program') + ' campaign'} · live now</div>
+      <div style="font-family:'Bebas Neue',sans-serif;font-size:30px;line-height:1;color:#fff;letter-spacing:1px;margin-bottom:10px;">${escapeHtml(campaign.title)}</div>
+      ${campaign.description ? `<div style="font-size:14px;color:rgba(255,255,255,0.7);margin-bottom:16px;max-width:560px;">${escapeHtml(campaign.description)}</div>` : ''}
+      <div style="display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap;">${(prizes||[]).map(medalRow).join('')}</div>
+      <button onclick="campaignSeeMyRank('${campaign.id}')" style="background:${accent};color:#000;border:none;border-radius:8px;padding:10px 18px;font-size:13px;font-weight:600;cursor:pointer;">See my rank</button>
+    </div>`;
+}
+window.renderCampaignBillboard = renderCampaignBillboard;
+
+async function dismissCampaignBanner(campaignId){
+  try { await sb.from('campaign_banner_dismissals').upsert({ campaign_id: campaignId, user_id: currentProfile.id }); } catch(_){}
+  const host = document.getElementById('bo-campaign-billboard-host');
+  if(host) host.remove();
+}
+window.dismissCampaignBanner = dismissCampaignBanner;
+
+// Always computes live at click time — navigates straight into the SAME
+// leaderboard panel that queries fresh from the database on every render
+// (no caching layer anywhere in that path), per Calvin's explicit
+// requirement that this must never show stale data.
+async function campaignSeeMyRank(campaignId){
+  const { data: c } = await sb.from('bonus_campaigns').select('*').eq('id', campaignId).maybeSingle();
+  if(!c){ alert('Campaign not found.'); return; }
+  if(c.scope === 'program' && c.program_id){
+    activeProgramId = c.program_id;
+    window._lbViewMode = 'program';
+  } else {
+    activeProgramId = (currentProfile.programs || [])[0] || activeProgramId;
+    window._lbViewMode = 'company';
+  }
+  window._lbOffset = 0;
+  activeAdminView = null;
+  activeSubView = 'leaderboard';
+  renderMainContent();
+}
+window.campaignSeeMyRank = campaignSeeMyRank;
 
 // Shared delete-old / insert-new logic used by both the automatic
 // one-time install (below) and the manual "🔧 Install" button.
