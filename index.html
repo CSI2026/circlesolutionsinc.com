@@ -2373,7 +2373,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.07.16.07';
+const BUILD_VERSION = '2026.07.16.08';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -3445,7 +3445,19 @@ function boShowAdmin(view){
 function goBoHome(){
   _boPushNavHistory();
   activeAdminView = null;
-  activeProgramId = null;
+  // BUG FIX 2026-07-16: this used to null out activeProgramId entirely,
+  // landing on the neutral "Welcome" splash screen — Calvin: "when i click
+  // on the home button it should always take me and everyone... to their
+  // dashboard." Now it goes straight to their first accessible program's
+  // actual dashboard, for every role including owner/admin. Owner/admin
+  // profiles don't populate .programs the normal way (they get blanket
+  // access to every program instead) — mirrors the exact same fallback
+  // enterBackOffice() already uses at login, so this behaves identically
+  // whether it's someone's first sign-in or a mid-session Home click.
+  const myPrograms = (currentProfile?.role === 'owner' || currentProfile?.role === 'admin')
+    ? (allPrograms || []).map(x => x.id)
+    : (currentProfile?.programs || []);
+  activeProgramId = myPrograms.length > 0 ? myPrograms[0] : null;
   activeCampaignId = null;
   try { if(typeof activeSubView !== 'undefined') activeSubView = 'dashboard'; } catch(_){}
   try { _persistNavState(); } catch(_){}
@@ -6708,16 +6720,33 @@ async function renderScoreboardWidget(programId){
           <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:${accent};letter-spacing:1.5px;">🏆 TOP PERFORMERS THIS WEEK — ${escapeHtml(prog.name.toUpperCase())}</div>
           <button class="bo-btn bo-btn-ghost" style="padding:5px 12px;font-size:11px;" onclick="activeSubView='leaderboard';renderMainContent();">Full Leaderboard →</button>
         </div>
-        ${leaderboard.filter(l => l.weekly_count > 0).slice(0, 5).map((l, idx) => {
-          const isMe = l.user_id === me.id;
-          const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : '#' + (idx + 1);
-          return `
-          <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:${isMe ? 'rgba(255,107,0,0.08)' : 'rgba(255,255,255,0.025)'};border-radius:8px;margin-bottom:5px;${isMe ? 'border:1px solid ' + accent + '55;' : ''}">
-            <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:${accent};width:30px;text-align:center;flex-shrink:0;">${medal}</div>
-            <div style="flex:1;min-width:0;font-size:13px;color:#fff;font-weight:${isMe ? '700' : '600'};">${escapeHtml(l.name)}${isMe ? ' <span style="font-size:10px;color:' + accent + ';">(you)</span>' : ''}</div>
-            <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:${accent};line-height:1;">${l.weekly_count}</div>
-          </div>`;
-        }).join('') || '<div style="color:rgba(255,255,255,0.4);font-size:12.5px;padding:10px 0;">No sales logged yet this week — be the first on the board.</div>'}
+        ${(() => {
+          const visible = leaderboard.filter(l => l.weekly_count > 0).slice(0, 5);
+          if(visible.length > 0){
+            return visible.map((l, idx) => {
+              const isMe = l.user_id === me.id;
+              const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : '#' + (idx + 1);
+              return `
+              <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:${isMe ? 'rgba(255,107,0,0.08)' : 'rgba(255,255,255,0.025)'};border-radius:8px;margin-bottom:5px;${isMe ? 'border:1px solid ' + accent + '55;' : ''}">
+                <div style="font-family:'Bebas Neue',sans-serif;font-size:18px;color:${accent};width:30px;text-align:center;flex-shrink:0;">${medal}</div>
+                <div style="flex:1;min-width:0;font-size:13px;color:#fff;font-weight:${isMe ? '700' : '600'};">${escapeHtml(l.name)}${isMe ? ' <span style="font-size:10px;color:' + accent + ';">(you)</span>' : ''}</div>
+                <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:${accent};line-height:1;">${l.weekly_count}</div>
+              </div>`;
+            }).join('');
+          }
+          // BUG FIX 2026-07-16: this used to just say "No sales logged yet"
+          // even when the logged-in person (owner/admin) HAD sales this week
+          // — confusing, since their own tile above clearly shows a number.
+          // Owner/admin are intentionally excluded from leaderboards
+          // (Calvin's own prior rule: "admins work for CSI not sales
+          // agents"), so explain that plainly instead of implying no
+          // activity happened at all.
+          const iAmExcludedButHaveSales = ['owner','admin'].includes(currentProfile.role) && agg.weekly > 0;
+          if(iAmExcludedButHaveSales){
+            return '<div style="color:rgba(255,255,255,0.45);font-size:12.5px;padding:10px 0;">No agent/manager sales logged yet this week. Your own ' + agg.weekly + ' this week are not shown here — owner/admin sales do not count on leaderboards by design.</div>';
+          }
+          return '<div style="color:rgba(255,255,255,0.4);font-size:12.5px;padding:10px 0;">No sales logged yet this week — be the first on the board.</div>';
+        })()}
         ${!leaderboard.slice(0,5).some(l => l.user_id === me.id) && myEntry ? `
           <div style="margin-top:8px;padding-top:10px;border-top:1px dashed ${accentDim};display:flex;align-items:center;gap:10px;padding-left:10px;">
             <div style="font-family:'Bebas Neue',sans-serif;font-size:16px;color:${accent};width:30px;text-align:center;">★${myRank}</div>
