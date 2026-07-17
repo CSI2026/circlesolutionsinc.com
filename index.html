@@ -2373,7 +2373,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.07.16.12';
+const BUILD_VERSION = '2026.07.16.13';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -5380,6 +5380,34 @@ function renderAgentProgramChips(agent, opts){
 
 
 // ─── Agents / Team management ───
+// Calvin, 2026-07-16: "make me the default manager that a person has to
+// answer to if they don't have a manager." New agents get this automatically
+// now (saveAgent), but existing ones created before this fix are still
+// orphaned (reports_to = null) — this is the one-click catch-up for those.
+async function assignOwnerAsDefaultManager(){
+  if(currentProfile?.role !== 'owner'){ alert('Owner only.'); return; }
+
+  const { data: orphans, error: findErr } = await sb.from('profiles')
+    .select('id, full_name, email, role')
+    .is('reports_to', null)
+    .eq('active', true)
+    .in('role', ['agent','team_lead','manager']);
+  if(findErr){ alert('Could not check for unassigned team members: ' + findErr.message); return; }
+  if(!orphans || orphans.length === 0){ alert('Nobody is unassigned — every active team member already has a manager.'); return; }
+
+  const names = orphans.slice(0, 10).map(o => o.full_name || o.email).join(', ') + (orphans.length > 10 ? ', +' + (orphans.length - 10) + ' more' : '');
+  if(!await csiConfirm('Set YOU as the manager for ' + orphans.length + ' currently-unassigned team member(s)?\n\n' + names + '\n\nThis also unlocks tools like Daily Check-In / Photo Audit for anyone who was blocked by having no manager at all.')) return;
+
+  const { error: updErr } = await sb.from('profiles')
+    .update({ reports_to: currentProfile.id })
+    .in('id', orphans.map(o => o.id));
+  if(updErr){ alert('Failed: ' + updErr.message); return; }
+
+  alert('✓ Done. ' + orphans.length + ' team member(s) now report to you.\n\nNote: Daily Check-In/Photo Audit also requires YOU to have stores assigned in Store Managers — if any of them still don\u2019t see that tool after this, that\u2019s the next thing to check.');
+  renderMainContent();
+}
+window.assignOwnerAsDefaultManager = assignOwnerAsDefaultManager;
+
 async function renderAgents(el){
   const role = currentProfile.role;
   const isOwner = role === 'owner';
@@ -5422,6 +5450,7 @@ async function renderAgents(el){
           <input id="agent-search" placeholder="Search name or email…" class="form-input" style="width:260px;padding:8px 14px;font-size:13px;" oninput="filterAgentRows(this.value)"/>
         </div>
         ${(isOwner || isAdmin || isManager) ? `<button class="bo-btn bo-btn-primary" onclick="openAgentModal()">+ Add Team Member</button>` : ''}
+        ${isOwner ? `<button class="bo-btn bo-btn-ghost" style="border-color:rgba(0,198,255,0.4);color:#00C6FF;" title="Set yourself as the manager for anyone who currently has none" onclick="assignOwnerAsDefaultManager()">🔧 Fix Unassigned Managers</button>` : ''}
       </div>
       ${(!agents || agents.length === 0) ? '<div style="color:rgba(255,255,255,0.4);font-size:13.5px;padding:14px 0;">No team members yet.</div>' : `
         <div style="overflow-x:auto;">
@@ -7996,10 +8025,15 @@ function refreshReportsToDropdown(){
   // Same scoping fix as refreshMarketDropdown — read program checkboxes only.
   const checkedPrograms = Array.from(document.querySelectorAll('#modal-box input.ag-prog-cb:checked')).map(c => c.value);
   const leaders = window._agentModalLeaders || [];
-  // Agents report to team_leads or managers; team_leads report to managers; managers can optionally report to admin/owner
+  // Agents report to team_leads or managers; team_leads report to managers;
+  // managers can optionally report to admin/owner.
+  // FIX 2026-07-16 (Calvin: "make me the default manager that a person has
+  // to answer to if they don't have a manager") — owner (and admin) are now
+  // valid options for EVERY role, not just managers reporting upward. Owner
+  // previously never appeared in an agent's dropdown at all.
   const validReportRoles = {
-    agent: ['team_lead','manager'],
-    team_lead: ['manager'],
+    agent: ['team_lead','manager','admin','owner'],
+    team_lead: ['manager','admin','owner'],
     manager: ['admin','owner'],
     admin: ['owner'],
     owner: []
@@ -8016,7 +8050,18 @@ async function saveAgent(editId){
   const role = document.getElementById('ag-role').value;
   const programs = Array.from(document.querySelectorAll('#modal-box input.ag-prog-cb:checked')).map(c => c.value);
   const market_id = document.getElementById('ag-market').value || null;
-  const reports_to = document.getElementById('ag-reports-to').value || null;
+  let reports_to = document.getElementById('ag-reports-to').value || null;
+  // Calvin, 2026-07-16: "make me the default manager that a person has to
+  // answer to if they don't have a manager they answer to." If nobody was
+  // picked, fall back to the owner automatically — this also matters for
+  // real tool access, not just an org-chart nicety: Daily Check-In/Photo
+  // Audit only shows up for an agent if their manager (reports_to) has
+  // stores assigned via store_managers, or they have a direct store
+  // assignment. An agent with reports_to = null has neither path available.
+  if(!reports_to){
+    const { data: ownerRow } = await sb.from('profiles').select('id').eq('role','owner').eq('active', true).limit(1).maybeSingle();
+    if(ownerRow) reports_to = ownerRow.id;
+  }
   const phone_carrier = document.getElementById('ag-carrier').value || null;
   const sms_opt_in = document.getElementById('ag-sms-opt-in').checked;
   const canHostEl = document.getElementById('ag-can-host');
