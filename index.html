@@ -2373,7 +2373,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.07.16.13';
+const BUILD_VERSION = '2026.07.17.01';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -2996,6 +2996,7 @@ function enterBackOffice(){
   // fresh audit activity. Owner / admin / payroll managers only.
   try { renderUrgentFlyer(); } catch(e){ console.warn('Flyer render failed:', e); }
   try { renderCampaignBillboard(); } catch(e){ console.warn('Campaign billboard render failed:', e); }
+  try { if(['owner','admin'].includes(currentProfile?.role)) checkZeroSalesStreaks(); } catch(e){ console.warn('Zero-streak check failed:', e); }
 
   // Phase 3.33 — if the agent reloaded mid-shift, restart the geofence
   // monitor from the persisted sessionStorage anchor.
@@ -3053,6 +3054,7 @@ function renderSidebar(){
     adminNavItems.push({ id:'payroll-log-sheets', label:'📋 Payroll Log Sheets', group:G3 });
     adminNavItems.push({ id:'reliant-pending-approvals', label:'⚡ Reliant Approvals', group:G3 });
     adminNavItems.push({ id:'campaigns-admin', label:'🎁 Campaigns', group:G3 });
+    adminNavItems.push({ id:'notification-failures', label:'🔔 Notification Failures', group:G3 });
     adminNavItems.push({ id:'lock-alerts', label:'🚨 Lock Alerts', group:G3 });
     // Business setup — structure & config, touched occasionally
     adminNavItems.push({ id:'programs-admin', label:'🎯 Programs & Campaigns', group:G4 });
@@ -3573,6 +3575,7 @@ function renderMainContent(){
   if(activeAdminView === 'contract-templates'){ renderContractBuilder(el); return; }  // backward compat
   if(activeAdminView === 'contract-hub'){ renderContractHub(el); return; }
   if(activeAdminView === 'campaigns-admin'){ renderCampaignsAdmin(el); return; }
+  if(activeAdminView === 'notification-failures'){ renderNotificationFailures(el); return; }
   if(activeAdminView === 'forms-admin'){ renderFormsAdmin(el); return; }
   if(activeAdminView === 'my-forms'){ renderMyForms(el); return; }
   if(activeAdminView === 'my-contracts'){ renderMyContracts(el); return; }
@@ -3723,15 +3726,23 @@ async function renderOnTheClockInto(host, refreshFnName){
   const open = _computeOpenShifts(audits);
 
   // SELF-HEAL: if anyone's open shift is past 8 hours, close it now — so the
-  // clock never runs away (you saw a 25-hour shift). Two layers:
+  // clock never runs away (you saw a 25-hour shift). Three layers:
   //   1) Best-effort server function (closes ANYONE's overdue shift) — needs
   //      auto_checkout_8h_migration.sql to be run once.
   //   2) Always: close the CURRENT viewer's OWN overdue shift directly (works
   //      with no migration, since you can write your own check-out).
+  //   3) NEW 2026-07-17 (Calvin: "make sure the agent is logged correctly...
+  //      auto turns off at 8hr shift"): owner/admin viewing this panel ALSO
+  //      closes OTHER people's overdue shifts directly, not just their own —
+  //      this is the real gap layer (1) alone never covered if that RPC was
+  //      never actually created. Errors are logged per-person instead of
+  //      silently swallowed, since a permissions block here would otherwise
+  //      look identical to "nothing was open."
   const overdue = open.filter(o => (Date.now() - o.checkInTs) >= HARD_DAILY_SHIFT_MS);
   if(overdue.length){
     let healed = false;
-    try { const { error } = await sb.rpc('close_overdue_shifts'); if(!error) healed = true; } catch(_){}
+    let rpcWorked = false;
+    try { const { error } = await sb.rpc('close_overdue_shifts'); if(!error) { healed = true; rpcWorked = true; } } catch(_){}
     const mine = overdue.find(o => o.user_id === (currentProfile && currentProfile.id));
     if(mine){
       try {
@@ -3742,6 +3753,25 @@ async function renderOnTheClockInto(host, refreshFnName){
         try { stopGeofenceMonitor(); } catch(_){}
         healed = true;
       } catch(_){}
+    }
+    // Owner/admin: sweep everyone else's overdue shifts too, in case the RPC
+    // in layer 1 doesn't actually exist server-side.
+    if(!rpcWorked && ['owner','admin'].includes(currentProfile?.role)){
+      const others = overdue.filter(o => o.user_id !== currentProfile.id);
+      for(const o of others){
+        try {
+          const { error: closeErr } = await sb.from('photo_audits').insert({
+            user_id: o.user_id, audit_type: 'check_out', store_id: o.store_id,
+            geofence_passed: true, auto_closed: true,
+            notes: 'Auto clock-out: reached 8-hour daily limit (closed by owner/admin sweep).'
+          });
+          if(closeErr){
+            console.error('Could not auto-close overdue shift for user', o.user_id, '— likely a row-level security permission issue on photo_audits:', closeErr.message);
+          } else {
+            healed = true;
+          }
+        } catch(e){ console.error('Auto-close sweep failed for', o.user_id, e); }
+      }
     }
     if(healed){
       // Re-pull so the closed shifts drop off immediately.
@@ -4000,6 +4030,39 @@ function renderCampaignChooser(el, prog){
 
 
 // ─── Dashboard ───
+async function renderNotificationFailures(el){
+  if(currentProfile?.role !== 'owner'){ el.innerHTML = '<div class="bo-card" style="color:#F87171;">Owner only.</div>'; return; }
+  el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading…</div>';
+  const { data: rows, error } = await sb.from('notification_failures')
+    .select('id,kind,recipient_id,error_message,created_at')
+    .order('created_at', { ascending: false }).limit(100);
+  if(error){
+    el.innerHTML = '<div class="bo-card" style="color:#F87171;">Could not load: ' + error.message + (error.message?.includes('does not exist') ? ' — run 2026_07_17_shift_and_streak_migration.sql first.' : '') + '</div>';
+    return;
+  }
+  const recipientIds = Array.from(new Set((rows || []).map(r => r.recipient_id).filter(Boolean)));
+  let names = {};
+  if(recipientIds.length){
+    const { data: people } = await sb.from('profiles').select('id,full_name,email').in('id', recipientIds);
+    (people || []).forEach(p => { names[p.id] = p.full_name || p.email; });
+  }
+  el.innerHTML = `
+    <h1 style="font-family:'Bebas Neue',sans-serif;font-size:42px;color:#fff;margin-bottom:6px;">🔔 Notification Failures</h1>
+    <p style="font-size:13px;color:rgba(255,255,255,0.5);margin-bottom:20px;">Every check-in/check-out notification (in-app or email) that failed to send, and why. Last 100.</p>
+    ${(rows || []).length === 0 ? '<div class="bo-card" style="text-align:center;color:rgba(255,255,255,0.4);padding:40px;">No failures logged. Either everything is sending cleanly, or nothing has failed since this log was added.</div>' : `
+      <div class="bo-card">
+        <table class="bo-table"><thead><tr><th>When</th><th>Type</th><th>Intended Recipient</th><th>Error</th></tr></thead><tbody>
+          ${rows.map(r => `<tr>
+            <td style="white-space:nowrap;font-size:12px;">${new Date(r.created_at).toLocaleString()}</td>
+            <td style="font-size:12px;">${escapeHtml(r.kind)}</td>
+            <td style="font-size:12px;">${escapeHtml(names[r.recipient_id] || r.recipient_id || '—')}</td>
+            <td style="font-size:12px;color:#F87171;">${escapeHtml(r.error_message || '')}</td>
+          </tr>`).join('')}
+        </tbody></table>
+      </div>`}`;
+}
+window.renderNotificationFailures = renderNotificationFailures;
+
 async function renderDashboard(el, prog, canManage){
   el.innerHTML = '<div class="bo-card" style="color:rgba(255,255,255,0.5);">Loading…</div>';
   try {
@@ -16427,7 +16490,78 @@ window._fmtHM = _fmtHM;
 let _paPhotoBlob = null;   // kiosk photo (existing)
 let _paSelfieBlob = null;  // selfie photo (new — check-in only)
 
+// ─── "What happened yesterday" gate (Calvin, 2026-07-17) ───────────────
+// Reliant retail only. If yesterday's shift was auto-closed (they forgot
+// to check out) instead of manually closed, they must report yesterday's
+// enrollment count — zero is a valid, selectable answer — before they can
+// open today's check-in form. Not a true blocking modal at login (this app
+// has no way to intercept every possible entry point), but it DOES block
+// the one thing that matters: they cannot check in for a new shift without
+// clearing this first.
+async function _yesterdayGateStatus(userId){
+  if(!(currentProfile.programs || []).includes('retail')) return { required: false };
+  const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1);
+  const yStr = yesterday.toISOString().slice(0,10);
+
+  // Already answered?
+  try {
+    const { data: existing } = await sb.from('daily_number_confirmations')
+      .select('id').eq('user_id', userId).eq('report_date', yStr).maybeSingle();
+    if(existing) return { required: false };
+  } catch(_){ return { required: false }; } // table not migrated yet — fail open, don't block anyone
+
+  // Did they have a shift yesterday that was auto-closed (not manually
+  // checked out)? If they never worked yesterday, or checked out properly
+  // themselves, there's nothing to gate.
+  try {
+    const dayStart = new Date(yStr + 'T00:00:00');
+    const dayEnd = new Date(yStr + 'T23:59:59');
+    const { data: audits } = await sb.from('photo_audits')
+      .select('audit_type,auto_closed,created_at')
+      .eq('user_id', userId)
+      .gte('created_at', dayStart.toISOString()).lte('created_at', dayEnd.toISOString())
+      .order('created_at', { ascending: true });
+    const hadCheckIn = (audits || []).some(a => a.audit_type === 'check_in');
+    if(!hadCheckIn) return { required: false };
+    const autoClosedOut = (audits || []).some(a => a.audit_type === 'check_out' && a.auto_closed === true);
+    const manualCheckOut = (audits || []).some(a => a.audit_type === 'check_out' && a.auto_closed !== true);
+    if(manualCheckOut) return { required: false }; // they closed it properly themselves
+    if(!autoClosedOut) return { required: false }; // still technically open — the 8h sweep will handle it
+    return { required: true, dateStr: yStr };
+  } catch(_){ return { required: false }; }
+}
+
+function _renderYesterdayGateForm(el, dateStr){
+  const niceDate = new Date(dateStr + 'T12:00:00').toLocaleDateString(undefined, { weekday:'long', month:'long', day:'numeric' });
+  el.innerHTML = `
+    <div style="max-width:520px;margin:60px auto;text-align:center;padding:36px;background:#0d0d0d;border:2px solid #FFC800;border-radius:18px;">
+      <div style="font-size:50px;margin-bottom:14px;">📋</div>
+      <h1 style="font-family:'Bebas Neue',sans-serif;font-size:32px;color:#fff;margin-bottom:10px;letter-spacing:1px;">Quick check before you clock in</h1>
+      <p style="color:rgba(255,255,255,0.6);font-size:14px;line-height:1.6;margin-bottom:22px;">You didn't check out on ${niceDate}, so your shift was closed automatically. How many enrollments/orders did you get that day? Zero is a perfectly fine answer — just tell us.</p>
+      <input id="ygate-count" type="number" min="0" step="1" value="0" style="width:120px;font-size:32px;text-align:center;background:#1a1a1a;border:1px solid rgba(255,255,255,0.2);border-radius:10px;color:#fff;padding:10px;margin-bottom:20px;"/>
+      <div id="ygate-msg" style="color:#F87171;font-size:13px;margin-bottom:14px;min-height:18px;"></div>
+      <button class="bo-btn bo-btn-primary" style="width:100%;padding:14px;font-size:15px;" onclick="_submitYesterdayGate('${dateStr}')">Submit and continue to check-in →</button>
+    </div>`;
+}
+
+async function _submitYesterdayGate(dateStr){
+  const input = document.getElementById('ygate-count');
+  const msg = document.getElementById('ygate-msg');
+  const count = parseInt(input.value, 10);
+  if(isNaN(count) || count < 0){ msg.textContent = 'Enter zero or a positive number.'; return; }
+  const { error } = await sb.from('daily_number_confirmations').insert({
+    user_id: currentProfile.id, report_date: dateStr, enrollment_count: count
+  });
+  if(error){ msg.textContent = 'Could not save: ' + error.message; return; }
+  renderMainContent();
+}
+window._submitYesterdayGate = _submitYesterdayGate;
+
 async function renderPhotoAuditCheckin(el){
+  // Gate check FIRST — before any of the store/geofence setup below.
+  const gate = await _yesterdayGateStatus(currentProfile.id);
+  if(gate.required){ _renderYesterdayGateForm(el, gate.dateStr); return; }
+
   // Reset photo blobs on every fresh render (e.g. "Submit Another" returns here)
   _paPhotoBlob = null;
   _paSelfieBlob = null;
@@ -19128,6 +19262,21 @@ async function resubmitRejectedReliant(pendingId){
 window.resubmitRejectedReliant = resubmitRejectedReliant;
 
 
+// Persistent, visible log of notification failures — Calvin: "I'm not
+// getting any notifications for agent Rebekah on her audits" and there was
+// no way to actually SEE why without opening browser dev tools. Every
+// failed send (in-app or email) now gets a row here instead of vanishing
+// into a silent catch block.
+async function _logNotificationFailure(kind, recipientId, error){
+  try {
+    await sb.from('notification_failures').insert({
+      kind, recipient_id: recipientId,
+      error_message: (error && error.message) ? error.message : String(error)
+    });
+  } catch(_){ /* logging itself failing is not worth cascading over */ }
+}
+window._logNotificationFailure = _logNotificationFailure;
+
 async function notifyAuditSubmitted(audit, passed, storeName){
   const { data: agent } = await sb.from('profiles').select('full_name,email,reports_to').eq('id', currentProfile.id).single();
 
@@ -19183,14 +19332,14 @@ async function notifyAuditSubmitted(audit, passed, storeName){
             title: '✓ ' + agentName + ' ' + action,
             body: storeName + ' · ' + distanceFt + ' from store · ' + timeStr
           });
-        } catch(_){}
+        } catch(e){ await _logNotificationFailure('audit_checkin_inapp', rid, e); }
         try {
           await sendEmailViaFunction('announcement', r.email, {
             title: '✓ ' + agentName + ' ' + action,
             body: storeName + '\nDistance from store: ' + distanceFt + '\nTime: ' + new Date().toLocaleString(),
             posted_by: 'Circle Solutions Audit System'
           });
-        } catch(_){}
+        } catch(e){ await _logNotificationFailure('audit_checkin_email', rid, e); }
       } catch(_){}
     }
   } else {
@@ -19232,6 +19381,92 @@ async function notifyAuditSubmitted(audit, passed, storeName){
 // Called immediately after lock_agent_for_no_sales() fires. Sends a
 // flyer-grade urgent notification + email to owner + admins + payroll
 // managers so the lock is visible immediately.
+// ─── 3-day zero-deals warning (Calvin, 2026-07-17) ──────────────────────
+// Separate from the existing "2 consecutive days -> auto-lock" system
+// above (notifyNoSalesLock / lock_agent_for_no_sales, which is a
+// server-side RPC I can't safely modify from here). This is a NEW,
+// independent WARNING (not a lock) at 3 consecutive zero-deal days, sent
+// to owner + the agent's market manager — defaulting to owner if no
+// manager is assigned, per Calvin's standing rule. Runs opportunistically
+// (owner/admin viewing the panel that calls it) — same architectural
+// limitation as everything else in this app: no server cron, so it's not
+// a guaranteed exact-midnight check. See the migration file for how to
+// add a real pg_cron schedule if that precision matters.
+async function checkZeroSalesStreaks(){
+  try {
+    const { data: agents } = await sb.from('profiles')
+      .select('id,full_name,email,reports_to,role')
+      .eq('active', true).contains('programs', ['retail'])
+      .in('role', ['agent','team_lead','manager']);
+    if(!agents || agents.length === 0) return;
+
+    const today = new Date();
+    const days = [1,2,3].map(n => { const d = new Date(today); d.setDate(d.getDate()-n); return d.toISOString().slice(0,10); });
+    const streakEndDate = days[0]; // yesterday — the streak is "complete" as of end of yesterday
+
+    for(const agent of agents){
+      // Already warned for this exact streak end date? Skip.
+      try {
+        const { data: already } = await sb.from('zero_streak_warnings_sent')
+          .select('user_id').eq('user_id', agent.id).eq('streak_end_date', streakEndDate).maybeSingle();
+        if(already) continue;
+      } catch(_){ /* table not migrated — fail open, skip warning rather than error out */ continue; }
+
+      // Sum real submitted enrollments per day (pending + approved both
+      // count — a genuinely-submitted-but-pending deal is still a deal for
+      // the purpose of "are they working").
+      let allThreeZero = true;
+      let hadAnyActivity = false;
+      for(const d of days){
+        const { count: salesCount } = await sb.from('pending_reliant_sales')
+          .select('id', { count:'exact', head:true }).eq('agent_id', agent.id)
+          .eq('install_date', d).neq('status', 'rejected');
+        if(salesCount && salesCount > 0){ allThreeZero = false; break; }
+        const { count: checkinCount } = await sb.from('photo_audits')
+          .select('id', { count:'exact', head:true }).eq('user_id', agent.id).eq('audit_type', 'check_in')
+          .gte('created_at', d + 'T00:00:00').lte('created_at', d + 'T23:59:59');
+        if(checkinCount && checkinCount > 0) hadAnyActivity = true;
+      }
+      if(!allThreeZero || !hadAnyActivity) continue;
+
+      // Recipients: owner(s) always, plus the agent's manager — default to
+      // owner if reports_to is somehow still unset.
+      const recipientIds = new Set();
+      const { data: owners } = await sb.from('profiles').select('id').eq('role','owner').eq('active', true);
+      (owners || []).forEach(o => recipientIds.add(o.id));
+      if(agent.reports_to) recipientIds.add(agent.reports_to);
+
+      const agentName = agent.full_name || agent.email;
+      const title = '⚠️ ' + agentName + ' — 3 days, zero deals';
+      const body = agentName + ' has logged zero enrollments for 3 straight working days (' + days.slice().reverse().join(', ') + '). Might be worth a check-in with them.';
+
+      for(const rid of recipientIds){
+        try {
+          const { data: r } = await sb.from('profiles').select('id,email,full_name').eq('id', rid).single();
+          if(!r) continue;
+          try {
+            await notifyUser(r.id, { type: 'generic', title, body });
+          } catch(e){ await _logNotificationFailure('zero_streak_inapp', rid, e); }
+          try {
+            await sendEmailViaFunction('urgent_custom', r.email, {
+              full_name: r.full_name,
+              subject_line: title,
+              message: body,
+              action_required: 'Check in with the agent — is something wrong, or do they need more support/leads?',
+              sent_by: 'Circle Solutions Performance Monitor'
+            });
+          } catch(e){ await _logNotificationFailure('zero_streak_email', rid, e); }
+        } catch(_){}
+      }
+
+      try {
+        await sb.from('zero_streak_warnings_sent').insert({ user_id: agent.id, streak_end_date: streakEndDate });
+      } catch(_){}
+    }
+  } catch(e){ console.warn('checkZeroSalesStreaks failed:', e); }
+}
+window.checkZeroSalesStreaks = checkZeroSalesStreaks;
+
 async function notifyNoSalesLock(agentId, alertId){
   const { data: agent } = await sb.from('profiles').select('full_name,email').eq('id', agentId).single();
   if(!agent) return;
