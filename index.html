@@ -2373,7 +2373,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.07.17.01';
+const BUILD_VERSION = '2026.07.21.01';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -3717,12 +3717,28 @@ async function renderOnTheClockInto(host, refreshFnName){
   if(!host) return;
   const since = new Date(Date.now() - 36 * 3600 * 1000).toISOString();
   let audits = [];
+  let auditFetchError = null;
   try {
-    const { data } = await sb.from('photo_audits')
+    const { data, error } = await sb.from('photo_audits')
       .select('user_id,audit_type,store_id,created_at,geofence_passed')
       .gte('created_at', since).order('created_at', { ascending: true });
+    if(error){ auditFetchError = error; }
     audits = data || [];
-  } catch(_){}
+  } catch(e){ auditFetchError = e; }
+
+  // BUG FIX 2026-07-21 (Calvin: "she worked all day and it didn't show
+  // anything"). The audit fetch used to swallow every error silently, so a
+  // row-level-security block on photo_audits — where an owner/admin can
+  // only read their OWN rows, never the agents' — would render an empty
+  // clock with zero indication anything was wrong. If the fetch errored,
+  // say so plainly instead of showing a misleading empty board.
+  if(auditFetchError && ['owner','admin'].includes(currentProfile?.role)){
+    host.innerHTML = `<div class="bo-card" style="border:1px solid rgba(239,68,68,0.4);color:#F87171;">
+      <strong>⚠️ Could not read check-in data:</strong> ${escapeHtml(auditFetchError.message || String(auditFetchError))}<br><br>
+      <span style="color:rgba(255,255,255,0.65);font-size:12.5px;">This is almost certainly a Supabase row-level-security policy on the <code>photo_audits</code> table blocking owner/admin from reading agents' rows — which would also explain why agents' shifts and audits never appear for you. The fix is a database policy change (allow owner/admin to SELECT all photo_audits), which has to be done in the Supabase dashboard. Screenshot this and it can be resolved directly there.</span>
+    </div>`;
+    return;
+  }
   const open = _computeOpenShifts(audits);
 
   // SELF-HEAL: if anyone's open shift is past 8 hours, close it now — so the
