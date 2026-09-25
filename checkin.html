@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#0a0a0a">
+<title>Check In · Circle Solutions</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<!--
+  Circle Solutions — standalone check-in (build 2026.09.25.02)
+  No login. The private key in the link (?k=...) identifies the agent; every
+  rule (store, fence, photos, walk-off lockout, weekly cap, account lock) is
+  enforced server-side by the hours_link_* functions in
+  2026_09_25b_hours_link_migration.sql. Photos are LIVE camera only
+  (getUserMedia) — there is no file picker, so gallery photos are impossible.
+  Writes to the same photo_audits / shift_pings / notifications tables as the
+  back office, so hours, payroll, and alerts all line up.
+-->
+<style>
+  :root{
+    --bg:#0a0a0a; --card:#141414; --line:rgba(255,255,255,0.1); --text:#fff; --dim:rgba(255,255,255,0.6);
+    --orange:#FF6B00; --pink:#FF0080; --green:#00FF88; --red:#F87171; --yellow:#FFC800;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{background:var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;-webkit-text-size-adjust:100%}
+  body{min-height:100vh;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+  .wrap{max-width:460px;margin:0 auto;padding:22px 18px 40px}
+  .brand{font-family:'Bebas Neue',sans-serif;letter-spacing:2px;font-size:15px;color:var(--dim)}
+  h1{font-family:'Bebas Neue',sans-serif;font-size:40px;letter-spacing:1px;line-height:1;margin:4px 0 2px}
+  .sub{color:var(--dim);font-size:14px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px;margin-top:16px}
+  .clock{font-family:'Bebas Neue',sans-serif;font-size:56px;letter-spacing:2px;line-height:1;color:var(--green)}
+  .state{font-weight:800;font-size:15px}
+  .row{display:flex;justify-content:space-between;gap:10px;font-size:13px;color:var(--dim);margin-top:8px}
+  .row b{color:var(--text);font-weight:600}
+  label.lbl{display:block;font-size:13px;color:var(--dim);margin-bottom:6px}
+  select{width:100%;font-size:16px;background:#1d1d1d;color:#fff;border:1px solid var(--line);border-radius:10px;padding:12px}
+  .shots{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px}
+  .shots.one{grid-template-columns:1fr}
+  .shot{border:2px dashed rgba(255,255,255,0.25);border-radius:12px;min-height:128px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;background:#101010;color:#fff;font:inherit;font-size:14px;font-weight:700;cursor:pointer;padding:10px;text-align:center;overflow:hidden;position:relative}
+  .shot small{font-weight:400;color:var(--dim);font-size:12px}
+  .shot.done{border-style:solid;border-color:var(--green)}
+  .shot img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:.55}
+  .shot span{position:relative}
+  .btn{display:block;width:100%;border:none;border-radius:50px;padding:17px;font:inherit;font-size:17px;font-weight:800;letter-spacing:.5px;cursor:pointer;margin-top:16px;color:#fff}
+  .btn-in{background:linear-gradient(135deg,var(--orange),var(--pink))}
+  .btn-out{background:#fff;color:#000}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  .btn:focus-visible,.shot:focus-visible,select:focus-visible{outline:3px solid var(--yellow);outline-offset:2px}
+  .msg{margin-top:14px;font-size:14px;line-height:1.5;border-radius:12px;padding:14px;display:none}
+  .msg.ok{display:block;background:rgba(0,255,136,0.1);border:1px solid rgba(0,255,136,0.45);color:var(--green)}
+  .msg.bad{display:block;background:rgba(248,113,113,0.1);border:1px solid rgba(248,113,113,0.5);color:var(--red)}
+  .msg.info{display:block;background:rgba(255,255,255,0.05);border:1px solid var(--line);color:var(--dim)}
+  .note{font-size:12px;color:var(--dim);line-height:1.5;margin-top:14px}
+  /* live camera */
+  #cam{position:fixed;inset:0;background:#000;z-index:50;display:none;flex-direction:column}
+  #cam.open{display:flex}
+  #cam header{padding:14px 16px;display:flex;justify-content:space-between;align-items:center;gap:10px;border-bottom:1px solid var(--line)}
+  #cam header b{font-family:'Bebas Neue',sans-serif;font-size:22px;letter-spacing:1px}
+  #cam .how{padding:10px 16px;font-size:13px;line-height:1.5;background:rgba(0,255,136,0.08);border-bottom:1px solid rgba(0,255,136,0.25)}
+  #cam .stage{flex:1;display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden}
+  #cam video,#cam canvas{max-width:100%;max-height:100%}
+  #cam canvas{display:none}
+  #cam .status{position:absolute;top:14px;left:14px;right:14px;background:rgba(0,0,0,.75);padding:10px 14px;border-radius:8px;font-size:13px;text-align:center}
+  #cam footer{padding:14px 16px;display:flex;gap:10px;justify-content:center;border-top:1px solid var(--line)}
+  .pill{border:none;border-radius:50px;padding:14px 26px;font:inherit;font-size:15px;font-weight:800;cursor:pointer}
+  .pill-snap{background:linear-gradient(135deg,var(--orange),var(--pink));color:#fff}
+  .pill-use{background:var(--green);color:#000}
+  .pill-ghost{background:rgba(255,255,255,0.1);color:#fff;border:1px solid rgba(255,255,255,0.25)}
+  @media (prefers-reduced-motion: reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<main class="wrap" id="app">
+  <div class="brand">Circle Solutions</div>
+  <h1 id="title">Loading…</h1>
+  <p class="sub" id="subtitle">Getting your shift status.</p>
+  <div id="body"></div>
+</main>
+
+<div id="cam" role="dialog" aria-modal="true" aria-label="Live camera">
+  <header><b id="cam-title">Live photo</b><button class="pill pill-ghost" type="button" id="cam-cancel">Cancel</button></header>
+  <div class="how" id="cam-how"></div>
+  <div class="stage">
+    <video id="cam-video" autoplay playsinline muted></video>
+    <canvas id="cam-canvas"></canvas>
+    <div class="status" id="cam-status">Starting camera…</div>
+  </div>
+  <footer id="cam-controls"></footer>
+</div>
+
+<script>
+(function(){
+'use strict';
+
+// ─── Config (same Supabase project as the back office) ───
+var SUPABASE_URL = 'https://liqsqsocwjfqiupmehpn.supabase.co';
+var SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxpcXNxc29jd2pmcWl1cG1laHBuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY4OTA2MjYsImV4cCI6MjA5MjQ2NjYyNn0.nk195GfjdFy8XyMIyOIy6GbGFUVTiM4YUnRZcVW69RI';
+var BUCKET = 'photo-audits';
+var POLL_MS = 2 * 60000;            // GPS heartbeat every 2 minutes (same as back office)
+var WALKOFF_MS = 15 * 60000;        // 15 straight minutes outside the fence = auto check-out
+var SHIFT_CAP_MS = 8 * 3600000;     // 8-hour auto check-out
+var PHOTO_MAX_AGE_MS = 10 * 60000;  // photos must be taken within 10 min of submitting
+
+var sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }
+});
+
+// ─── Private key: from the link, remembered on this phone ───
+var params = new URLSearchParams(location.search);
+var KEY = params.get('k') || '';
+try {
+  if(KEY) localStorage.setItem('csi_hl_key', KEY);
+  else KEY = localStorage.getItem('csi_hl_key') || '';
+} catch(_){}
+
+var S = { status:null, photos:{ kiosk:null, selfie:null }, busy:false, pollId:null, timerId:null };
+
+function $(id){ return document.getElementById(id); }
+function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]; }); }
+function ft(m){ return (m == null || isNaN(m)) ? '—' : Math.round(m * 3.28084).toLocaleString() + ' ft'; }
+function hms(ms){ ms = Math.max(0, ms); var s = Math.floor(ms/1000), h = Math.floor(s/3600), m = Math.floor(s%3600/60), x = s%60; return h + ':' + String(m).padStart(2,'0') + ':' + String(x).padStart(2,'0'); }
+function timeStr(d){ return new Date(d).toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }); }
+function setMsg(kind, html){ var m = $('msg'); if(!m) return; m.className = 'msg ' + (kind || ''); m.innerHTML = html || ''; }
+
+var ERR = {
+  invalid_link: 'This check-in link is not valid. Ask the office for a new one.',
+  inactive: 'This account is not active. Contact the office.',
+  account_locked: 'Your account is on hold. Contact your manager or payroll before checking in.',
+  photo_required: 'Take the kiosk photo first.',
+  selfie_required: 'Take your selfie first.',
+  already_checked_in: 'You are already checked in.',
+  store_not_assigned: 'That store is not assigned to you. Contact the office.',
+  walkoff_lockout: 'You were auto checked out twice today for leaving the store, so you can\u2019t check in again until tomorrow.',
+  week_cap: 'You\u2019ve reached the 40-hour weekly cap. You can check in again Monday.',
+  no_open_shift: 'There is no open shift to check out of.',
+  store_no_gps: 'This store has no GPS set yet. Contact the office.',
+  no_gps: 'Your location could not be read. Turn on location and try again.'
+};
+
+// ═══════════════ STATUS + RENDER ═══════════════
+async function loadStatus(){
+  if(!KEY){ return renderFatal('Link missing', ERR.invalid_link); }
+  try {
+    var r = await sb.rpc('hours_link_status', { p_token: KEY });
+    if(r.error) throw r.error;
+    var st = r.data;
+    if(!st || !st.ok){ return renderFatal('Can\u2019t check in', ERR[(st && st.error)] || 'Something went wrong.'); }
+    S.status = st;
+    render();
+    if(st.open_shift) startMonitor(); else stopMonitor();
+  } catch(e){
+    renderFatal('No connection', 'Couldn\u2019t reach the server. Check your signal and reload this page.');
+  }
+}
+
+function renderFatal(title, text){
+  stopMonitor();
+  $('title').textContent = title;
+  $('subtitle').textContent = '';
+  $('body').innerHTML = '<div class="msg bad" style="display:block">' + esc(text) + '</div>' +
+    '<button class="btn btn-out" type="button" onclick="location.reload()">Reload</button>';
+}
+
+function render(){
+  var st = S.status, open = st.open_shift;
+  var first = (st.name || '').split(' ')[0] || 'there';
+  $('title').textContent = open ? 'You\u2019re on the clock' : 'Hi, ' + first;
+  $('subtitle').textContent = open ? ('At ' + (open.store_name || 'your store') + ' since ' + timeStr(open.checked_in_at) + '.') : 'Check in when you\u2019re inside the store.';
+
+  var html = '';
+  if(open){
+    html += '<div class="card"><div class="clock" id="clock">0:00:00</div>' +
+      '<div class="row"><span>Store</span><b>' + esc(open.store_name) + '</b></div>' +
+      '<div class="row"><span>Status</span><b id="fence-state">Checking location…</b></div>' +
+      '<div class="row"><span>This week</span><b>' + Number(st.week_hours).toFixed(2) + ' / ' + st.week_cap + ' hrs</b></div></div>';
+    html += '<div class="card"><div class="state">Check out</div>' +
+      '<p class="note" style="margin-top:6px">Take a live photo of your kiosk setup, then check out. You must be inside the store.</p>' +
+      '<div class="shots one">' + shotTile('kiosk', 'Kiosk & setup', 'Back camera') + '</div>' +
+      '<button class="btn btn-out" type="button" id="go" disabled>Check out</button>' +
+      '<div class="msg" id="msg" role="status" aria-live="polite"></div></div>';
+    html += '<p class="note">Keep this page open while you work. If you\u2019re outside the store for 15 minutes straight, you\u2019ll be checked out automatically and the office is notified. Shifts end automatically at 8 hours.</p>';
+  } else {
+    if(st.locked){ $('body').innerHTML = '<div class="msg bad" style="display:block">' + ERR.account_locked + '</div>'; return; }
+    if(!st.stores || st.stores.length === 0){ $('body').innerHTML = '<div class="msg bad" style="display:block">No store is assigned to you yet. Contact the office.</div>'; return; }
+    html += '<div class="card">';
+    if(st.stores.length > 1){
+      html += '<label class="lbl" for="store">Store</label><select id="store">' +
+        st.stores.map(function(s){ return '<option value="' + esc(s.id) + '">' + esc(s.name) + (s.store_number ? ' #' + esc(s.store_number) : '') + '</option>'; }).join('') + '</select>';
+    } else {
+      var s0 = st.stores[0];
+      html += '<div class="state">' + esc(s0.name) + (s0.store_number ? ' #' + esc(s0.store_number) : '') + '</div>';
+    }
+    html += '<div class="shots">' + shotTile('selfie', 'Selfie', 'Uniform & badge') + shotTile('kiosk', 'Kiosk & setup', 'Back camera') + '</div>' +
+      '<button class="btn btn-in" type="button" id="go" disabled>Check in</button>' +
+      '<div class="msg" id="msg" role="status" aria-live="polite"></div></div>' +
+      '<div class="card"><div class="row" style="margin-top:0"><span>This week</span><b>' + Number(st.week_hours).toFixed(2) + ' / ' + st.week_cap + ' hrs</b></div>' +
+      (st.walkoffs_today > 0 ? '<div class="row"><span>Walk-offs today</span><b style="color:var(--yellow)">' + st.walkoffs_today + ' of 2</b></div>' : '') + '</div>' +
+      '<p class="note">Photos are taken live with your camera. Your location is checked when you tap Check in.</p>';
+  }
+  $('body').innerHTML = html;
+
+  Array.prototype.forEach.call(document.querySelectorAll('.shot'), function(b){
+    b.addEventListener('click', function(){ openCamera(b.getAttribute('data-shot')); });
+  });
+  $('go').addEventListener('click', function(){ submit(open ? 'check_out' : 'check_in'); });
+  refreshGo();
+  if(open){ tickClock(); clearInterval(S.timerId); S.timerId = setInterval(tickClock, 1000); }
+}
+
+function shotTile(kind, title, hint){
+  var p = S.photos[kind];
+  return '<button type="button" class="shot' + (p ? ' done' : '') + '" data-shot="' + kind + '">' +
+    (p ? '<img alt="" src="' + p.url + '">' : '') +
+    '<span>' + (p ? '✓ ' : '📸 ') + esc(title) + '</span><span><small>' + (p ? 'Tap to retake' : esc(hint)) + '</small></span></button>';
+}
+
+function refreshGo(){
+  var go = $('go'); if(!go) return;
+  var need = S.status.open_shift ? ['kiosk'] : ['selfie', 'kiosk'];
+  go.disabled = S.busy || !need.every(function(k){ return !!S.photos[k]; });
+}
+
+function tickClock(){
+  var open = S.status && S.status.open_shift, c = $('clock');
+  if(!open || !c) return;
+  c.textContent = hms(Date.now() - new Date(open.checked_in_at).getTime());
+}
+
+// ═══════════════ LIVE CAMERA (no gallery) ═══════════════
+var cam = { stream:null, kind:null, blob:null };
+function camStop(){ if(cam.stream){ cam.stream.getTracks().forEach(function(t){ try{ t.stop(); }catch(_){} }); cam.stream = null; } }
+function camClose(){ camStop(); cam.blob = null; $('cam').classList.remove('open'); }
+$('cam-cancel').addEventListener('click', camClose);
+window.addEventListener('pagehide', camStop);
+
+async function openCamera(kind){
+  cam.kind = kind; cam.blob = null;
+  var selfie = kind === 'selfie';
+  $('cam-title').textContent = (selfie ? 'Selfie' : 'Kiosk & setup') + ' — live';
+  $('cam-how').innerHTML = selfie
+    ? 'Front camera. Stand back so your <b>company shirt and badge</b> show, head to waist.'
+    : 'Back camera. Show the <b>whole kiosk and what\u2019s around it</b>, not a close-up.';
+  var video = $('cam-video'), canvas = $('cam-canvas'), status = $('cam-status');
+  video.style.display = 'block'; canvas.style.display = 'none';
+  status.style.display = 'block'; status.textContent = 'Starting camera…';
+  $('cam-controls').innerHTML = '<button class="pill pill-snap" type="button" id="snap" disabled>Capture</button>';
+  $('snap').addEventListener('click', snap);
+  $('cam').classList.add('open');
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){ status.textContent = 'This browser can\u2019t open the live camera. Update Chrome or Safari and try again.'; return; }
+  try {
+    camStop();
+    try {
+      cam.stream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:{ ideal: selfie ? 'user' : 'environment' }, width:{ ideal:960 }, height:{ ideal:720 } }, audio:false });
+    } catch(_){
+      cam.stream = await navigator.mediaDevices.getUserMedia({ video:true, audio:false });
+    }
+    video.srcObject = cam.stream;
+    await new Promise(function(res){ if(video.readyState >= 2) return res(); video.addEventListener('loadedmetadata', res, { once:true }); });
+    status.style.display = 'none';
+    $('snap').disabled = false;
+  } catch(e){
+    status.textContent = (e && e.name === 'NotAllowedError')
+      ? 'Camera access is blocked. Allow the camera for this site in your browser settings, then try again.'
+      : 'Couldn\u2019t start the camera. Close other camera apps and try again.';
+  }
+}
+
+function snap(){
+  var video = $('cam-video'), canvas = $('cam-canvas');
+  canvas.width = video.videoWidth || 960; canvas.height = video.videoHeight || 720;
+  canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+  canvas.toBlob(function(blob){
+    if(!blob) return;
+    cam.blob = blob;
+    video.style.display = 'none'; canvas.style.display = 'block';
+    $('cam-controls').innerHTML = '<button class="pill pill-ghost" type="button" id="retake">Retake</button><button class="pill pill-use" type="button" id="use">Use photo</button>';
+    $('retake').addEventListener('click', function(){ cam.blob = null; canvas.style.display = 'none'; video.style.display = 'block';
+      $('cam-controls').innerHTML = '<button class="pill pill-snap" type="button" id="snap">Capture</button>'; $('snap').addEventListener('click', snap); });
+    $('use').addEventListener('click', function(){
+      var old = S.photos[cam.kind]; if(old) URL.revokeObjectURL(old.url);
+      S.photos[cam.kind] = { blob: cam.blob, url: URL.createObjectURL(cam.blob), at: Date.now() };
+      var kind = cam.kind; camClose(); render(); void kind;
+    });
+  }, 'image/jpeg', 0.75);
+}
+
+// ═══════════════ GPS ═══════════════
+function getPos(timeout){
+  return new Promise(function(res, rej){
+    if(!navigator.geolocation) return rej({ code: 2, message: 'no geolocation' });
+    navigator.geolocation.getCurrentPosition(res, rej, { enableHighAccuracy:true, timeout: timeout || 20000, maximumAge: 15000 });
+  });
+}
+
+// ═══════════════ CHECK IN / OUT ═══════════════
+async function submit(type){
+  if(S.busy) return;
+  var need = type === 'check_in' ? ['selfie', 'kiosk'] : ['kiosk'];
+  for(var i = 0; i < need.length; i++){
+    var p = S.photos[need[i]];
+    if(!p){ return setMsg('bad', need[i] === 'selfie' ? ERR.selfie_required : ERR.photo_required); }
+    if(Date.now() - p.at > PHOTO_MAX_AGE_MS){
+      S.photos[need[i]] = null; render();
+      return setMsg('bad', 'Photos must be taken right before you ' + (type === 'check_in' ? 'check in' : 'check out') + '. Retake them now.');
+    }
+  }
+  S.busy = true; refreshGo();
+  var go = $('go'), label = go.textContent; go.textContent = 'Checking your location…';
+  try {
+    var pos;
+    try { pos = await getPos(20000); }
+    catch(e){ setMsg('bad', 'Couldn\u2019t read your location. Turn on location services and allow it for this site, then try again.'); return; }
+
+    go.textContent = 'Uploading photos…';
+    var folder = 'hours-link/' + S.status.folder + '/', stamp = Date.now();
+    var kioskPath = folder + stamp + '-kiosk.jpg', selfiePath = null;
+    var up = await sb.storage.from(BUCKET).upload(kioskPath, S.photos.kiosk.blob, { contentType:'image/jpeg', upsert:false });
+    if(up.error){ setMsg('bad', 'Photo upload failed. Check your signal and tap again.'); return; }
+    if(type === 'check_in'){
+      selfiePath = folder + stamp + '-selfie.jpg';
+      var up2 = await sb.storage.from(BUCKET).upload(selfiePath, S.photos.selfie.blob, { contentType:'image/jpeg', upsert:false });
+      if(up2.error){ setMsg('bad', 'Selfie upload failed. Check your signal and tap again.'); return; }
+    }
+
+    go.textContent = 'Saving…';
+    var storeSel = $('store');
+    var storeId = type === 'check_in' ? (storeSel ? storeSel.value : S.status.stores[0].id) : S.status.open_shift.store_id;
+    var r = await sb.rpc('hours_link_submit', {
+      p_token: KEY, p_type: type, p_store_id: String(storeId),
+      p_lat: pos.coords.latitude, p_lng: pos.coords.longitude, p_accuracy: pos.coords.accuracy,
+      p_photo_path: kioskPath, p_selfie_path: selfiePath, p_user_agent: navigator.userAgent
+    });
+    if(r.error){ setMsg('bad', 'Couldn\u2019t save. Check your signal and tap again.'); return; }
+    var d = r.data;
+    if(!d || !d.ok){ setMsg('bad', ERR[d && d.error] || 'Couldn\u2019t save. Try again.'); return; }
+
+    // photos are single-use
+    S.photos = { kiosk:null, selfie:null };
+    emailStaff(d, type);
+
+    if(d.passed){
+      if(type === 'check_in'){ resetBreach(); }
+      else { stopMonitor(); }
+      await loadStatus();
+      setMsg('ok', '<b>' + (type === 'check_in' ? '✓ Checked in' : '✓ Checked out') + '</b> at ' + esc(d.store_name) + ', ' + timeStr(d.created_at) + '. You were ' + ft(d.distance_m) + ' from the store.' +
+        (type === 'check_out' ? ' Your hours are logged.' : ''));
+    } else {
+      render();
+      setMsg('bad', '<b>✕ Not ' + (type === 'check_in' ? 'checked in' : 'checked out') + '.</b> You were ' + ft(d.distance_m) + ' from the store; you need to be within ' + ft(d.radius_m) +
+        ' (GPS accuracy ±' + ft(d.accuracy_m) + '). This attempt was logged and the office was notified. Walk inside and try again with new photos.');
+    }
+  } finally {
+    S.busy = false;
+    if(go.isConnected) go.textContent = label;   // re-rendered buttons keep their own label
+    refreshGo();
+  }
+}
+
+// Emails go through the same send-email Supabase function the back office uses.
+function emailStaff(d, type){
+  var action = type === 'check_in' ? 'checked IN' : 'checked OUT';
+  (d.recipients || []).forEach(function(r){
+    var payload = d.passed
+      ? { template:'announcement', to:r.email, variables:{ title:'✓ ' + d.agent_name + ' ' + action,
+          body: d.store_name + '\nDistance from store: ' + ft(d.distance_m) + '\nTime: ' + new Date().toLocaleString() + '\n(Standalone check-in link)',
+          posted_by:'Circle Solutions Audit System' } }
+      : { template:'urgent_custom', to:r.email, variables:{ full_name:r.full_name, subject_line:'🚨 GEOFENCE FAIL: ' + d.agent_name,
+          message: d.agent_name + ' tried to ' + action.toUpperCase() + ' at ' + d.store_name + ' but was ' + ft(d.distance_m) + ' away (limit ' + ft(d.radius_m) + ').',
+          action_required:'Review the attempt in Photo Audits & Time.', sent_by:'Circle Solutions Audit System' } };
+    sb.functions.invoke('send-email', { body: payload }).catch(function(){});
+  });
+}
+
+// ═══════════════ WALK-OFF MONITOR ═══════════════
+function breachKey(){ return 'csi_hl_breach_' + (S.status && S.status.open_shift ? S.status.open_shift.audit_id : ''); }
+function readBreach(){ try { var v = localStorage.getItem(breachKey()); return v ? Number(v) : null; } catch(_){ return null; } }
+function writeBreach(v){ try { if(v == null) localStorage.removeItem(breachKey()); else localStorage.setItem(breachKey(), String(v)); } catch(_){} }
+function resetBreach(){ writeBreach(null); }
+
+function startMonitor(){
+  stopMonitor();
+  S.pollId = setInterval(tick, POLL_MS);
+  setTimeout(tick, 4000);
+}
+function stopMonitor(){
+  if(S.pollId){ clearInterval(S.pollId); S.pollId = null; }
+  if(S.timerId){ clearInterval(S.timerId); S.timerId = null; }
+}
+document.addEventListener('visibilitychange', function(){ if(document.visibilityState === 'visible' && S.status && S.status.open_shift) tick(); });
+window.addEventListener('pageshow', function(e){ if(e.persisted) loadStatus(); });
+
+var ticking = false;
+async function tick(){
+  var open = S.status && S.status.open_shift;
+  if(!open || ticking) return;
+  ticking = true;
+  try {
+    if(Date.now() - new Date(open.checked_in_at).getTime() >= SHIFT_CAP_MS){
+      return autoOut('daily_8h_cap', 'Reached the 8-hour limit.');
+    }
+    var pos;
+    try { pos = await getPos(30000); }
+    catch(e){
+      return autoOut(e && e.code === 1 ? 'gps_permission_revoked' : 'gps_unavailable',
+        e && e.code === 1 ? 'Location permission was turned off while on the clock.' : 'Location stopped reporting while on the clock.');
+    }
+    var r = await sb.rpc('hours_link_ping', { p_token: KEY, p_check_in_audit_id: open.audit_id,
+      p_lat: pos.coords.latitude, p_lng: pos.coords.longitude, p_accuracy: pos.coords.accuracy });
+    if(r.error || !r.data) return;                // network hiccup: try next tick
+    if(r.data.open === false){ return loadStatus(); }  // closed elsewhere (8h server sweep, office)
+    if(pos.coords.accuracy > 1000) return;        // junk fix: don't act on it
+    var fs = $('fence-state');
+    if(r.data.on_site){
+      writeBreach(null);
+      if(fs){ fs.textContent = 'Inside the store'; fs.style.color = 'var(--green)'; }
+      return;
+    }
+    var first = readBreach();
+    if(!first){ writeBreach(Date.now()); first = Date.now(); }
+    var off = Date.now() - first;
+    if(fs){ fs.textContent = 'Outside the store — ' + Math.max(0, Math.ceil((WALKOFF_MS - off) / 60000)) + ' min until auto check-out'; fs.style.color = 'var(--yellow)'; }
+    if(off >= WALKOFF_MS){
+      return autoOut('off_site_15min', 'Outside the store fence (' + ft(r.data.radius_m) + ') for ' + Math.round(off / 60000) + ' consecutive minutes; last reading ' + ft(r.data.distance_m) + ' away.');
+    }
+  } finally { ticking = false; }
+}
+
+async function autoOut(reason, note){
+  var open = S.status && S.status.open_shift; if(!open) return;
+  stopMonitor();
+  var r = await sb.rpc('hours_link_auto_out', { p_token: KEY, p_check_in_audit_id: open.audit_id, p_reason: reason, p_note: note });
+  var d = r && r.data;
+  if(d && d.closed){
+    var list = (d.recipients || []).slice();
+    if(d.agent_email) list.push({ email: d.agent_email, full_name: d.agent_name, self: true });
+    list.forEach(function(x){
+      sb.functions.invoke('send-email', { body:{ template:'urgent_custom', to:x.email, variables:{
+        full_name:x.full_name, subject_line: x.self ? '🚨 You were auto-clocked-out' : d.title,
+        message: d.body, action_required: x.self ? 'Go back inside and check in again to resume your shift.' : 'Review the breach in Photo Audits & Time.',
+        sent_by:'Circle Solutions Geofence Monitor' } } }).catch(function(){});
+    });
+  }
+  resetBreach();
+  await loadStatus();
+  var why = ({ off_site_15min:'you were outside the store for 15 minutes straight', gps_unavailable:'your location stopped reporting',
+               gps_permission_revoked:'location permission was turned off', daily_8h_cap:'you reached the 8-hour limit' })[reason] || reason;
+  var m = $('msg');
+  if(!m){ $('body').insertAdjacentHTML('afterbegin', '<div class="msg" id="msg"></div>'); }
+  setMsg('bad', '<b>You were checked out automatically</b> because ' + why + '. The office has been notified.' + (reason === 'daily_8h_cap' ? '' : ' If you\u2019re still working, go inside and check in again.'));
+}
+
+loadStatus();
+})();
+</script>
+</body>
+</html>
