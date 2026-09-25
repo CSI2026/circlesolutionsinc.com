@@ -1201,6 +1201,7 @@ window.addEventListener("DOMContentLoaded",function(){
           <input id="login-password" type="password" class="form-input" required autocomplete="current-password"/>
         </div>
         <button type="submit" class="btn-fire" style="width:100%;margin-top:10px;">Sign In</button>
+        <button type="button" onclick="csiForgotPassword()" style="display:block;margin:14px auto 0;background:none;border:none;color:#FFC800;font-size:13.5px;font-weight:600;cursor:pointer;text-decoration:underline;font-family:inherit;padding:6px;">Forgot password?</button>
         <div id="login-error" style="display:none;margin-top:14px;padding:10px 14px;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;font-size:13px;color:#FCA5A5;"></div>
         <div id="login-loading" style="display:none;margin-top:14px;text-align:center;color:rgba(255,255,255,0.5);font-size:13px;">Signing in…</div>
       </form>
@@ -2269,6 +2270,24 @@ window.addEventListener("DOMContentLoaded",function(){
 // latest build. Scheme: YYYY.MM.DD.N  (N = the Nth build that day).
 // ───────────────────────────────────────────────────────────────
 // BUILD LOG (newest first)
+//   2026.09.25.05 — Onboarding. (1) Agent profile: 'Also works these
+//                  campaigns' (multi-campaign; checking one checks its
+//                  program). (2) Saving a profile with a NEW program sends
+//                  that program's onboarding packets + contracts; active
+//                  agents keep their back office and see a 'New paperwork'
+//                  banner. Office sees what was sent / which program has no
+//                  packet. (3) No duplicate contracts. (4) Zero-step packets
+//                  complete instead of breaking the wizard. (5) SETUP
+//                  INCOMPLETE screen emails the office automatically.
+//                  Needs 2026_09_25h_multi_campaign_migration.sql.
+//   2026.09.25.04 — Login reliability. (1) 'Forgot password?' on the login
+//                  screen (welcome emails already told agents to use it).
+//                  (2) Password-reset / 'Email Login' links now open 'choose a
+//                  new password' instead of silently signing in once; also
+//                  handles '#login#access_token' URLs and expired links.
+//                  (3) Clear sign-in error messages. (4) Correct password but
+//                  missing profile row -> explains instead of bouncing to the
+//                  login screen. (5) Interview auto-hire lowercases the email.
 //   2026.09.25.03 — Application form. (1) Top choices are built from live
 //                  active campaigns: the standard 3 first (only if they have
 //                  campaigns), then any NEW program as its own choice, named
@@ -2397,7 +2416,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.09.25.03';
+const BUILD_VERSION = '2026.09.25.05';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -2474,6 +2493,82 @@ const sb = window.supabase.createClient(
   window.CSI_SUPABASE_ANON_KEY,
   { auth: { persistSession: true, autoRefreshToken: true } }
 );
+
+// ─── Build 2026.09.25.04 — password-reset / "Email Login" links ───
+// Before: clicking the link signed the agent in but never asked for a new
+// password, so they still couldn't log in next time. Now the link opens the
+// "choose your password" screen. Also handles links whose URL ends up as
+// "#login#access_token=..." (the portal URL has its own #login), which
+// Supabase can't read on its own, and expired links (clear message).
+const _csiRawHash = window.location.hash || '';
+window._csiForcePw = false;
+window._csiLinkError = null;
+window._csiRecoveryMode = /type=recovery/.test(_csiRawHash);
+async function _csiHandleAuthLink(){
+  if(/error_description=/.test(_csiRawHash)){
+    const m = _csiRawHash.match(/error_description=([^&]*)/);
+    const why = m ? decodeURIComponent(m[1].replace(/\+/g, ' ')) : '';
+    window._csiLinkError = (/expired|invalid/i.test(why) ? 'That login link has expired or was already used.' : ('That login link didn\u2019t work' + (why ? ' (' + why + ')' : '') + '.'))
+      + ' Tap \u201cForgot password?\u201d below to get a new one.';
+    try { history.replaceState(null, '', '#login'); } catch(_){}
+    return;
+  }
+  if(!window._csiRecoveryMode) return;
+  try {
+    let { data: { session } } = await sb.auth.getSession();
+    if(!session){
+      const i = _csiRawHash.indexOf('access_token=');
+      if(i >= 0){
+        const q = new URLSearchParams(_csiRawHash.slice(i));
+        const at = q.get('access_token'), rt = q.get('refresh_token');
+        if(at && rt){ const r = await sb.auth.setSession({ access_token: at, refresh_token: rt }); session = r?.data?.session || null; }
+      }
+    }
+    if(session){
+      window._csiForcePw = true;
+      try { history.replaceState(null, '', '#backoffice'); } catch(_){}
+    } else {
+      window._csiLinkError = 'That login link has expired or was already used. Tap \u201cForgot password?\u201d below to get a new one.';
+      try { history.replaceState(null, '', '#login'); } catch(_){}
+    }
+  } catch(e){ console.warn('Auth link handling failed:', e); }
+}
+sb.auth.onAuthStateChange((event) => {
+  if(event !== 'PASSWORD_RECOVERY') return;
+  window._csiRecoveryMode = true;
+  window._csiForcePw = true;
+  if(!window._csiInitDone) return;   // page still loading: initAuth() handles it
+  // Recovery finished after the page already loaded: open the password screen now.
+  setTimeout(async () => {
+    try {
+      if(!currentProfile) await loadCurrentProfile();
+      if(currentProfile){ try { history.replaceState(null, '', '#backoffice'); } catch(_){} enterBackOffice(); }
+    } catch(_){}
+  }, 0);
+});
+
+// "Forgot password?" on the login screen. Always shows the same message so it
+// never reveals which emails have accounts.
+async function csiForgotPassword(){
+  const errBox = document.getElementById('login-error');
+  let email = (document.getElementById('login-email')?.value || '').trim().toLowerCase();
+  if(!email || !email.includes('@')){
+    email = ((await csiPrompt('Enter the email you log in with:', '')) || '').trim().toLowerCase();
+  }
+  if(!email || !email.includes('@')) return;
+  const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: window.location.origin + '/' });
+  if(errBox){
+    errBox.style.display = 'block';
+    if(error && /rate|security purposes|seconds/i.test(error.message || '')){
+      errBox.style.background = 'rgba(239,68,68,0.1)'; errBox.style.color = '#FCA5A5';
+      errBox.textContent = 'A reset email was just sent. Wait a minute, then try again.';
+    } else {
+      errBox.style.background = 'rgba(0,255,136,0.08)'; errBox.style.color = '#00FF88';
+      errBox.textContent = 'If ' + email + ' has an account, a link to set a new password is on its way. Check your inbox and spam folder. The link works once.';
+    }
+  }
+}
+window.csiForgotPassword = csiForgotPassword;
 
 // ─── Global state ───
 let currentUser = null;         // auth user
@@ -2751,13 +2846,30 @@ async function doLogin(e){
   const { data, error } = await sb.auth.signInWithPassword({ email, password });
   loading.style.display = 'none';
 
+  errBox.style.background = ''; errBox.style.color = '';
   if(error){
-    errBox.textContent = error.message || 'Sign-in failed. Please check your email and password.';
+    const m = error.message || '';
+    errBox.textContent =
+      /invalid login credentials/i.test(m) ? 'Email or password is incorrect. Check for typos, or tap \u201cForgot password?\u201d to set a new one.'
+      : /email not confirmed/i.test(m) ? 'This account hasn\u2019t been confirmed yet. Contact the office so they can activate it.'
+      : /rate|too many/i.test(m) ? 'Too many tries. Wait a minute, then try again.'
+      : /fetch|network/i.test(m) ? 'Can\u2019t reach the server. Check your internet connection and try again.'
+      : (m || 'Sign-in failed. Please check your email and password.');
     errBox.style.display = 'block';
     return;
   }
 
-  await loadCurrentProfile();
+  // Build 2026.09.25.04 — retry once (slow networks), then explain instead of
+  // silently bouncing back to the login screen.
+  let profOk = await loadCurrentProfile();
+  if(!profOk){ await new Promise(r => setTimeout(r, 700)); profOk = await loadCurrentProfile(); }
+  if(!profOk){
+    await sb.auth.signOut();
+    currentUser = null; currentProfile = null;
+    errBox.textContent = 'Your email and password are correct, but your account profile isn\u2019t set up yet. Contact the office \u2014 they can fix this in a minute.';
+    errBox.style.display = 'block';
+    return;
+  }
 
   // Block sign-in for deactivated or contract-ended accounts. The account
   // access itself was previously not gated by this — active/contract_ended_at
@@ -2851,6 +2963,7 @@ async function loadCurrentProfile(){
   // to go so enterBackOffice() opens Daily Check-In (now, or after login).
   const _wantCheckin = (window.location.hash || '').toLowerCase() === '#checkin';
   if(_wantCheckin) _queueCheckinLanding();
+  await _csiHandleAuthLink();   // Build 2026.09.25.04 — reset / login links
   const { data: { session } } = await sb.auth.getSession();
   if(session){
     // Phase 3.26: retry profile load once if it fails. On iOS Safari, when
@@ -2881,6 +2994,7 @@ async function loadCurrentProfile(){
       }
     }
   }
+  window._csiInitDone = true;
   // Hash-based routing for welcome email links + bookmarks (Phase 3.21):
   //   #login   → show the login page (used in welcome emails)
   //   #portal  → alias for #login
@@ -2890,7 +3004,11 @@ async function loadCurrentProfile(){
   // page instead of the marketing landing — much less confusing than
   // "where did my back office go?"
   const hash = (window.location.hash || '').toLowerCase();
-  if(hash === '#login' || hash === '#portal'){
+  if(window._csiLinkError){
+    showPage('login');
+    const eb = document.getElementById('login-error');
+    if(eb){ eb.textContent = window._csiLinkError; eb.style.display = 'block'; }
+  } else if(hash === '#login' || hash === '#portal'){
     if(session && currentProfile){
       // Already signed in — go to back office, don't make them log in again
       enterBackOffice();
@@ -2963,7 +3081,7 @@ function enterBackOffice(){
   }
 
   // If an admin set a temp password, force the user to change it before anything else
-  if(currentProfile.must_change_password){
+  if(currentProfile.must_change_password || window._csiForcePw){
     showPage('backoffice');
     setTimeout(() => openForcePasswordChangeModal(), 100);
     return;
@@ -3012,6 +3130,7 @@ function enterBackOffice(){
   roleBadge.style.letterSpacing = '1.5px';
 
   renderSidebar();
+  try { _csiShowPaperworkBanner(); } catch(_){}
 
   // Background: run reminder nudges (silent) if owner/admin and not in last 24h
   try { maybeAutoRunReminders(); } catch(_){}
@@ -8095,7 +8214,7 @@ function renderAgentModalUI(existing, editId, availablePrograms, isOwner, isAdmi
 
     <div class="form-group" style="background:rgba(255,200,0,0.05);border:1px solid rgba(255,200,0,0.25);border-radius:8px;padding:12px;">
       <label class="form-label" style="color:#FFC800;">⚡ Campaign — REQUIRED or this person is permanently stuck</label>
-      <select id="ag-campaign" class="form-input">
+      <select id="ag-campaign" class="form-input" onchange="_agSyncProgramsFromCampaigns()">
         <option value="">— No campaign (they will be blocked at login) —</option>
         ${(allCampaigns || []).filter(c => c.is_active !== false).map(c => {
           const prog = (allPrograms || []).find(p => p.id === c.program_id);
@@ -8103,6 +8222,17 @@ function renderAgentModalUI(existing, editId, availablePrograms, isOwner, isAdmi
         }).join('')}
       </select>
       <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:5px;line-height:1.5;">Checking a program above is NOT enough by itself — this person also needs a specific campaign inside that program, or they will land on a "No Campaigns Assigned" dead end no matter how their onboarding/documents are handled.</div>
+      <div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,200,0,0.18);">
+        <label class="form-label" style="color:#FFC800;">➕ Also works these campaigns (optional)</label>
+        <div style="display:flex;flex-direction:column;gap:6px;">
+          ${(allCampaigns || []).filter(c => c.is_active !== false).map(c => {
+            const prog = (allPrograms || []).find(p => p.id === c.program_id);
+            const on = Array.isArray(e.campaigns) && e.campaigns.includes(c.id);
+            return `<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:rgba(255,255,255,0.85);cursor:pointer;"><input type="checkbox" class="ag-camp-cb" value="${c.id}" data-program="${escapeHtml(c.program_id || '')}" ${on ? 'checked' : ''} onchange="_agSyncProgramsFromCampaigns()"/> ${c.icon || '📋'} ${escapeHtml(c.name)}${prog ? ' — ' + escapeHtml(prog.name) : ''}</label>`;
+          }).join('')}
+        </div>
+        <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:6px;line-height:1.5;">Checking a campaign also checks its program. When you save, any program that's new for this person sends them that program's onboarding paperwork automatically.</div>
+      </div>
     </div>
 
     <div class="form-group">
@@ -8277,7 +8407,16 @@ async function saveAgent(editId){
     } catch(e){ console.warn('Reporting-chain guard check failed (allowing save):', e); }
   }
 
+  // Build 2026.09.25.05 — extra campaigns, and every chosen campaign's program
+  const extraCampaigns = Array.from(document.querySelectorAll('#modal-box input.ag-camp-cb:checked')).map(c => c.value).filter(id => id && id !== campaign_id);
+  [campaign_id].concat(extraCampaigns).forEach(cid => {
+    const cc = (allCampaigns || []).find(c => c.id === cid);
+    if(cc && cc.program_id && !programs.includes(cc.program_id)) programs.push(cc.program_id);
+  });
+
   if(editId){
+    let _before = null;
+    try { ({ data: _before } = await sb.from('profiles').select('programs, onboarding_status').eq('id', editId).maybeSingle()); } catch(_){}
     const updateData = {
       full_name, phone: phone || null, role, programs, market_id, reports_to,
       phone_carrier, sms_opt_in, campaign_id,
@@ -8312,7 +8451,21 @@ async function saveAgent(editId){
         alert('⚠️ Saved, but unlocking their onboarding failed:\n\n' + bypassResult.error + '\n\nThey are likely STILL BLOCKED. This is a database permissions issue, not something wrong with your click — screenshot this and send it over.');
       }
     }
+    // Build 2026.09.25.05 — extra campaigns (own write: if the column isn't
+    // installed yet the rest of the save above still stands)
+    const { error: campsErr } = await sb.from('profiles').update({ campaigns: extraCampaigns }).eq('id', editId);
+    if(campsErr) console.warn('Extra campaigns not saved (run 2026_09_25h migration):', campsErr);
+    // Paperwork for programs that are new for this person
+    const oldProgs = (_before && Array.isArray(_before.programs)) ? _before.programs : [];
+    const newProgs = programs.filter(pid => !oldProgs.includes(pid));
+    let paperworkNote = '';
+    if(_before && newProgs.length){
+      msg.innerHTML = '<span style="color:rgba(255,255,255,0.6);">Saved. Sending onboarding paperwork for the new program…</span>';
+      paperworkNote = await _agSendPaperworkForNewPrograms(editId, newProgs, role, (_before.onboarding_status || '') === 'complete');
+    }
     closeAllModals();
+    if(paperworkNote) alert(paperworkNote);
+    if(campsErr && extraCampaigns.length) alert('Saved, but the extra campaigns could not be stored yet. Run 2026_09_25h_multi_campaign_migration.sql in Supabase, then save this profile again.');
     if(editId === currentProfile.id){ await loadCurrentProfile(); enterBackOffice(); return; }
     renderMainContent();
     return;
@@ -8368,6 +8521,10 @@ async function saveAgent(editId){
     if(newUserId && campaign_id){
       const { error: campErr } = await sb.from('profiles').update({ campaign_id }).eq('id', newUserId);
       if(campErr) console.warn('Failed to set campaign_id at creation:', campErr);
+    }
+    if(newUserId && extraCampaigns.length){
+      const { error: xErr } = await sb.from('profiles').update({ campaigns: extraCampaigns }).eq('id', newUserId);
+      if(xErr) console.warn('Extra campaigns not saved at creation (run 2026_09_25h migration):', xErr);
     }
 
     // "Signed elsewhere" checkbox, office-only — set right at creation so
@@ -8425,6 +8582,41 @@ async function saveAgent(editId){
   }
 }
 
+// Build 2026.09.25.05 — campaigns ↔ programs on the agent form
+function _agSyncProgramsFromCampaigns(){
+  const box = document.getElementById('modal-box'); if(!box) return;
+  const progIds = new Set();
+  const main = document.getElementById('ag-campaign')?.value;
+  const mainC = (allCampaigns || []).find(c => c.id === main);
+  if(mainC && mainC.program_id) progIds.add(mainC.program_id);
+  box.querySelectorAll('input.ag-camp-cb:checked').forEach(cb => { if(cb.dataset.program) progIds.add(cb.dataset.program); });
+  let changed = false;
+  box.querySelectorAll('input.ag-prog-cb').forEach(cb => { if(progIds.has(cb.value) && !cb.checked){ cb.checked = true; changed = true; } });
+  if(changed){ try { refreshMarketDropdown(); refreshReportsToDropdown(); } catch(_){} }
+}
+window._agSyncProgramsFromCampaigns = _agSyncProgramsFromCampaigns;
+
+// After programs/campaigns are saved: send paperwork for any program that is
+// new for this person. Returns a short summary for the office.
+async function _agSendPaperworkForNewPrograms(userId, newPrograms, role, keepAccess){
+  if(!newPrograms || newPrograms.length === 0) return '';
+  let packets = [];
+  try { packets = await autoAssignOnboardingPackets(userId, newPrograms, role, { keepAccess }); } catch(_){}
+  try { await autoAssignContracts(userId, newPrograms, role); } catch(_){}
+  const covered = new Set((packets || []).map(p => p.program_id));
+  let alreadyHad = new Set();
+  try {
+    const { data: ao } = await sb.from('agent_onboarding').select('packet_snapshot').eq('user_id', userId);
+    (ao || []).forEach(r => { if(r.packet_snapshot && r.packet_snapshot.program_id) alreadyHad.add(r.packet_snapshot.program_id); });
+  } catch(_){}
+  const name = pid => ((allPrograms || []).find(p => p.id === pid) || {}).name || pid;
+  const missing = newPrograms.filter(pid => !covered.has(pid) && !alreadyHad.has(pid));
+  let out = '';
+  if(packets && packets.length) out += '✓ Onboarding paperwork sent: ' + packets.map(p => p.name).join(', ') + (keepAccess ? ' (their back office stays open while they finish it).' : '.');
+  if(missing.length) out += (out ? '\n\n' : '') + '⚠️ No active onboarding packet exists for: ' + missing.map(name).join(', ') + '. Create one under Onboarding Packets, then use Send Onboarding Packet on their profile.';
+  return out;
+}
+
 // Phase 3.36 — Auto-assign onboarding packet(s) when a new agent is born.
 // Mirrors autoAssignContracts. Pulls every active onboarding_packet whose
 // program_id matches one of the agent's assigned programs, then creates
@@ -8435,8 +8627,13 @@ async function saveAgent(editId){
 // SAFE TO RE-RUN: skips any packet the agent already has assigned (any
 // status). Won't duplicate. Sends ONE notification + email per agent
 // (not per packet) to avoid spamming new hires.
-async function autoAssignOnboardingPackets(userId, programs, userRole){
-  if(!userId || !programs || programs.length === 0) return;
+async function autoAssignOnboardingPackets(userId, programs, userRole, opts){
+  // Build 2026.09.25.05 — opts.keepAccess: an already-active agent who is added
+  // to another program gets that program's paperwork WITHOUT being locked out
+  // of their back office (they see a "New paperwork" banner instead).
+  // Returns the packets it assigned (callers that ignore it are unaffected).
+  opts = opts || {};
+  if(!userId || !programs || programs.length === 0) return [];
 
   try {
     // Pull every active packet for the agent's programs
@@ -8444,7 +8641,7 @@ async function autoAssignOnboardingPackets(userId, programs, userRole){
       .select('*')
       .eq('active', true)
       .in('program_id', programs);
-    if(!packets || packets.length === 0) return;
+    if(!packets || packets.length === 0) return [];
 
     // What does the agent already have? (idempotent guard)
     const { data: existing } = await sb.from('agent_onboarding')
@@ -8492,12 +8689,15 @@ async function autoAssignOnboardingPackets(userId, programs, userRole){
       newlyAssigned.push(pk);
     }
 
-    if(newlyAssigned.length === 0) return;
+    if(newlyAssigned.length === 0) return [];
 
     // Mark profile so the lockout/onboarding gate triggers on first login
-    try {
-      await sb.from('profiles').update({ onboarding_status: 'not_started' }).eq('id', userId);
-    } catch(_){}
+    // (skipped for already-active agents getting an extra program's paperwork)
+    if(!opts.keepAccess){
+      try {
+        await sb.from('profiles').update({ onboarding_status: 'not_started' }).eq('id', userId);
+      } catch(_){}
+    }
 
     // One notification + email per agent, listing every packet
     try {
@@ -8522,8 +8722,10 @@ async function autoAssignOnboardingPackets(userId, programs, userRole){
         } catch(_){}
       }
     } catch(_){}
+    return newlyAssigned;
   } catch(e){
     console.warn('autoAssignOnboardingPackets failed:', e);
+    return [];
   }
 }
 
@@ -8571,8 +8773,18 @@ async function autoAssignContracts(userId, programs, userRole){
         });
       });
 
-      if(rows.length > 0){
-        const { error } = await sb.from('contract_assignments').insert(rows);
+      // Build 2026.09.25.05 — skip contracts the person already has pending or
+      // signed (matters when a program is added to an existing agent).
+      let freshRows = rows;
+      try {
+        const { data: have } = await sb.from('contract_assignments')
+          .select('template_id').eq('user_id', userId).in('status', ['pending', 'signed']);
+        const haveIds = new Set((have || []).map(h => h.template_id));
+        freshRows = rows.filter(r => !haveIds.has(r.template_id));
+      } catch(_){}
+      if(rows.length > 0 && freshRows.length === 0) return;   // already has them all
+      if(freshRows.length > 0){
+        const { error } = await sb.from('contract_assignments').insert(freshRows);
         if(error) console.warn('Package auto-assign insert failed:', error);
         else return;  // success — done
       }
@@ -9295,7 +9507,7 @@ function openForcePasswordChangeModal(){
   document.getElementById('modal-box').innerHTML = `
     <h2 style="font-family:'Bebas Neue',sans-serif;font-size:28px;color:#fff;margin-bottom:6px;letter-spacing:1px;">🔑 Set Your Own Password</h2>
     <div style="background:rgba(255,193,7,0.08);border:1px solid rgba(255,193,7,0.25);border-radius:10px;padding:14px;margin-bottom:18px;font-size:13px;color:rgba(255,255,255,0.8);line-height:1.6;">
-      Your password was set by an administrator. For security, please choose a new password only you know before continuing.
+      ${window._csiForcePw && !currentProfile?.must_change_password ? 'Choose a new password for your account. You\u2019ll use it with your email every time you log in.' : 'Your password was set by an administrator. For security, please choose a new password only you know before continuing.'}
     </div>
     <div class="form-group"><label class="form-label">New Password *</label><input type="password" id="fpc-new" class="form-input" autocomplete="new-password"/></div>
     <div class="form-group"><label class="form-label">Confirm Password *</label><input type="password" id="fpc-confirm" class="form-input" autocomplete="new-password"/></div>
@@ -9323,6 +9535,7 @@ async function saveForcedPasswordChange(){
   // Clear the flag
   await sb.from('profiles').update({ must_change_password: false }).eq('id', currentProfile.id);
   currentProfile.must_change_password = false;
+  window._csiForcePw = false; window._csiRecoveryMode = false;
 
   msg.innerHTML = '<span style="color:#00FF88;">✓ Password updated. Loading your back office…</span>';
   setTimeout(() => {
@@ -15231,7 +15444,7 @@ async function submitInterviewResponse(interviewId){
 // Mirrors what submitInviteCandidate does in the manual flow.
 async function _autoCreateCandidateFromInterview(iv){
   const fullName = iv.candidate_first_name + ' ' + iv.candidate_last_name;
-  const email = iv.candidate_email;
+  const email = (iv.candidate_email || '').trim().toLowerCase();   // logins are always lowercase
   if(!email){ return { error: 'No candidate email on the interview record' }; }
   // Generate a memorable temp password
   const words = ['retail','solar','blue','spark','ridge','grove','cedar','river','horizon','quartz','silver','flame','coast','ember','quick','bright','cobalt','reliant','citrus'];
@@ -24087,6 +24300,24 @@ async function checkAndShowOnboardingLockout(){
     // Hide sidebar to prevent navigation away
     const sidebar = document.getElementById('bo-sidebar');
     if(sidebar) sidebar.style.display = 'none';
+    // Build 2026.09.25.05 — tell the office right away (once per day per agent)
+    try {
+      const k = 'csi_setup_alert_' + currentProfile.id + '_' + new Date().toDateString();
+      if(!localStorage.getItem(k)){
+        localStorage.setItem(k, '1');
+        const { data: recips } = await sb.rpc('get_application_notify_emails');
+        const progNames = (currentProfile.programs || []).map(pid => ((allPrograms || []).find(p => p.id === pid) || {}).name || pid).join(', ') || 'none';
+        for(const r of (recips || [])){
+          sendEmailViaFunction('urgent_custom', r.email, {
+            full_name: r.full_name,
+            subject_line: '⚠️ ' + (currentProfile.full_name || currentProfile.email) + ' is stuck: no onboarding packet',
+            message: (currentProfile.full_name || currentProfile.email) + ' just logged in and can\u2019t start onboarding because no active onboarding packet exists for their program(s): ' + progNames + '.',
+            action_required: 'Create/activate an onboarding packet for that program, or use Send Onboarding Packet on their profile.',
+            sent_by: 'Circle Solutions Onboarding'
+          }).catch(() => {});
+        }
+      }
+    } catch(_){}
     return;
   }
 
@@ -24107,7 +24338,9 @@ async function checkAndShowOnboardingLockout(){
   const healedPacketIds = [];
   for(const pk of packets){
     const { data: steps } = await sb.from('agent_onboarding_steps').select('status').eq('agent_onboarding_id', pk.id);
-    const allDone = (steps || []).length > 0 && (steps || []).every(s => s.status === 'complete');
+    // Build 2026.09.25.05 — a packet with NO steps has nothing to do; before,
+    // it stayed 'in progress' forever and opening it broke the wizard.
+    const allDone = (steps || []).every(s => s.status === 'complete');
     if(allDone){
       await sb.from('agent_onboarding').update({ status:'complete', completed_at: new Date().toISOString() }).eq('id', pk.id);
       healedPacketIds.push(pk.id);
@@ -24179,6 +24412,29 @@ async function checkAndShowOnboardingLockout(){
     </div>`;
 }
 
+
+// Build 2026.09.25.05 — active agents added to another program see their new
+// paperwork here (back office stays open). Lives outside #bo-content so page
+// navigation doesn't erase it.
+async function _csiShowPaperworkBanner(){
+  const old = document.getElementById('csi-paperwork-banner'); if(old) old.remove();
+  if(!currentProfile || currentProfile.onboarding_status !== 'complete') return;
+  const { data: pending } = await sb.from('agent_onboarding').select('id, packet_snapshot')
+    .eq('user_id', currentProfile.id).eq('status', 'in_progress');
+  if(!pending || pending.length === 0) return;
+  const content = document.getElementById('bo-content'); if(!content || !content.parentNode) return;
+  const el = document.createElement('div');
+  el.id = 'csi-paperwork-banner';
+  el.setAttribute('role', 'status');
+  el.style.cssText = 'background:rgba(255,200,0,0.08);border:1px solid rgba(255,200,0,0.4);border-radius:14px;padding:14px 18px;margin-bottom:18px;display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;';
+  el.innerHTML = '<div style="color:#FFC800;font-weight:700;font-size:14px;">📝 New paperwork to finish: ' +
+    pending.map(pk => escapeHtml((pk.packet_snapshot && pk.packet_snapshot.name) || 'Onboarding packet')).join(', ') + '</div>' +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;">' + pending.map(pk =>
+      '<button class="bo-btn bo-btn-primary" style="padding:9px 16px;" onclick="openOnboardingWizard(\'' + pk.id + '\')">' +
+      (pending.length > 1 ? 'Start ' + escapeHtml((pk.packet_snapshot && pk.packet_snapshot.name) || '') : 'Start →') + '</button>').join('') + '</div>';
+  content.parentNode.insertBefore(el, content);
+}
+window._csiShowPaperworkBanner = _csiShowPaperworkBanner;
 
 // ─────────────────────────────────────────────────────────────────
 // 2. ONBOARDING WIZARD — agent fills out one step at a time
@@ -24541,8 +24797,9 @@ async function wizardSubmit(stepId, stepType){
         return;
       }
     } else {
-      // Mark profile as in_progress
-      if(currentProfile.onboarding_status !== 'in_progress'){
+      // Mark profile as in_progress (never downgrades an already-active agent
+      // who is doing an extra program's paperwork — Build 2026.09.25.05)
+      if(currentProfile.onboarding_status !== 'in_progress' && currentProfile.onboarding_status !== 'complete'){
         await sb.from('profiles').update({
           onboarding_status: 'in_progress',
           onboarding_started_at: new Date().toISOString()
@@ -24559,7 +24816,8 @@ async function wizardSubmit(stepId, stepType){
         // All done — close wizard, refresh lockout view
         closeAllModals();
         document.getElementById('modal-box').style.maxWidth = '560px';
-        checkAndShowOnboardingLockout();
+        if(currentProfile.onboarding_status === 'complete'){ renderMainContent(); try { _csiShowPaperworkBanner(); } catch(_){} }
+        else checkAndShowOnboardingLockout();
       } else {
         _wizardState.currentIndex = nextIdx;
         renderWizardStep();
