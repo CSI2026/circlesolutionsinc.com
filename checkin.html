@@ -11,7 +11,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <!--
-  Circle Solutions — standalone check-in (build 2026.09.25.02)
+  Circle Solutions — standalone check-in (build 2026.09.25.03: stale-shift + auto check-out confirmation fix)
   No login. The private key in the link (?k=...) identifies the agent; every
   rule (store, fence, photos, walk-off lockout, weekly cap, account lock) is
   enforced server-side by the hours_link_* functions in
@@ -118,13 +118,16 @@ try {
   else KEY = localStorage.getItem('csi_hl_key') || '';
 } catch(_){}
 
-var S = { status:null, photos:{ kiosk:null, selfie:null }, busy:false, pollId:null, timerId:null };
+var S = { status:null, photos:{ kiosk:null, selfie:null }, busy:false, pollId:null, timerId:null, autoOutFailed:{} };
 
 function $(id){ return document.getElementById(id); }
 function esc(s){ return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]; }); }
 function ft(m){ return (m == null || isNaN(m)) ? '—' : Math.round(m * 3.28084).toLocaleString() + ' ft'; }
 function hms(ms){ ms = Math.max(0, ms); var s = Math.floor(ms/1000), h = Math.floor(s/3600), m = Math.floor(s%3600/60), x = s%60; return h + ':' + String(m).padStart(2,'0') + ':' + String(x).padStart(2,'0'); }
-function timeStr(d){ return new Date(d).toLocaleTimeString([], { hour:'numeric', minute:'2-digit' }); }
+function timeStr(d){
+  var x = new Date(d), t = x.toLocaleTimeString([], { hour:'numeric', minute:'2-digit' });
+  return x.toDateString() === new Date().toDateString() ? t : x.toLocaleDateString([], { month:'short', day:'numeric' }) + ', ' + t;
+}
 function setMsg(kind, html){ var m = $('msg'); if(!m) return; m.className = 'msg ' + (kind || ''); m.innerHTML = html || ''; }
 
 var ERR = {
@@ -152,7 +155,9 @@ async function loadStatus(){
     if(!st || !st.ok){ return renderFatal('Can\u2019t check in', ERR[(st && st.error)] || 'Something went wrong.'); }
     S.status = st;
     render();
-    if(st.open_shift) startMonitor(); else stopMonitor();
+    var os = st.open_shift;
+    var stale = os && (Date.now() - new Date(os.checked_in_at).getTime() > SHIFT_CAP_MS + 10 * 60000);
+    if(os && !stale && !S.autoOutFailed[os.audit_id]) startMonitor(); else stopMonitor();
   } catch(e){
     renderFatal('No connection', 'Couldn\u2019t reach the server. Check your signal and reload this page.');
   }
@@ -432,9 +437,17 @@ async function tick(){
 
 async function autoOut(reason, note){
   var open = S.status && S.status.open_shift; if(!open) return;
+  if(S.autoOutFailed[open.audit_id]) return;       // already failed once for this shift: don't loop
   stopMonitor();
-  var r = await sb.rpc('hours_link_auto_out', { p_token: KEY, p_check_in_audit_id: open.audit_id, p_reason: reason, p_note: note });
+  var r = null;
+  try { r = await sb.rpc('hours_link_auto_out', { p_token: KEY, p_check_in_audit_id: open.audit_id, p_reason: reason, p_note: note }); } catch(_){}
   var d = r && r.data;
+  if(!d || !d.ok || !(d.closed || d.already_closed)){
+    S.autoOutFailed[open.audit_id] = true;
+    await loadStatus();
+    setMsg('bad', '<b>Automatic check-out didn\u2019t go through.</b> Take a kiosk photo and tap Check out, or contact the office.');
+    return;
+  }
   if(d && d.closed){
     var list = (d.recipients || []).slice();
     if(d.agent_email) list.push({ email: d.agent_email, full_name: d.agent_name, self: true });
