@@ -2269,6 +2269,16 @@ window.addEventListener("DOMContentLoaded",function(){
 // latest build. Scheme: YYYY.MM.DD.N  (N = the Nth build that day).
 // ───────────────────────────────────────────────────────────────
 // BUILD LOG (newest first)
+//   2026.09.25.01 — Rebekah hours check-in (additive only). (1) Direct mobile
+//                  link: circlesolutionsinc.com/#checkin opens straight to Daily
+//                  Check-In (after login if signed out). (2) New profile flag
+//                  hours_only_agent: exempt from the zero-sales auto-lock and the
+//                  "what happened yesterday" sales gate; any stores directly
+//                  assigned in agent_stores are ADDED to her check-in store list
+//                  (her manager's stores still show). Photo + selfie, 100m store
+//                  fence, 15-min walk-off auto check-out + email, 8h cap, and
+//                  2-walk-off lockout all unchanged. Needs
+//                  2026_09_25_rebekah_checkin_migration.sql.
 //   2026.06.26.17 — Reporting-chain protection. (1) Team page (owner/admin)
 //                  now runs an automatic Team Structure Check: flags anyone
 //                  with no manager, reporting to a deactivated/deleted person,
@@ -2373,7 +2383,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.07.21.01';
+const BUILD_VERSION = '2026.09.25.01';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -2476,6 +2486,20 @@ function _persistNavState(){
     }));
   } catch(_){}
 }
+// Build 2026.09.25.01 — #checkin direct link. Writes the Daily Check-In
+// screen into the same nav-state slot _restoreNavState() already reads, so
+// enterBackOffice() lands there through its existing restore path (all
+// password / onboarding / account-lock gates still run first).
+function _queueCheckinLanding(){
+  try {
+    sessionStorage.setItem('csi_nav', JSON.stringify({
+      activeAdminView: 'photo-audit-checkin', activeProgramId: null,
+      activeCampaignId: null, activeSubView: (typeof activeSubView !== 'undefined' ? activeSubView : null)
+    }));
+  } catch(_){}
+}
+window._queueCheckinLanding = _queueCheckinLanding;
+
 function _restoreNavState(){
   try {
     const raw = sessionStorage.getItem('csi_nav');
@@ -2774,6 +2798,10 @@ async function loadCurrentProfile(){
 
 // On page load: check if already signed in
 (async function initAuth(){
+  // Build 2026.09.25.01 — #checkin direct link: remember where they wanted
+  // to go so enterBackOffice() opens Daily Check-In (now, or after login).
+  const _wantCheckin = (window.location.hash || '').toLowerCase() === '#checkin';
+  if(_wantCheckin) _queueCheckinLanding();
   const { data: { session } } = await sb.auth.getSession();
   if(session){
     // Phase 3.26: retry profile load once if it fails. On iOS Safari, when
@@ -2799,7 +2827,7 @@ async function loadCurrentProfile(){
     }
     if(ok){
       // If they were on a portal page refresh, bring them back; otherwise stay on whatever page
-      if(window.location.hash === '#backoffice' || document.getElementById('backoffice')?.classList.contains('active')){
+      if(_wantCheckin || window.location.hash === '#backoffice' || document.getElementById('backoffice')?.classList.contains('active')){
         enterBackOffice();
       }
     }
@@ -2822,6 +2850,10 @@ async function loadCurrentProfile(){
     }
   } else if(hash === '#apply'){
     showPage('apply-page');
+  } else if(hash === '#checkin'){
+    // Not signed in (signed-in users were already sent to the back office
+    // above). Show login; enterBackOffice() opens Daily Check-In after.
+    if(!(session && currentProfile)) showPage('login');
   }
   // Listen for hash changes too so navigation back/forward works
   window.addEventListener('hashchange', () => {
@@ -2830,6 +2862,9 @@ async function loadCurrentProfile(){
       if(currentProfile){ enterBackOffice(); } else { showPage('login'); }
     } else if(h === '#apply'){
       showPage('apply-page');
+    } else if(h === '#checkin'){
+      _queueCheckinLanding();
+      if(currentProfile){ enterBackOffice(); } else { showPage('login'); }
     } else if(h === '' || h === '#'){
       // Phase 3.27 — empty hash means either Android back-button stripped it
       // or some stray nav cleared it. Signed-in users always bounce back to
@@ -9841,6 +9876,13 @@ async function evaluateAgentForAutoLock(userId, daysToCheck){
   if(!prof) return null;
   if(prof.account_locked) return { alreadyLocked: true };
   if(['owner','admin'].includes(prof.role)) return null;
+  // Build 2026.09.25.01 — hours-only agents are never auto-locked for zero
+  // sales. Read separately so a DB without the new column keeps the normal
+  // auto-lock behavior for everyone (error -> fall through).
+  try {
+    const { data: ho, error: hoErr } = await sb.from('profiles').select('hours_only_agent').eq('id', userId).maybeSingle();
+    if(!hoErr && ho && ho.hours_only_agent === true) return null;
+  } catch(_){}
 
   const threshold = await getAgentZeroSalesThreshold(userId);
   let zeroDaysWithHours = 0;
@@ -16515,6 +16557,9 @@ let _paSelfieBlob = null;  // selfie photo (new — check-in only)
 // the one thing that matters: they cannot check in for a new shift without
 // clearing this first.
 async function _yesterdayGateStatus(userId){
+  // Build 2026.09.25.01 — hours-only agents (e.g. Rebekah) are not asked for
+  // yesterday's sales count before checking in.
+  if(currentProfile && currentProfile.hours_only_agent === true) return { required: false };
   if(!(currentProfile.programs || []).includes('retail')) return { required: false };
   const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1);
   const yStr = yesterday.toISOString().slice(0,10);
@@ -16648,6 +16693,18 @@ async function renderPhotoAuditCheckin(el){
       const { data: ownStores } = await sb.from('stores').select('*').in('id', ownIds).eq('active', true).order('name');
       stores = ownStores || [];
     }
+  }
+
+  // Build 2026.09.25.01 — hours-only agents: ADD their direct agent_stores
+  // assignments (e.g. Walmart #3406) to whatever their manager's stores gave
+  // them. Nothing is removed; duplicates are skipped.
+  if(stores.length > 0 && currentProfile.hours_only_agent === true){
+    try {
+      const { data: directRows } = await sb.from('agent_stores').select('store_id, stores(*)').eq('user_id', currentProfile.id);
+      const have = new Set(stores.map(x => x.id));
+      (directRows || []).map(a => a.stores).filter(x => x && x.active && !have.has(x.id)).forEach(x => { stores.push(x); have.add(x.id); });
+      stores.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    } catch(e){ console.warn('Direct store merge failed (manager stores still shown):', e); }
   }
 
   // Fallback to legacy agent_stores direct assignments if no stores found via MM
