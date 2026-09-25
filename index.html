@@ -2269,6 +2269,14 @@ window.addEventListener("DOMContentLoaded",function(){
 // latest build. Scheme: YYYY.MM.DD.N  (N = the Nth build that day).
 // ───────────────────────────────────────────────────────────────
 // BUILD LOG (newest first)
+//   2026.09.25.03 — Application form. (1) Top choices are built from live
+//                  active campaigns: the standard 3 first (only if they have
+//                  campaigns), then any NEW program as its own choice, named
+//                  from the programs table. (2) Submit locks after one tap
+//                  (was saving duplicates 4x + 4 email sets). (3) If the save
+//                  fails, the applicant still sees success and the office
+//                  emails are flagged 'DID NOT SAVE — add manually' instead of
+//                  losing the applicant. No database changes.
 //   2026.09.25.02 — Standalone no-login check-in page: checkin.html?k=<private
 //                  key> (separate file, same tables). Live camera only, server-
 //                  side fence/walk-off/8h/40h/2-walk-off rules via hours_link_*
@@ -2389,7 +2397,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.09.25.02';
+const BUILD_VERSION = '2026.09.25.03';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -2615,8 +2623,42 @@ function escapePublic(s){
 // ── Apply-page program cascade: model → campaign → (filtered) manager ──
 const APP_MODEL_FALLBACK = { retail:'inside_retail', b2b:'b2b', fiber:'d2d' };
 const APP_MODEL_LABELS   = { inside_retail:'Inside Retail Sales', b2b:'Business-to-Business', d2d:'Door-to-Door' };
+const APP_MODEL_ORDER    = ['inside_retail', 'b2b', 'd2d'];
+// Build 2026.09.25.03 — a campaign under a NEW program (not retail/b2b/fiber)
+// with no category set shows under its own program as a new top-level choice,
+// so programs appear on the application as soon as you add them.
 function _appCampaignModel(c){
-  return c.sales_model || APP_MODEL_FALLBACK[c.program_id] || null;
+  return c.sales_model || APP_MODEL_FALLBACK[c.program_id] || (c.program_id ? 'program:' + c.program_id : null);
+}
+let _appProgramNames = null;
+async function _appLoadProgramNames(){
+  if(_appProgramNames) return _appProgramNames;
+  _appProgramNames = {};
+  try {
+    const src = (typeof allPrograms !== 'undefined' && allPrograms && allPrograms.length) ? allPrograms
+      : ((await sb.from('programs').select('id,name,icon')).data || []);
+    src.forEach(p => { if(p && p.id) _appProgramNames[p.id] = ((p.icon ? p.icon + ' ' : '') + (p.name || p.id)).trim(); });
+  } catch(_){}
+  return _appProgramNames;
+}
+function _appModelLabel(model, names){
+  if(APP_MODEL_LABELS[model]) return APP_MODEL_LABELS[model];
+  const pid = String(model).replace(/^program:/, '');
+  return (names && names[pid]) || pid.replace(/[_-]+/g, ' ').replace(/\b\w/g, ch => ch.toUpperCase());
+}
+// Top-level choices = only categories that actually have active campaigns
+// (the 3 standard ones first, then any new programs A→Z).
+async function appRenderModelOptions(){
+  const sel = document.getElementById('app-model'); if(!sel) return;
+  const camps = await _appLoadCampaigns();
+  const names = await _appLoadProgramNames();
+  const present = new Set(camps.map(_appCampaignModel).filter(Boolean));
+  const extra = [...present].filter(m => !APP_MODEL_ORDER.includes(m))
+    .sort((a, b) => _appModelLabel(a, names).localeCompare(_appModelLabel(b, names)));
+  const order = APP_MODEL_ORDER.filter(m => present.has(m)).concat(extra);
+  if(order.length === 0) return;   // DB unreachable: keep the built-in 3 so the form still works
+  sel.innerHTML = '<option value="">Select...</option>' + order.map(m =>
+    '<option value="' + escapePublic(m) + '">' + escapePublic(_appModelLabel(m, names)) + '</option>').join('');
 }
 let _appCampaignsCache = null;
 async function _appLoadCampaigns(){
@@ -2636,6 +2678,7 @@ async function _appLoadCampaigns(){
 }
 async function appInitProgramCascade(){
   await _appLoadCampaigns();
+  try { await appRenderModelOptions(); } catch(e){ console.warn('Apply categories load failed (built-in list kept):', e); }
   const model = document.getElementById('app-model'); if(model) model.value = '';
   const cw = document.getElementById('app-campaign-wrap'); if(cw) cw.style.display = 'none';
   const mw = document.getElementById('app-manager-wrap'); if(mw) mw.style.display = 'none';
@@ -21491,12 +21534,12 @@ async function openCampaignEditor(campaignId, programId){
     <div class="form-group">
       <label class="form-label">Application category (where it shows on the apply form)</label>
       <select id="ce-model" class="form-input" style="background:#1a1a1a;">
-        <option value="" ${!c.sales_model ? 'selected' : ''}>— Not shown on application —</option>
+        <option value="" ${!c.sales_model ? 'selected' : ''}>${['retail','b2b','fiber'].includes(programId) ? '— Standard for this program —' : escapeHtml((program.icon ? program.icon + ' ' : '') + program.name) + ' — its own choice on the application'}</option>
         <option value="inside_retail" ${c.sales_model === 'inside_retail' ? 'selected' : ''}>Inside Retail Sales</option>
         <option value="b2b" ${c.sales_model === 'b2b' ? 'selected' : ''}>Business-to-Business</option>
         <option value="d2d" ${c.sales_model === 'd2d' ? 'selected' : ''}>Door-to-Door</option>
       </select>
-      <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">Which of the 3 big options an applicant picks to see this campaign. Leave blank to hide it from the public application.</div>
+      <div style="font-size:11px;color:rgba(255,255,255,0.4);margin-top:4px;">Which top choice an applicant picks to see this campaign. Campaigns in a new program show under that program's own choice automatically. To take a campaign off the application, retire it.</div>
     </div>
 
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
@@ -22218,7 +22261,11 @@ function closeAllModals(){ document.getElementById('modal-backdrop').style.displ
 const CSI_NOTIFY_EMAIL = 'circlesolutionstx@gmail.com';
 const CSI_NOTIFY_PHONE = '4695006575';
 
+let _appSubmitting = false;
 async function submitApplication(){
+  // Build 2026.09.25.03 — one submission per tap (double-taps were saving the
+  // same application 4x and sending 4 sets of emails).
+  if(_appSubmitting) return;
   const get = id => (document.getElementById(id)?.value || '').trim();
   const fname = get('app-fname');
   const lname = get('app-lname');
@@ -22250,20 +22297,34 @@ async function submitApplication(){
     err.style.display='block'; window.scrollTo({top:0, behavior:'smooth'}); return;
   }
   err.style.display='none';
+  _appSubmitting = true;
+  const submitBtn = document.querySelector('#app-form-wrap button[onclick="submitApplication()"]');
+  const submitLabel = submitBtn ? submitBtn.textContent : '';
+  if(submitBtn){ submitBtn.disabled = true; submitBtn.style.opacity = '0.6'; submitBtn.textContent = 'Submitting…'; }
 
-  const MODEL_LABELS = { inside_retail:'Inside Retail Sales', b2b:'Business-to-Business', d2d:'Door-to-Door' };
+  const modelSel = document.getElementById('app-model');
+  const modelLabel = (modelSel && modelSel.selectedIndex > 0) ? modelSel.options[modelSel.selectedIndex].text : model;
   const appData = {
     submitted: new Date().toLocaleString(),
     fname, lname, phone, email, city, state,
-    program: (MODEL_LABELS[model] || model) + (campaignName ? ' · ' + campaignName : ''),
+    program: modelLabel + (campaignName ? ' · ' + campaignName : ''),
     sales_model: model, campaign_id: campaignId, campaign_name: campaignName,
     type, start, hours, days, exp, industries, d2d, income, mgmt, rejection, motivate, source, why,
     preferred_manager_id: preferredManagerId
   };
 
   // Save to Supabase
-  const { error: saveErr } = await sb.from('applications').insert({ data: appData });
-  if(saveErr){ console.error('Application save error:', saveErr); }
+  let saveErr = null;
+  try { ({ error: saveErr } = await sb.from('applications').insert({ data: appData })); }
+  catch(e){ saveErr = e; }
+  if(saveErr){
+    // Never lose an applicant silently: the emails still go out, flagged so
+    // the office knows to add them to the back office by hand.
+    console.error('Application save error:', saveErr);
+    appData.why = '⚠️ THIS APPLICATION DID NOT SAVE TO THE BACK OFFICE — add it manually.\n' + (appData.why || '');
+  }
+  _appSubmitting = false;
+  if(submitBtn){ submitBtn.disabled = false; submitBtn.style.opacity = ''; submitBtn.textContent = submitLabel; }
 
   document.getElementById('app-form-wrap').style.display = 'none';
   document.getElementById('app-success').style.display = 'block';
