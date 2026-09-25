@@ -2269,6 +2269,12 @@ window.addEventListener("DOMContentLoaded",function(){
 // latest build. Scheme: YYYY.MM.DD.N  (N = the Nth build that day).
 // ───────────────────────────────────────────────────────────────
 // BUILD LOG (newest first)
+//   2026.09.25.02 — Standalone no-login check-in page: checkin.html?k=<private
+//                  key> (separate file, same tables). Live camera only, server-
+//                  side fence/walk-off/8h/40h/2-walk-off rules via hours_link_*
+//                  functions. Back office: hours-only agents skip the server
+//                  lock_agent_for_no_sales call on check-in. Needs
+//                  2026_09_25b_hours_link_migration.sql.
 //   2026.09.25.01 — Rebekah hours check-in (additive only). (1) Direct mobile
 //                  link: circlesolutionsinc.com/#checkin opens straight to Daily
 //                  Check-In (after login if signed out). (2) New profile flag
@@ -2383,7 +2389,7 @@ window.addEventListener("DOMContentLoaded",function(){
 //   2026.06.26.1 — Geofence rebuild: whole-store footprint fence, 15-min
 //                  walk-off, two-walk-off lockout, H:M:S time, build badge.
 // ═══════════════════════════════════════════════════════════════
-const BUILD_VERSION = '2026.09.25.01';
+const BUILD_VERSION = '2026.09.25.02';
 window.BUILD_VERSION = BUILD_VERSION;
 
 // ═══════════════════════════════════════════════════════════════
@@ -17539,7 +17545,9 @@ async function submitPhotoAudit(){
     // Phase 3.28: Check for the 2-consecutive-days-with-zero-sales trigger
     // on EVERY check-in (firing on check-out wouldn't make sense — sales
     // happen during the shift, so we evaluate as the shift starts).
-    if(auditType === 'check_in'){
+    // Build 2026.09.25.02 — hours-only agents (Rebekah) are never sent to the
+    // server-side zero-sales lock.
+    if(auditType === 'check_in' && currentProfile.hours_only_agent !== true){
       try {
         const { data: alertId, error: lockErr } = await sb.rpc('lock_agent_for_no_sales', { p_agent_id: currentProfile.id });
         if(!lockErr && alertId){
